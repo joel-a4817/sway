@@ -94,9 +94,9 @@ bindsym --no-repeat Mod1+b exec bambu-studio
 
 bindsym --no-repeat mod5+p exec firefox --new-window 'http://localhost:631'
 bindsym --no-repeat Mod5+w exec VBoxManage startvm "w11" --type gui
-bindsym --no-repeat Mod5+l exec prismlauncher --launch "1.21.9(1)"
-bindsym --no-repeat Mod5+h exec prismlauncher --launch "1.21.4"
-bindsym --no-repeat Mod5+b exec prismlauncher --launch "Enhanced Bedwars 1.8.9"
+bindsym --no-repeat Mod5+l exec prismlauncher --launch "1.21.9(1) --show-log"
+bindsym --no-repeat Mod5+h exec prismlauncher --launch "1.21.4 --show-log"
+bindsym --no-repeat Mod5+b exec prismlauncher --launch "Enhanced Bedwars 1.8.9 --show-log"
 
 bindsym --no-repeat Insert exec $term -e bash -lc 'timedatectl --property=TimeUSec show; echo; timedatectl --property=NTPSynchronized show; timedatectl --property=Timezone show; brightnessctl; echo; pactl get-sink-volume @DEFAULT_SINK@; pactl get-sink-mute @DEFAULT_SINK@; echo; read -n 1 -p "Press any key to close..."'
 bindsym --no-repeat $mod+Insert exec $term -e bash -lc 'fastfetch -l none; echo; read -n 1 -p "Press any key to close..."'
