@@ -91,6 +91,7 @@ bindsym --no-repeat Mod1+g exec gitkraken
 bindsym --no-repeat Mod1+k exec kicad
 bindsym --no-repeat Mod1+p exec prusa-slicer
 bindsym --no-repeat Mod1+b exec bambu-studio
+bindsym --no-repeat Mod1+a exec affine
 
 bindsym --no-repeat Mod5+a exec VBoxManage startvm "w11" --type gui
 bindsym --no-repeat Mod5+l exec prismlauncher --launch "1.21.9(1)"
