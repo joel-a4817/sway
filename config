@@ -103,7 +103,7 @@ bindsym --no-repeat $mod+Insert exec $term -e bash -lc 'fastfetch -l none; echo;
 
 bindsym --no-repeat $mod+XF86Display exec $term -e bash -lc 'nmcli dev disconnect wlp0s20f0u4; echo; nmcli dev disconnect wlp0s20f0u1; echo; nmcli dev connect wlp0s20f3; echo; read -n 1 -p "Press any key to close..."'
 bindsym --no-repeat $mod+F2 exec $term -e bash -lc 'nmcli dev connect wlp0s20f0u4; echo; nmcli dev connect wlp0s20f0u1; echo; nmcli dev disconnect wlp0s20f3; echo; read -n 1 -p "Press any key to close..."'
-bindsym --no-repeat XF86Display exec $term -e bash -lc 'nmcli device status; echo; nmcli device wifi list; echo; read -n 1 -p "Press any key to close..."'
+bindsym --no-repeat XF86Display exec $term -e bash -lc 'nmcli device status; echo; nmcli device wifi list; echo; nmcli dev wifi connect --ask; read -n 1 -p "Press any key to close..."'
 bindsym --no-repeat F2 exec $term -e bash -lc 'speedtest-cli; echo; read -n 1 -p "Press any key to close..."'
 
 bindsym --locked --no-repeat Mod5+Print exec bash -lc 'mkdir -p ~/Videos && wf-recorder -f ~/Videos/recording-$(date +%Y%m%d-%H%M%S).mp4'
