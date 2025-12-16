@@ -80,7 +80,7 @@ bindsym $mod+Shift+u exec $term -e bash -lc 'nix flake update --flake ~/nixos &&
 bindsym $mod+Shift+p exec $term -e bash -lc 'cd ~/pixy2 && git pull --ff-only && cd scripts && ./build_pixymon_src.sh; echo; read -n 1 -p "Press any key to close..."'
 bindsym $mod+Shift+t exec $term -e bash -lc '~/.config/sway/settime.sh; echo; read -n 1 -p "Press any key to close..."'
 
-bindsym --no-repeat $mod+Print exec $term -e 'copyq show'
+bindsym --no-repeat $mod+Print exec $term -e bash -lc 'copyq show'
 bindsym --no-repeat $mod+slash exec $term -e yazi
 bindsym --no-repeat $mod+BackSpace exec firefox
 bindsym --no-repeat $mod+Delete exec solaar
