@@ -83,7 +83,7 @@ bindsym $mod+Shift+t exec $term -e bash -lc '~/.config/sway/settime.sh; echo; re
 bindsym --no-repeat $mod+Print exec $term -e bash -lc 'copyq show'
 bindsym --no-repeat $mod+slash exec $term -e yazi
 bindsym --no-repeat $mod+BackSpace exec firefox
-bindsym --no-repeat $mod+Shift exec solaar
+bindsym --no-repeat $mod+Delete exec solaar
 bindsym --no-repeat $mod+backslash exec VirtualBox
 
 bindsym --no-repeat Mod1+m exec prismlauncher
