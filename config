@@ -77,6 +77,7 @@ bindsym $mod+Escape exec systemctl suspend
 
 bindsym $mod+Shift+u exec $term -e bash -lc 'nix flake update --flake ~/nixos && sudo nixos-rebuild switch --flake ~/nixos#rt4817; echo; read -n 1 -p "Press any key to close..."'
     #always run rebuild after pixymon update
+bindsym $mod+Shift+f exec $term -e bash -lc 'flatpak update, read -n 1 -p "Press any key to close..."'
 bindsym $mod+Shift+p exec $term -e bash -lc 'cd ~/pixy2 && git pull --ff-only && cd scripts && ./build_pixymon_src.sh; echo; read -n 1 -p "Press any key to close..."'
 bindsym $mod+Shift+t exec $term -e bash -lc '~/.config/sway/settime.sh; echo; read -n 1 -p "Press any key to close..."'
 
