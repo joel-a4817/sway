@@ -85,7 +85,7 @@ for_window [app_id="clipse"] floating enable, move position center, resize set 8
 
 # keybinds function
 
-bindsym $mod+Escape exec bash -lc 'swaylock -f && sleep 0.3 && systemctl suspend'
+bindsym $mod+Escape exec bash -lc 'swaylock -fi /home/joel/.config/sway/mcqueen.jpeg && sleep 0.3 && systemctl suspend'
 bindsym $mod+Shift+r exec $term -T "$popup_prefix-reboot" -e bash -lc reboot
 
 bindsym $mod+Shift+u exec $term -T "$popup_prefix-rebuild" -e bash -lc 'nix flake update --flake ~/nixos && sudo nixos-rebuild switch --flake ~/nixos#rt4817; echo; read -n 1 -p "Press any key to close..."'
