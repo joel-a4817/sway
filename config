@@ -99,7 +99,7 @@ bindsym $mod+Shift+f exec $term -T "$popup_prefix-flatpak" -e bash -lc 'flatpak 
 bindsym $mod+Shift+p exec $term -T "$popup_prefix-pixy" -e bash -lc 'cd ~/pixy2 && git pull --ff-only && cd scripts && ./build_pixymon_src.sh; echo; read -n 1 -p "Press any key to close..."'
 bindsym $mod+Shift+t exec $term -T "$popup_prefix-settime" -e bash -lc '~/.config/sway/settime.sh; echo; read -n 1 -p "Press any key to close..."'
 
-bindsym --no-repeat $mod+Print    exec $term -T "$popup_prefix-clipse" -a clipse -e clipse
+bindsym --no-repeat $mod+Print    exec $term -T "$popup_prefix-clipse" -e clipse
 bindsym --no-repeat $mod+slash    exec $term -T "$popup_prefix-yazi" -e yazi
 bindsym --no-repeat $mod+BackSpace exec firefox
 bindsym --no-repeat $mod+Delete   exec solaar
