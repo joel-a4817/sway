@@ -15,8 +15,9 @@ cat >"$cfg" <<'JSON'
     "percent": { "type": 3, "green": 40, "yellow": 70 }
   },
   "modules": [
-    { "type": "title", "key": "title", "keyColor": "light_yellow", "format": "{user-name}@{host-name}" },
-    { "type": "custom", "key": "custom", "format": "\u001b[90m┈ Desktop Visuals ┈" },
+    { "type": "title" },
+    "break",
+    { "type": "custom", "format": "\u001b[90m┈ Desktop Visuals ┈" },
 
     "break",
     { "type": "de",           "key": "de",           "keyColor": "light_blue" },
@@ -33,7 +34,7 @@ cat >"$cfg" <<'JSON'
     { "type": "terminalTheme","key": "terminalTheme","keyColor": "light_blue" },
 
     "break",
-    { "type": "colors", "key": "colors" }
+    { "type": "colors"}
   ]
 }
 JSON

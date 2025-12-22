@@ -15,8 +15,9 @@ cat >"$cfg" <<'JSON'
     "percent": { "type": 3, "green": 33, "yellow": 66 }
   },
   "modules": [
-    { "type": "title", "key": "title", "keyColor": "light_cyan", "format": "{user-name}@{host-name}" },
-    { "type": "custom", "key": "custom", "format": "\u001b[90m┈ Network & Reachability ┈" },
+    { "type": "title" },
+    "break",
+    { "type": "custom", "format": "\u001b[90m┈ Network & Reachability ┈" },
 
     "break",
     { "type": "dns",     "key": "dns",     "keyColor": "light_cyan" },
@@ -32,7 +33,7 @@ cat >"$cfg" <<'JSON'
     },
 
     "break",
-    { "type": "colors", "key": "colors" }
+    { "type": "colors", }
   ]
 }
 JSON

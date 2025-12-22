@@ -15,8 +15,9 @@ cat >"$cfg" <<'JSON'
     "percent": { "type": 3, "green": 33, "yellow": 66 }
   },
   "modules": [
-    { "type": "title", "key": "title", "keyColor": "light_magenta", "format": "{user-name}@{host-name}" },
-    { "type": "custom", "key": "custom", "format": "\u001b[90m┈ Session Snapshot ┈" },
+    { "type": "title" },
+    "break",
+    { "type": "custom", "format": "\u001b[90m┈ Session Snapshot ┈" },
 
     "break",
     { "type": "battery",   "key": "battery",   "keyColor": "light_blue",  "percent": { "type": 3 } },
@@ -28,7 +29,7 @@ cat >"$cfg" <<'JSON'
     { "type": "users",     "key": "users",     "keyColor": "light_cyan" },
 
     "break",
-    { "type": "colors", "key": "colors" }
+    { "type": "colors", }
   ]
 }
 JSON

@@ -14,9 +14,10 @@ cat >"$cfg" <<'JSON'
     "bar": { "width": 18, "char": { "elapsed": "█", "total": "░" } },
     "percent": { "type": 3, "green": 40, "yellow": 70 }
   },
-  "modules": [
-    { "type": "title", "key": "title", "keyColor": "light_red", "format": "{user-name}@{host-name}" },
-    { "type": "custom", "key": "custom", "format": "\u001b[90m┈ Input & Wireless ┈" },
+   "modules": [
+    { "type": "title" },
+    "break",
+    { "type": "custom", "format": "\u001b[90m┈ Input & Wireless ┈" },
 
     "break",
     { "type": "bluetooth",    "key": "bluetooth",    "keyColor": "light_green" },
@@ -26,7 +27,7 @@ cat >"$cfg" <<'JSON'
     { "type": "powerAdapter", "key": "powerAdapter", "keyColor": "light_blue" },
 
     "break",
-    { "type": "colors", "key": "colors" }
+    { "type": "colors" }
   ]
 }
 JSON
