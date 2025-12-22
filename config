@@ -35,34 +35,11 @@ for_window [app_id="foot" title="^$popup_prefix-.*"] \
     resize set 1000 700
 
 ### Output configuration
-#
-# Default wallpaper (more resolutions are available in /usr/share/backgrounds/sway/)
 output * bg ~/.config/sway/mcqueen.jpeg fill
-#output * bg /usr/share/backgrounds/sway/Sway_Wallpaper_Blue_1920x1080.png fill
-#
 # Example configuration:
-#
 #   output HDMI-A-1 resolution 1920x1080 position 1920,0
-#
-# You can get the names of your outputs by running: swaymsg -t get_outputs
-
-### Idle configuration
-#
-# Example configuration:
-#
-# exec swayidle -w \
-#          timeout 300 'swaylock -f -c 000000' \
-#          timeout 600 'swaymsg "output * power off"' resume 'swaymsg "output * power on"' \
-#          before-sleep 'swaylock -f -c 000000'
-#
-# This will lock your screen after 300 seconds of inactivity, then turn off
-# your displays after another 300 seconds, and turn your screens back on when
-# resumed. It will also lock your screen before your computer goes to sleep.
 
 ### Input configuration
-#
-# Example configuration:
-#
    input type:touchpad {
        dwt enabled
        tap enabled
@@ -125,10 +102,16 @@ bindsym --no-repeat Mod5+p exec firefox --new-window 'http://localhost:631'
 
 bindsym --no-repeat $mod+XF86Display exec $term -T "$popup_prefix-wifi-a"   -e bash -lc 'nmcli dev disconnect wlp0s20f0u4; echo; nmcli dev disconnect wlp0s20f0u1; echo; nmcli dev connect wlp0s20f3; echo; read -n 1 -p "Press any key to close..."'
 bindsym --no-repeat $mod+F2          exec $term -T "$popup_prefix-wifi-b"   -e bash -lc 'nmcli dev connect wlp0s20f0u4; echo; nmcli dev connect wlp0s20f0u1; echo; nmcli dev disconnect wlp0s20f3; echo; read -n 1 -p "Press any key to close..."'
-bindsym --no-repeat XF86Display      exec $term -T "$popup_prefix-wifi-list" -e bash -lc 'nmcli device status; echo; nmcli device wifi list; echo; nmcli dev wifi connect --ask; read -n 1 -p "Press any key to close..."'
-bindsym --no-repeat F2               exec $term -T "$popup_prefix-speedtest" -e bash -lc 'speedtest-cli; echo; read -n 1 -p "Press any key to close..."'
-bindsym Insert exec $term -T "$popup_prefix-fastfetch-main" -e bash -lc 'ff-main; echo; read -n 1 -p "Press any key to close..."'
-bindsym $mod+Insert exec $term -T "$popup_prefix-fastfetch-other" -e bash -lc 'ff-other; echo; read -n 1 -p "Press any key to close..."'
+bindsym --no-repeat $mod+Insert      exec $term -T "$popup_prefix-wifi-list" -e bash -lc 'nmcli device status; echo; nmcli device wifi list; echo; nmcli dev wifi connect --ask; read -n 1 -p "Press any key to close..."'
+
+#fastfetch
+bindsym $mod+Control+w exec $term -T "$popup_prefix-f-wifi" -e bash -lc '~/.config/sway/scripts/fastfetch/f-wifi.sh; read -n 1 -p "Press any key to close..."'
+bindsym $mod+Control+m exec $term -T "$popup_prefix-f-main" -e bash -lc '~/.config/sway/scripts/fastfetch/f-main.sh; echo; read -n 1 -p "Press any key to close..."'
+bindsym $mod+Control+i exec $term -T "$popup_prefix-f-info" -e bash -lc '~/.config/sway/scripts/fastfetch/f-info.sh; echo; read -n 1 -p "Press any key to close..."'
+bindsym $mod+Control+s exec $term -T "$popup_prefix-f-system" -e bash -lc '~/.config/sway/scripts/fastfetch/f-system.sh; echo; read -n 1 -p "Press any key to close..."'
+bindsym $mod+Control+d exec $term -T "$popup_prefix-f-devices" -e bash -lc '~/.config/sway/scripts/fastfetch/f-devices.sh; echo; read -n 1 -p "Press any key to close..."'
+bindsym $mod+Control+h exec $term -T "$popup_prefix-f-hardware" -e bash -lc '~/.config/sway/scripts/fastfetch/f-hardware.sh; echo; read -n 1 -p "Press any key to close..."'
+bindsym $mod+Control+a exec $term -T "$popup_prefix-f-aesthetics" -e bash -lc '~/.config/sway/scripts/fastfetch/f-aesthetics.sh; echo; read -n 1 -p "Press any key to close..."'
 
 bindsym --locked --no-repeat Mod5+Print exec bash -lc 'mkdir -p ~/Videos && wf-recorder -f ~/Videos/recording-$(date +%Y%m%d-%H%M%S).mp4'
 bindsym --locked --no-repeat Mod1+Print exec bash -lc 'mkdir -p ~/Videos && wf-recorder -a -f ~/Videos/recording-$(date +%Y%m%d-%H%M%S).mp4'
