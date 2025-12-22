@@ -18,6 +18,7 @@ set $right l
 set $term foot
 # Your preferred application launcher
 set $menu wmenu-run
+seat * xcursor_theme Bibata-Modern-Classic 16
 
 # --- Autotiling (Option A) ---
 # Provides Qtile‑like consistent tiling by automatically choosing splitv/splith
@@ -71,6 +72,8 @@ output * bg ~/.config/sway/mcqueen.jpeg fill
 
    input type:keyboard {
        xkb_layout "eu"
+       repeat_delay 200
+       repeat_rate 35
    }
 
    input type:mouse {
@@ -84,7 +87,7 @@ output * bg ~/.config/sway/mcqueen.jpeg fill
 
 # Clipboard https://github.com/savedra1/clipse?tab=readme-ov-file
 exec clipse -listen                                                                        # run the background listener on startup
-for_window [app_id="clipse"] floating enable, move position center, resize set 80ppt 80ppt # style window to look nice
+for_window [app_id="clipse"] floating enable, move position center, resize set 1000 700
 
 # keybinds function
 
@@ -163,6 +166,8 @@ output * max_render_time off
     # Change normal to inverse to use left mouse button for resizing and right
     # mouse button for dragging.
     floating_modifier $mod normal
+bindsym $mod+grave exec bash -lc '~/.config/sway/toggle-floating-mod.sh'
+#mod normal = drag mod inverse = resize 
 
     # Reload the configuration file
     bindsym $mod+Shift+c reload
