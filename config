@@ -77,10 +77,11 @@ bindsym $mod+Shift+p exec $term -T "$popup_prefix-pixy" -e bash -lc 'cd ~/pixy2 
 bindsym $mod+Shift+t exec $term -T "$popup_prefix-settime" -e bash -lc '~/.config/sway/scripts/settime.sh; echo; read -n 1 -p "Press any key to close..."'
 
 bindsym --no-repeat $mod+Print    exec $term -T "$popup_prefix-clipse" -e clipse
-bindsym --no-repeat $mod+slash    exec $term -T "$popup_prefix-yazi" -e yazi
+bindsym --no-repeat $mod+slash exec $term -e bash -lc yazi
 bindsym --no-repeat $mod+BackSpace exec firefox
 bindsym --no-repeat $mod+Delete   exec solaar
 bindsym --no-repeat $mod+backslash exec VirtualBox
+bindsym --no-repeat $mod+Shift+slash exec $term -e bash -lc 'sudo yazi'
 
 bindsym --no-repeat Mod1+m exec prismlauncher
 bindsym --no-repeat Mod1+g exec gitkraken
