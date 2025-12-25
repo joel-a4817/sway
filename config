@@ -62,8 +62,11 @@ output * bg ~/.config/sway/mcqueen.jpeg fill
 
 # User keybinds
 
+## execs 
 # Clipboard https://github.com/savedra1/clipse?tab=readme-ov-file
 exec clipse -listen
+exec_always ~/.config/sway/scripts/battery-popup.sh
+for_window [app_id ="PrismLauncher"] floating enable, move position center
 
 # keybinds function
 
@@ -91,9 +94,9 @@ bindsym --no-repeat Mod1+b exec bambu-studio
 bindsym --no-repeat Mod1+n exec flatpak run io.atom.electron.NotesHub
 
 bindsym --no-repeat Mod5+a exec VBoxManage startvm "w11" --type gui
-bindsym --no-repeat Mod5+l exec prismlauncher --launch "1.21.9(1)"
-bindsym --no-repeat Mod5+h exec prismlauncher --launch "1.21.4"
-bindsym --no-repeat Mod5+b exec prismlauncher --launch "Enhanced Bedwars 1.8.9"
+bindsym --no-repeat Mod5+l exec $term -T "$popup_prefix-mc1" -e bash -lc 'prismlauncher --launch "1.21.9(1)"'
+bindsym --no-repeat Mod5+h exec $term -T "$popup_prefix-mc2" -e bash -lc 'prismlauncher --launch "1.21.4"'
+bindsym --no-repeat Mod5+b exec $term -T "$popup_prefix-mc3" -e bash -lc 'prismlauncher --launch "Enhanced Bedwars 1.8.9"'
 bindsym --no-repeat Mod5+g exec firefox --new-window 'https://github.com/repos?q=owner%3A%40me'
 bindsym --no-repeat Mod5+w exec firefox --new-window 'https://web.whatsapp.com/'
 bindsym --no-repeat Mod5+d exec firefox --new-window 'https://drive.google.com/drive/my-drive'
