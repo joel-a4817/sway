@@ -135,18 +135,17 @@ bindsym $mod+Shift+p exec $term -T "$popup-update-pixymon" -e bash -lc 'cd ~/pix
 bindsym $mod+Shift+t exec $term -T "$popup-settime" -e bash -lc '~/.config/sway/scripts/settime.sh; echo; read -n 1 -p "Press any key to close..."'
 
 bindsym --no-repeat $mod+Print exec $term -T "$popup-tuis" -e clipse
-bindsym --no-repeat $mod+slash exec $term -T "$popup-tuis" -e yazi
+bindsym --no-repeat $mod+slash exec $term -T "$popup-tuis" -e yazi ~/Downloads
 bindsym --no-repeat $mod+BackSpace exec firefox
 bindsym --no-repeat $mod+Delete   exec solaar
 bindsym --no-repeat $mod+backslash exec VirtualBox
-bindsym --no-repeat $mod+Shift+slash exec $term -T "$popup-tuis" -e 'sudo yazi'
 
 bindsym --no-repeat Mod1+m exec prismlauncher
 bindsym --no-repeat Mod1+g exec gitkraken
 bindsym --no-repeat Mod1+k exec kicad
 bindsym --no-repeat Mod1+p exec prusa-slicer
 bindsym --no-repeat Mod1+b exec bambu-studio
-bindsym --no-repeat Mod1+n exec $term -e bash -lc "appimage-run /home/joel/NotesHub-3.9.0-x64.AppImage"
+bindsym --no-repeat Mod1+n exec $term -e bash -lc "appimage-run /home/joel/Downloads/Apps/NotesHub-3.9.0-x64.AppImage"
 
 bindsym --no-repeat Mod5+a exec VBoxManage startvm "w11" --type gui
 bindsym --no-repeat Mod5+l exec $term -e bash -lc 'prismlauncher --launch "1.21.9(1)"'
@@ -172,12 +171,12 @@ bindsym $mod+Control+d exec $term -T "$popup-f-devices" -e bash -lc '~/.config/s
 bindsym $mod+Control+h exec $term -T "$popup-f-hardware" -e bash -lc '~/.config/sway/scripts/fastfetch/f-hardware.sh; echo; read -n 1 -p "Press any key to close..."'
 bindsym $mod+Control+a exec $term -T "$popup-f-aesthetics" -e bash -lc '~/.config/sway/scripts/fastfetch/f-aesthetics.sh; echo; read -n 1 -p "Press any key to close..."'
 
-bindsym --locked --no-repeat Mod5+Print exec bash -lc 'mkdir -p ~/Videos && wf-recorder -f ~/Videos/recording-$(date +%Y%m%d-%H%M%S).mp4'
-bindsym --locked --no-repeat Mod1+Print exec bash -lc 'mkdir -p ~/Videos && wf-recorder -a -f ~/Videos/recording-$(date +%Y%m%d-%H%M%S).mp4'
+bindsym --locked --no-repeat Mod5+Print exec bash -lc 'mkdir -p ~/Downloads/Videos && wf-recorder -f ~/Downloads/Videos/recording-$(date +%Y%m%d-%H%M%S).mp4'
+bindsym --locked --no-repeat Mod1+Print exec bash -lc 'mkdir -p ~/Downloads/Videos && wf-recorder -a -f ~/Downloads/Videos/recording-$(date +%Y%m%d-%H%M%S).mp4'
 bindsym --locked --no-repeat Control+Print exec bash -lc 'pkill -INT -f "wf-recorder"'
 
-bindsym --locked Print       exec bash -lc 'mkdir -p ~/Pictures; ts=$(date +%Y%m%d-%H%M%S); grim -t png - | tee ~/Pictures/screenshot-$ts.png | wl-copy'
-bindsym --locked Shift+Print exec bash -lc 'mkdir -p ~/Pictures; ts=$(date +%Y%m%d-%H%M%S); grim -t png -g "$(slurp)" - | tee ~/Pictures/screenshot-$ts.png | wl-copy'
+bindsym --locked Print       exec bash -lc 'mkdir -p ~/Downloads/Pictures; ts=$(date +%Y%m%d-%H%M%S); grim -t png - | tee ~/Downloads/Pictures/screenshot-$ts.png | wl-copy'
+bindsym --locked Shift+Print exec bash -lc 'mkdir -p ~/Downloads/Pictures; ts=$(date +%Y%m%d-%H%M%S); grim -t png -g "$(slurp)" - | tee ~/Downloads/Pictures/screenshot-$ts.png | wl-copy'
 
 bindsym --locked --no-repeat $mod+XF86AudioMute    exec $term -T "$popup_prefix-audio-usb" -e bash -lc 'pactl set-card-profile alsa_card.usb-Jieli_Technology_JLab_JBuds_Lux_USB_4250314331393108-00 output:iec958-stereo && pactl set-default-sink alsa_output.usb-Jieli_Technology_JLab_JBuds_Lux_USB_4250314331393108-00.iec958-stereo && pactl get-default-sink; read -n 1 -p "Press any key to close..."'
 bindsym --locked --no-repeat $mod+XF86AudioMicMute exec $term -T "$popup_prefix-audio-int" -e bash -lc 'pactl set-default-sink alsa_output.pci-0000_00_1f.3-platform-skl_hda_dsp_generic.HiFi__Speaker__sink && pactl get-default-sink; read -n 1 -p "Press any key to close..."'
