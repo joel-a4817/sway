@@ -179,8 +179,8 @@ bindsym --locked --no-repeat Mod1+Print exec bash -lc 'mkdir -p ~/Downloads/Vide
 bindsym --locked --no-repeat Control+Print exec bash -lc 'pkill -INT -f "wf-recorder"'
 
 #screenshot
-bindsym --locked --no-repeat Print exec bash -lc 'mkdir -p ~/Downloads/Pictures/Screenshots; ts=$(date +%Y%m%d-%H%M%S); grim -t png - | tee ~/Downloads/Pictures/screenshot-$ts.png | wl-copy'
-bindsym --locked --no-repeat Shift+Print exec bash -lc 'mkdir -p ~/Downloads/Pictures/Screenshots; ts=$(date +%Y%m%d-%H%M%S); grim -t png -g "$(slurp)" - | tee ~/Downloads/Pictures/screenshot-$ts.png | wl-copy'
+bindsym --locked --no-repeat Print exec bash -lc 'mkdir -p ~/Downloads/Pictures/Screenshots; ts=$(date +%Y%m%d-%H%M%S); grim -t png - | tee ~/Downloads/Pictures/Screenshots/screenshot-$ts.png | wl-copy'
+bindsym --locked --no-repeat Shift+Print exec bash -lc 'mkdir -p ~/Downloads/Pictures/Screenshots; ts=$(date +%Y%m%d-%H%M%S); grim -t png -g "$(slurp)" - | tee ~/Downloads/Pictures/Screenshots/screenshot-$ts.png | wl-copy'
 
 #audio device output switch
 bindsym --locked --no-repeat $mod+XF86AudioMute    exec $term -T "$popup-audio-select1" -e bash -lc 'pactl set-card-profile alsa_card.usb-Jieli_Technology_JLab_JBuds_Lux_USB_4250314331393108-00 output:iec958-stereo && pactl set-default-sink alsa_output.usb-Jieli_Technology_JLab_JBuds_Lux_USB_4250314331393108-00.iec958-stereo && pactl get-default-sink; read -n 1 -p "Press any key to close..."'
@@ -214,12 +214,12 @@ output * max_render_time off
     bindsym --no-repeat $mod+Grave exec ~/.config/sway/scripts/toggle-floating-mod.sh
 
     # Reload the configuration file
-    bindsym $mod+Shift+c reload
+    bindsym $mod+Shift+c exec bash -lc "rm -Rf ~/.local/state/battery-watcher.lock ~/.local/state/battery-interval-swaynag.log && swaymsg reload"
 
     # system off options
-    bindsym --no-repeat --locked $mod+Shift+e exec swaynag -y overlay -t warning -m 'You pressed the exit shortcut. Do you really want to exit sway?' -B 'Yes, exit sway' 'swaymsg exit'
-bindsym --locked $mod+Escape exec bash -lc 'swaylock -fi /home/joel/.config/sway/mcqueen.jpeg && sleep 0.3 && systemctl suspend'
-bindsym --no-repeat --locked $mod+Shift+r exec swaynag -y overlay -t warning -m 'You pressed the reboot shortcut. Do you really want to reboot your device?' -B 'Yes, reboot my device' 'reboot'
+    bindsym --no-repeat --locked $mod+Shift+e exec bash -lc swaynag -y overlay -t warning -m 'You pressed the exit shortcut. Do you really want to exit sway?' -B 'Yes, exit sway' 'rm -Rf ~/.local/state/battery-watcher.lock ~/.local/state/battery-interval-swaynag.log && swaymsg exit'
+bindsym --locked $mod+Escape exec bash -lc 'rm -Rf ~/.local/state/battery-watcher.lock ~/.local/state/battery-interval-swaynag.log && swaylock -fi /home/joel/.config/sway/mcqueen.jpeg && sleep 0.3 && systemctl suspend'
+bindsym --no-repeat --locked $mod+Shift+r exec bash -lc swaynag -y overlay -t warning -m 'You pressed the reboot shortcut. Do you really want to reboot your device?' -B 'Yes, reboot my device' 'rm -Rf ~/.local/state/battery-watcher.lock ~/.local/state/battery-interval-swaynag.log && reboot'
 
 #
 # Moving around:
