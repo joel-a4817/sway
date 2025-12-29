@@ -23,10 +23,7 @@ cat >"$cfg" <<'JSON'
     { "type": "host",      "key": "host",      "keyColor": "light_blue" },
     { "type": "board",     "key": "board",     "keyColor": "light_blue" },
     { "type": "bluetooth", "key": "bluetooth", "keyColor": "light_green" },
-    { "type": "command",   "key": "command",   "keyColor": "light_green",
-      "shell": "bash",
-      "command": "rfkill list 2>/dev/null | sed -n '1,10p' || echo 'radio: N/A'"
-    },
+    { "type": "bluetoothRadio", "key": "bluetoothRadio", "keyColor": "light_green" },
     { "type": "camera",    "key": "camera",    "keyColor": "light_green" },
     { "type": "chassis",   "key": "chassis",   "keyColor": "light_blue" },
 
@@ -36,10 +33,7 @@ cat >"$cfg" <<'JSON'
     { "type": "opengl",    "key": "opengl",    "keyColor": "light_yellow" },
     { "type": "vulkan",    "key": "vulkan",    "keyColor": "light_yellow" },
     { "type": "display",   "key": "display",   "keyColor": "light_yellow" },
-    { "type": "command",   "key": "command",   "keyColor": "light_yellow",
-      "shell": "bash",
-      "command": "xrandr --listmonitors 2>/dev/null | sed -n '2,10p' || echo 'monitor: N/A'"
-    },
+    { "type": "monitor",   "key": "monitor",   "keyColor": "light_yellow"},
 
     "break",
     { "type": "physicalDisk",   "key": "physicalDisk",   "keyColor": "light_magenta" },

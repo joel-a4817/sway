@@ -20,17 +20,14 @@ cat >"$cfg" <<'JSON'
     { "type": "custom", "format": "\u001b[90m┈ Network & Reachability ┈" },
 
     "break",
+    { "type": "wifi",    "key": "wifi",    "keyColor": "light_cyan" },
+    { "type": "netIo",   "key": "netIo",   "keyColor": "light_cyan" },
     { "type": "dns",     "key": "dns",     "keyColor": "light_cyan" },
     { "type": "localIp", "key": "localIp", "keyColor": "light_cyan" },
-    { "type": "netIo",   "key": "netIo",   "keyColor": "light_cyan" },
     { "type": "publicIp","key": "publicIp","keyColor": "light_cyan" },
-    { "type": "wifi",    "key": "wifi",    "keyColor": "light_cyan" },
 
     "break",
-    { "type": "command", "key": "command", "keyColor": "light_blue",
-      "shell": "bash",
-      "command": "curl -fsSL 'https://wttr.in/?format=1' 2>/dev/null || echo 'weather: N/A'"
-    },
+    { "type": "weather","key": "weather","keyColor": "light_green" },
 
     "break",
     { "type": "colors", }
