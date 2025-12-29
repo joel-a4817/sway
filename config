@@ -141,6 +141,7 @@ bindsym --no-repeat $mod+BackSpace exec firefox
 bindsym --no-repeat $mod+Delete   exec solaar
 bindsym --no-repeat $mod+backslash exec VirtualBox
 
+bindsym --no-repeat Mod1+s exec signal-desktop
 bindsym --no-repeat Mod1+m exec prismlauncher
 bindsym --no-repeat Mod1+g exec gitkraken
 bindsym --no-repeat Mod1+k exec kicad
