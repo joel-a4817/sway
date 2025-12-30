@@ -13,9 +13,6 @@ EXIT_HYSTERESIS=2                         # leave low-mode only when > THRESHOLD
 REENTRY_BACKOFF_SEC=90                    # don't immediate-nag if we re-enter within this window
 SKIP_IF_SWAYNAG_RUNNING=true              # avoid stacking multiple swaynag windows
 
-# Prefer swaynag from PATH; fallback to NixOS path
-SWAYNAG="${SWAYNAG:-$(command -v swaynag || echo /run/current-system/sw/bin/swaynag)}"
-
 STATE_DIR="${HOME}/.local/state"
 LOG="${STATE_DIR}/battery-interval-swaynag.log"
 LOCKFILE="${STATE_DIR}/battery-watcher.lock"
@@ -78,7 +75,7 @@ while true; do
         echo "$(date -Iseconds) [INFO] swaynag already running; skip new nag" >> "$LOG"
       else
         msg="Battery is at ${cap}%. Plug in now!"
-        "$SWAYNAG" --layer overlay -t warning -m "$msg" -s "OK"
+        swaynag -c ~/.config/sway/swaynag/config -t night -m "$msg" -s "OK"
         last_nag_time=$now
         echo "$(date -Iseconds) [WARN] ${msg} (nagged)" >> "$LOG"
       fi

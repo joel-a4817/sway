@@ -1,5 +1,7 @@
 
 #!/usr/bin/env bash
+#! nix-shell -i bash -p gsettings-desktop-schemas
+
 set -euo pipefail
 
 GNOME_SCHEMA="org.gnome.system.location"

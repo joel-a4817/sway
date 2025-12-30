@@ -1,0 +1,14 @@
+
+[night]
+
+# Night theme defaults
+layer=overlay
+
+# Colors:
+background=1D1C22
+border=222433FF
+border-bottom=2F3246FF
+text=CDD6F4FF
+button-background=313244FF
+button-text=CDD6F4FF
+
