@@ -75,7 +75,7 @@ while true; do
         echo "$(date -Iseconds) [INFO] swaynag already running; skip new nag" >> "$LOG"
       else
         msg="Battery is at ${cap}%. Plug in now!"
-        swaynag -c ~/.config/sway/swaynag/config -t night -m "$msg" -s "OK"
+        swaynag -c -t warning -m "$msg" -s "OK"
         last_nag_time=$now
         echo "$(date -Iseconds) [WARN] ${msg} (nagged)" >> "$LOG"
       fi
