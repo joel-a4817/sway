@@ -1,4 +1,4 @@
-
+#Allows sway to generate with different colour (not black) in fullscreen whilst it remains translucent in tiling/floating mode.
 #!/usr/bin/env bash
 set -euo pipefail
 

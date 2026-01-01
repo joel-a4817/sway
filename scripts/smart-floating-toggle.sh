@@ -1,3 +1,4 @@
+# The new bind for toggling floating on and off
 #!/usr/bin/env bash
 
 STATE_DIR="$HOME/.cache/sway-float"

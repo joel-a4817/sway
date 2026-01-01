@@ -1,4 +1,4 @@
-
+# Needed to switch from resizing to moving mode.
 #!/usr/bin/env bash
 STATE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/sway"
 STATE_FILE="$STATE_DIR/floating_modifier_state"
