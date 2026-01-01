@@ -20,7 +20,6 @@ cat >"$cfg" <<'JSON'
     { "type": "custom", "format": "\u001b[90m┈ Physical & Graphics ┈" },
 
     "break",
-    { "type": "host",      "key": "host",      "keyColor": "light_blue" },
     { "type": "board",     "key": "board",     "keyColor": "light_blue" },
     { "type": "bluetooth", "key": "bluetooth", "keyColor": "light_green" },
     { "type": "bluetoothRadio", "key": "bluetoothRadio", "keyColor": "light_green" },
@@ -39,6 +38,9 @@ cat >"$cfg" <<'JSON'
     { "type": "physicalDisk",   "key": "physicalDisk",   "keyColor": "light_magenta" },
     { "type": "physicalMemory", "key": "physicalMemory", "keyColor": "light_magenta" },
     { "type": "tpm",            "key": "tpm",            "keyColor": "light_cyan" },
+
+    "break",
+    { "type": "host",      "key": "host",      "keyColor": "light_blue" },
 
     "break",
     { "type": "colors" }

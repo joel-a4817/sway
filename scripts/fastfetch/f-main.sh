@@ -20,9 +20,9 @@ cat >"$cfg" <<'JSON'
     { "type": "custom", "format": "\u001b[90m┈ Session Snapshot ┈" },
 
     "break",
-    { "type": "battery",   "key": "battery",   "keyColor": "light_blue",  "percent": { "type": 3 } },
     { "type": "datetime",  "key": "datetime",  "keyColor": "light_cyan",  "format": "{1}-{3}-{11} {14}:{17}:{20}" },
     { "type": "brightness","key": "brightness","keyColor": "light_yellow","percent": { "type": 3 } },
+    { "type": "battery",   "key": "battery",   "keyColor": "light_blue",  "percent": { "type": 3 } },
     { "type": "media",     "key": "media",     "keyColor": "light_magenta" },
     { "type": "player",    "key": "player",    "keyColor": "light_magenta" },
     { "type": "sound",     "key": "sound",     "keyColor": "light_magenta" },
