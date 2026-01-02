@@ -28,6 +28,7 @@ exec ~/.config/sway/scripts/battery-warn.sh
 exec autotiling
 default_orientation auto
 exec ~/.config/sway/scripts/float-geometry-watcher.sh
+exec swaylock -F -fi /home/joel/.config/sway/mcqueen.jpeg
 
 set $popup popup
 
@@ -60,6 +61,7 @@ output * bg ~/.config/sway/mcqueen.jpeg fill
    input type:touchpad {
        dwt enabled
        tap enabled
+       accel_profile adaptive
        natural_scroll enabled
        middle_emulation enabled
    }
@@ -70,9 +72,17 @@ output * bg ~/.config/sway/mcqueen.jpeg fill
        repeat_rate 35
    }
 
-   input type:mouse {
+   input type:pointer {
        accel_profile flat
+       pointer_accel 0
    }
+
+  input type:touch {
+    tap enabled
+    drag enabled
+    drag_lock enabled
+    map_to_output eDP-1
+  }
 #
 # You can also configure each device individually.
 # Read `man 5 sway-input` for more information about this section.
@@ -172,7 +182,7 @@ output * max_render_time off
 
     # system off options
     bindsym --no-repeat --locked $mod+Shift+e exec bash -c "swaynag -t warning -m 'You pressed the exit shortcut. Do you really want to exit sway?' -B 'Yes, exit sway' 'rm -Rf ~/.local/state/battery-interval-swaynag.log && swaymsg exit'"
-bindsym --locked $mod+Escape exec bash -c 'rm -Rf ~/.local/state/battery-interval-swaynag.log && swaylock -fi /home/joel/.config/sway/mcqueen.jpeg && sleep 0.3 && systemctl suspend'
+bindsym --locked $mod+Escape exec bash -c 'rm -Rf ~/.local/state/battery-interval-swaynag.log && swaylock -F -fi /home/joel/.config/sway/mcqueen.jpeg && sleep 0.3 && systemctl suspend'
 bindsym --no-repeat --locked $mod+Shift+r exec bash -c "swaynag -t warning -m 'You pressed the reboot shortcut. Do you really want to reboot your device?' -B 'Yes, reboot my device' 'rm -Rf ~/.local/state/battery-interval-swaynag.log && reboot'"
 
 #
