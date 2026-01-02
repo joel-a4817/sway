@@ -100,7 +100,7 @@ bindsym --no-repeat $mod+Mod1+g fullscreen disable; exec gitkraken
 bindsym --no-repeat $mod+Mod1+k fullscreen disable; exec kicad
 bindsym --no-repeat $mod+Mod1+p fullscreen disable; exec prusa-slicer
 bindsym --no-repeat $mod+Mod1+b fullscreen disable; exec bambu-studio
-bindsym --no-repeat $mod+Mod1+n fullscreen disable; exec bash -lc 'appimage-run /home/joel/Downloads/Apps/NotesHub-3.10.0-x64.AppImage && swaymsg floating toggle && swaymsg floating toggle'
+bindsym --no-repeat $mod+Mod1+n fullscreen disable; exec bash -lc 'appimage-run /home/joel/Downloads/Apps/NotesHub-3.10.0-x64.AppImage && swaymsg floating toggle && sleep 0.6 && swaymsg floating toggle'
 
 bindsym --no-repeat $mod+Mod5+a fullscreen disable; exec VBoxManage startvm "w11" --type gui
 bindsym --no-repeat $mod+Mod5+l fullscreen disable; exec $term -e bash -lc 'prismlauncher --launch "1.21.9(1)"'
