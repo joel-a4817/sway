@@ -95,7 +95,7 @@ bindsym --no-repeat $mod+Shift+u fullscreen disable; exec $term -T "$popup-updat
 bindsym --no-repeat $mod+Shift+p fullscreen disable; exec $term -T "$popup-update-pixymon" -e bash -c 'cd ~/pixy2 && git pull --ff-only && cd scripts && ./build_pixymon_src.sh; echo; read -n 1 -p "Press any key to close..."'
 bindsym --no-repeat $mod+Shift+t fullscreen disable; exec $term -T "$popup-settime" -e bash -c '~/.config/sway/scripts/settime.sh; echo; read -n 1 -p "Press any key to close..."'
 bindsym --no-repeat $mod+Shift+o fullscreen disable; exec $term -T "$popup-update-optimise" -e bash -c 'sudo nix-collect-garbage; echo; sudo nix store optimise; echo; read -n 1 -p "Press any key to close..."'
-bindsym --no-repeat $mod+Shift+w fullscreen disable; exec $term -T "$popup-update-wipe" -e bash -c "swaynag -t warning -m 'You pressed the wipe shortcut. Do you really want to delete all other configurations and reboot?' -B 'Yes, delete all other configurations and reboot' 'sudo nix-collect-garbage -d; echo; sudo nix store optimise; rm -Rf ~/.local/state/battery-interval-swaynag.log; reboot'"
+bindsym --no-repeat $mod+Shift+w fullscreen disable; exec $term -T "$popup-update-wipe" -e bash -c "swaynag -t warning -y overlay -m 'You pressed the wipe shortcut. Do you really want to delete all other configurations and reboot?' -B 'Yes, delete all other configurations and reboot' 'sudo nix-collect-garbage -d; echo; sudo nix store optimise; rm -Rf ~/.local/state/battery-interval-swaynag.log; reboot'"
 
 #keybinds app
 bindsym --no-repeat $mod+Print fullscreen disable; exec $term -T "$popup-tuis" -e clipse
@@ -181,9 +181,9 @@ output * max_render_time off
     bindsym $mod+Shift+c reload
 
     # system off options
-    bindsym --no-repeat --locked $mod+Shift+e exec bash -c "swaynag -t warning -m 'You pressed the exit shortcut. Do you really want to exit sway?' -B 'Yes, exit sway' 'rm -Rf ~/.local/state/battery-interval-swaynag.log && swaymsg exit'"
+    bindsym --no-repeat --locked $mod+Shift+e exec bash -c "swaynag -t warning -y overlay -m 'You pressed the exit shortcut. Do you really want to exit sway?' -B 'Yes, exit sway' 'rm -Rf ~/.local/state/battery-interval-swaynag.log && swaymsg exit'"
 bindsym --locked $mod+Escape exec bash -c 'rm -Rf ~/.local/state/battery-interval-swaynag.log && swaylock -F -fi /home/joel/.config/sway/mcqueen.jpeg && sleep 0.3 && systemctl suspend'
-bindsym --no-repeat --locked $mod+Shift+r exec bash -c "swaynag -t warning -m 'You pressed the reboot shortcut. Do you really want to reboot your device?' -B 'Yes, reboot my device' 'rm -Rf ~/.local/state/battery-interval-swaynag.log && reboot'"
+bindsym --no-repeat --locked $mod+Shift+r exec bash -c "swaynag -t warning -y overlay -m 'You pressed the reboot shortcut. Do you really want to reboot your device?' -B 'Yes, reboot my device' 'rm -Rf ~/.local/state/battery-interval-swaynag.log && reboot'"
 
 #
 # Moving around:
