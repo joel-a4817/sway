@@ -28,7 +28,7 @@ exec ~/.config/sway/scripts/battery-warn.sh
 exec autotiling
 default_orientation auto
 exec ~/.config/sway/scripts/float-geometry-watcher.sh
-exec swaylock -F -fi /home/joel/Downloads/Backup/mcqueen.jpeg
+exec swaylock -F -fi /home/joel/Documents/Backup/mcqueen.jpeg
 
 set $popup popup
 
@@ -53,7 +53,7 @@ for_window [app_id="foot" title="^$popup-audio-select"]   floating enable, resiz
 for_window [app_id="PrismLauncher"] floating enable, move position center
 
 ### Output configuration
-output * bg /home/joel/Downloads/Backup/mcqueen.jpeg fill
+output * bg /home/joel/Documents/Backup/mcqueen.jpeg fill
 # Example configuration:
 #   output HDMI-A-1 resolution 1920x1080 position 1920,0
 
@@ -182,7 +182,7 @@ output * max_render_time off
 
     # system off options
     bindsym --no-repeat --locked $mod+Shift+e exec bash -c "swaynag -t warning -y overlay -m 'You pressed the exit shortcut. Do you really want to exit sway?' -B 'Yes, exit sway' 'rm -Rf ~/.local/state/battery-interval-swaynag.log && swaymsg exit'"
-bindsym --locked $mod+Escape exec bash -c 'rm -Rf ~/.local/state/battery-interval-swaynag.log && swaylock -F -fi /home/joel/Downloads/Backup/mcqueen.jpeg && sleep 0.3 && systemctl suspend'
+bindsym --locked $mod+Escape exec bash -c 'rm -Rf ~/.local/state/battery-interval-swaynag.log && swaylock -F -fi /home/joel/Documents/Backup/mcqueen.jpeg && sleep 0.3 && systemctl suspend'
 bindsym --no-repeat --locked $mod+Shift+r exec bash -c "swaynag -t warning -y overlay -m 'You pressed the reboot shortcut. Do you really want to reboot your device?' -B 'Yes, reboot my device' 'rm -Rf ~/.local/state/battery-interval-swaynag.log && reboot'"
 
 #
