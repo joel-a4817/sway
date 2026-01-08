@@ -103,7 +103,7 @@ bindsym --no-repeat $mod+Shift+w fullscreen disable; exec $term -T "$popup-updat
 #keybinds app
 bindsym --no-repeat $mod+Print fullscreen disable; exec $term -T "$popup-tuis" -e clipse
 bindsym --no-repeat $mod+slash fullscreen disable; exec $term -T "$popup-tuis" -e yazi ~/Downloads
-bindsym --no-repeat $mod+BackSpace fullscreen disable; exec librewolf --new-window 'about:preferences#search=contrast'
+bindsym --no-repeat $mod+BackSpace fullscreen disable; exec librewolf
 bindsym --no-repeat $mod+Delete fullscreen disable; exec solaar
 bindsym --no-repeat $mod+backslash fullscreen disable; exec VirtualBox
 
@@ -125,6 +125,7 @@ bindsym --no-repeat $mod+Mod5+d fullscreen disable; exec librewolf --new-window 
 bindsym --no-repeat $mod+Mod5+m fullscreen disable; exec librewolf --new-window 'https://m365.cloud.microsoft/apps/?refOrigin=Google&origindomain=Office&auth=2'
 bindsym --no-repeat $mod+Mod5+c fullscreen disable; exec librewolf --new-window 'https://m365.cloud.microsoft/chat/?refOrigin=Google&origindomain=Office&auth=2&client-request-id=061c8e37-e171-4c86-b85a-d2f733680eb8'
 bindsym --no-repeat $mod+Mod5+p fullscreen disable; exec librewolf --new-window 'http://localhost:631'
+bindsym --no-repeat $mod+Mod5+s fullscreen disable; exec librewolf --new-window 'about:preferences#search=contrast'
 
 #wifi
 bindsym --no-repeat $mod+XF86Display fullscreen disable; exec $term -T "$popup-wifi-device-select1"   -e bash -c 'nmcli dev disconnect wlp0s20f0u4; echo; nmcli dev disconnect wlp0s20f0u1; echo; nmcli dev connect wlp0s20f3; echo; read -n 1 -p "Press any key to close..."'
