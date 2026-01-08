@@ -103,7 +103,7 @@ bindsym --no-repeat $mod+Shift+w fullscreen disable; exec $term -T "$popup-updat
 #keybinds app
 bindsym --no-repeat $mod+Print fullscreen disable; exec $term -T "$popup-tuis" -e clipse
 bindsym --no-repeat $mod+slash fullscreen disable; exec $term -T "$popup-tuis" -e yazi ~/Downloads
-bindsym --no-repeat $mod+BackSpace fullscreen disable; exec librewolf
+bindsym --no-repeat $mod+BackSpace fullscreen disable; exec librewolf --new-window 'about:preferences#search=contrast'
 bindsym --no-repeat $mod+Delete fullscreen disable; exec solaar
 bindsym --no-repeat $mod+backslash fullscreen disable; exec VirtualBox
 
