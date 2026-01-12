@@ -154,6 +154,7 @@ output * bg /home/joel/.config/sway/mcqueen-blurred.jpeg fill
 # Other settings
 output eDP-1 allow_tearing yes
 output * max_render_time off
+default_border pixel
 
 # Border colours
 set $fg        #E6E1E8
