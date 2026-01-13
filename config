@@ -189,7 +189,7 @@ client.background       #1D1C22
 
     # system off options
     bindsym --no-repeat --locked $mod+Shift+e exec bash -c "swaynag -t warning -y overlay -m 'You pressed the exit shortcut. Do you really want to exit sway?' -B 'Yes, exit sway' 'rm -Rf ~/.local/state/battery-interval-swaynag.log && swaymsg exit'"
-bindsym --locked $mod+Escape exec bash -c 'rm -Rf ~/.local/state/battery-interval-swaynag.log && swaylock -F -fi /home/joel/.config/sway/mcqueen.jpeg && sleep 0.3 && systemctl suspend'
+bindsym --locked $mod+Escape exec bash -c 'rm -Rf ~/.local/state/battery-interval-swaynag.log && swaylock -F -fi /home/joel/.config/sway/mcqueen.jpeg && systemctl suspend'
 bindsym --no-repeat --locked $mod+Shift+r exec bash -c "swaynag -t warning -y overlay -m 'You pressed the reboot shortcut. Do you really want to reboot your device?' -B 'Yes, reboot my device' 'rm -Rf ~/.local/state/battery-interval-swaynag.log && reboot'"
 
 #
