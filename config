@@ -51,10 +51,10 @@ for_window [app_id="foot" title="^$popup-wifi-device-select"] floating enable, r
 for_window [app_id="foot" title="^$popup-audio-select"]   floating enable, resize set 1200 100,  move position center
 
 for_window [app_id="PrismLauncher"] floating enable, move position center
-for_window [app_id="qutebrowser"] opacity 0.9
-for_window [class="NotesHub"] opacity 0.9
-for_window [app_id="signal"] opacity 0.9
-for_window [app_id="foot"] opacity 0.9
+for_window [app_id="qutebrowser"] opacity 0.85
+for_window [class="NotesHub"] opacity 0.85
+for_window [app_id="signal"] opacity 0.85
+for_window [app_id="foot"] opacity 0.85
 
 
 ### Input configuration
@@ -98,7 +98,7 @@ bindsym --no-repeat $mod+Shift+w fullscreen disable; exec $term -T "$popup-updat
 #keybinds app
 bindsym --no-repeat $mod+Print fullscreen disable; exec $term -T "$popup-tuis" -e clipse
 bindsym --no-repeat $mod+slash fullscreen disable; exec $term -T "$popup-tuis" -e yazi ~/Downloads
-bindsym --no-repeat $mod+BackSpace fullscreen disable; exec qutebrower
+bindsym --no-repeat $mod+BackSpace fullscreen disable; exec qutebrowser
 bindsym --no-repeat $mod+Delete fullscreen disable; exec solaar
 bindsym --no-repeat $mod+backslash fullscreen disable; exec VirtualBox
 
@@ -114,13 +114,13 @@ bindsym --no-repeat $mod+Mod5+a fullscreen disable; exec VBoxManage startvm "w11
 bindsym --no-repeat $mod+Mod5+l fullscreen disable; exec $term -e bash -c 'prismlauncher --launch "1.21.9(1)"'
 bindsym --no-repeat $mod+Mod5+h fullscreen disable; exec $term -e bash -c 'prismlauncher --launch "1.21.4"'
 bindsym --no-repeat $mod+Mod5+b fullscreen disable; exec $term -e bash -c 'prismlauncher --launch "Enhanced Bedwars 1.8.9"'
-bindsym --no-repeat $mod+Mod5+g fullscreen disable; exec qutebrower --new-window 'https://github.com/repos?q=owner%3A%40me'
-bindsym --no-repeat $mod+Mod5+w fullscreen disable; exec qutebrower --new-window 'https://web.whatsapp.com/'
-bindsym --no-repeat $mod+Mod5+d fullscreen disable; exec qutebrower --new-window 'https://drive.google.com/drive/my-drive'
-bindsym --no-repeat $mod+Mod5+m fullscreen disable; exec qutebrower --new-window 'https://m365.cloud.microsoft/apps/?refOrigin=Google&origindomain=Office&auth=2'
-bindsym --no-repeat $mod+Mod5+c fullscreen disable; exec qutebrower --new-window 'https://m365.cloud.microsoft/chat/?refOrigin=Google&origindomain=Office&auth=2&client-request-id=061c8e37-e171-4c86-b85a-d2f733680eb8'
-bindsym --no-repeat $mod+Mod5+p fullscreen disable; exec qutebrower --new-window 'http://localhost:631'
-bindsym --no-repeat $mod+Mod5+s fullscreen disable; exec qutebrower --new-window 'qute//:settings'
+bindsym --no-repeat $mod+Mod5+g fullscreen disable; exec qutebrowser --new-window 'https://github.com/repos?q=owner%3A%40me'
+bindsym --no-repeat $mod+Mod5+w fullscreen disable; exec qutebrowser --new-window 'https://web.whatsapp.com/'
+bindsym --no-repeat $mod+Mod5+d fullscreen disable; exec qutebrowser --new-window 'https://drive.google.com/drive/my-drive'
+bindsym --no-repeat $mod+Mod5+m fullscreen disable; exec qutebrowser --new-window 'https://m365.cloud.microsoft/apps/?refOrigin=Google&origindomain=Office&auth=2'
+bindsym --no-repeat $mod+Mod5+c fullscreen disable; exec qutebrowser --new-window 'https://m365.cloud.microsoft/chat/?refOrigin=Google&origindomain=Office&auth=2&client-request-id=061c8e37-e171-4c86-b85a-d2f733680eb8'
+bindsym --no-repeat $mod+Mod5+p fullscreen disable; exec qutebrowser --new-window 'http://localhost:631'
+bindsym --no-repeat $mod+Mod5+s fullscreen disable; exec qutebrowser --new-window 'qute//:settings'
 
 #wifi
 bindsym --no-repeat $mod+XF86Display fullscreen disable; exec $term -T "$popup-wifi-device-select1"   -e bash -c 'nmcli dev disconnect wlp0s20f0u4; echo; nmcli dev disconnect wlp0s20f0u1; echo; nmcli dev connect wlp0s20f3; echo; read -n 1 -p "Press any key to close..."'
@@ -157,16 +157,18 @@ output eDP-1 allow_tearing yes
 output * max_render_time off
 default_border pixel
 
-# Border colours
-set $fg        #E6E1E8
-set $bg90      #1D1C22E6
-set $accent    #ff8800
+# Borders
 
-client.focused          $accent $bg90 $fg $accent $accent
-client.focused_inactive $bg90   $bg90 $fg $bg90   $bg90
-client.unfocused        $bg90   $bg90 $fg $bg90   $bg90
-client.urgent           #BF616A #BF616A $fg #BF616A #BF616A
-client.background       #1D1C22
+set $fg     #E6E1E8
+set $bg     #242424
+set $accent #ff8800
+
+# class                  border   background  text   indicator child_border
+client.focused           $accent  $bg         $fg    $accent    $accent
+client.focused_inactive  $bg      $bg         $fg    $bg        $bg
+client.unfocused         $bg      $bg         $fg    $bg        $bg
+client.urgent            #BF616A  #BF616A     $fg    #BF616A    #BF616A
+client.background        $bg
 
 ### Key bindings
 #
