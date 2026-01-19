@@ -16,7 +16,9 @@ cat >"$cfg" <<'JSON'
   },
   "modules": [
     { "type": "title" },
+    { "type": "colors"},
     "break",
+
     { "type": "custom", "format": "\u001b[38;5;208m┈ Session Snapshot ┈" },
 
     "break",
@@ -26,9 +28,6 @@ cat >"$cfg" <<'JSON'
     { "type": "media",     "key": "media",     "keyColor": "light_magenta" },
     { "type": "player",    "key": "player",    "keyColor": "light_magenta" },
     { "type": "sound",     "key": "sound",     "keyColor": "light_magenta" },
-
-    "break",
-    { "type": "colors", }
   ]
 }
 JSON

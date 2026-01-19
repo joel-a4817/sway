@@ -16,7 +16,9 @@ cat >"$cfg" <<'JSON'
   },
   "modules": [
     { "type": "title" },
+    { "type": "colors"},
     "break",
+
     { "type": "custom", "format": "\u001b[38;5;208m┈ Network & Reachability ┈" },
 
     "break",
@@ -28,9 +30,6 @@ cat >"$cfg" <<'JSON'
 
     "break",
     { "type": "weather","key": "weather","keyColor": "light_green" },
-
-    "break",
-    { "type": "colors", }
   ]
 }
 JSON
