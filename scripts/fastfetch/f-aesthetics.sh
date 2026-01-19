@@ -16,7 +16,9 @@ cat >"$cfg" <<'JSON'
   },
   "modules": [
     { "type": "title" },
+    { "type": "colors"},
     "break",
+
     { "type": "custom", "format": "\u001b[38;5;208m┈ Desktop Visuals ┈" },
 
     "break",
@@ -32,9 +34,6 @@ cat >"$cfg" <<'JSON'
     { "type": "terminalFont", "key": "terminalFont", "keyColor": "light_blue" },
     { "type": "terminalSize", "key": "terminalSize", "keyColor": "light_blue" },
     { "type": "terminalTheme","key": "terminalTheme","keyColor": "light_blue" },
-
-    "break",
-    { "type": "colors"}
   ]
 }
 JSON

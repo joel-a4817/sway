@@ -16,7 +16,9 @@ cat >"$cfg" <<'JSON'
   },
   "modules": [
     { "type": "title" },
+    { "type": "colors"},
     "break",
+
     { "type": "custom", "format": "\u001b[38;5;208m┈ Live System Stats ┈" },
 
     "break",
@@ -39,9 +41,6 @@ cat >"$cfg" <<'JSON'
     "break",
     { "type": "users",     "key": "users",     "keyColor": "light_cyan" },
     { "type": "uptime",   "key": "uptime",   "keyColor": "light_cyan" },
-
-    "break",
-    { "type": "colors", }
   ]
 }
 JSON

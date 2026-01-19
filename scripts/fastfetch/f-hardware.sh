@@ -16,7 +16,9 @@ cat >"$cfg" <<'JSON'
   },
   "modules": [
     { "type": "title" },
+    { "type": "colors"},
     "break",
+
     { "type": "custom", "format": "\u001b[38;5;208m┈ Physical & Graphics ┈" },
 
     "break",
@@ -41,14 +43,10 @@ cat >"$cfg" <<'JSON'
 
     "break",
     { "type": "host",      "key": "host",      "keyColor": "light_blue" },
-
-    "break",
-    { "type": "colors" }
   ]
 }
 JSON
 
 fastfetch -c "$cfg" -l none
 rm -f "$cfg"
-``
 

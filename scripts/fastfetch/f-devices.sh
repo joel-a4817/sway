@@ -16,7 +16,9 @@ cat >"$cfg" <<'JSON'
   },
    "modules": [
     { "type": "title" },
+    { "type": "colors"},
     "break",
+
     { "type": "custom", "format": "\u001b[38;5;208m┈ Input & Wireless ┈" },
 
     "break",
@@ -25,9 +27,6 @@ cat >"$cfg" <<'JSON'
     { "type": "keyboard",     "key": "keyboard",     "keyColor": "light_green" },
     { "type": "mouse",        "key": "mouse",        "keyColor": "light_green" },
     { "type": "powerAdapter", "key": "powerAdapter", "keyColor": "light_blue" },
-
-    "break",
-    { "type": "colors" }
   ]
 }
 JSON

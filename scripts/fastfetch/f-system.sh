@@ -16,7 +16,9 @@ cat >"$cfg" <<'JSON'
   },
   "modules": [
     { "type": "title" },
+    { "type": "colors"},
     "break",
+
     { "type": "custom", "format": "\u001b[38;5;208m┈ OS & Session ┈" },
 
     "break",
@@ -34,9 +36,6 @@ cat >"$cfg" <<'JSON'
     { "type": "bootmgr", "key": "bootmgr", "keyColor": "light_cyan" },
     { "type": "btrfs",   "key": "btrfs",   "keyColor": "light_magenta" },
     { "type": "zpool",   "key": "zpool",   "keyColor": "light_magenta" },
-
-    "break",
-    { "type": "colors", }
   ]
 }
 JSON

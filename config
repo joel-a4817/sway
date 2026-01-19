@@ -40,9 +40,9 @@ for_window [app_id="foot" title="^$popup-tuis"]           floating enable, resiz
 
 for_window [app_id="foot" title="^$popup-f-aesthetics"]   floating enable, resize set 800 450,  move position center
 for_window [app_id="foot" title="^$popup-f-system"]       floating enable, resize set 850 600,  move position center
-for_window [app_id="foot" title="^$popup-f-devices"]      floating enable, resize set 700 450,  move position center
+for_window [app_id="foot" title="^$popup-f-devices"]      floating enable, resize set 700 400,  move position center
 for_window [app_id="foot" title="^$popup-f-wifi"]         floating enable, resize set 1450 450, move position center
-for_window [app_id="foot" title="^$popup-f-info"]         floating enable, resize set 1200 800, move position center
+for_window [app_id="foot" title="^$popup-f-info"]         floating enable, resize set 1200 750, move position center
 for_window [app_id="foot" title="^$popup-f-main"]         floating enable, resize set 1800 400, move position center
 for_window [app_id="foot" title="^$popup-f-hardware"]     floating enable, resize set 1150 700, move position center
 
