@@ -67,7 +67,8 @@ for_window [app_id="foot"] opacity 0.85
    }
 
    input type:keyboard {
-       xkb_layout "eu"
+       xkb_layout "us"
+       xkb_options "compose:ralt"
        repeat_delay 200
        repeat_rate 35
    }
