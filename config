@@ -50,6 +50,7 @@ for_window [app_id="foot" title="^$popup-wifi-select"]    floating enable, resiz
 for_window [app_id="foot" title="^$popup-wifi-device-select"] floating enable, resize set 500 500, move position center
 for_window [app_id="foot" title="^$popup-audio-select"]   floating enable, resize set 1200 100,  move position center
 
+for_window [app_id="yazi-nvim"] floating enable, move position center, resize set 1000 700, opacity 0.85
 for_window [app_id="PrismLauncher"] floating enable, move position center
 for_window [app_id="qutebrowser"] opacity 0.85
 for_window [class="NotesHub"] opacity 0.85
