@@ -139,7 +139,7 @@ bindsym --locked --no-repeat $mod+Control+a fullscreen disable; exec $term -T "$
 #screen-record
 bindsym --no-repeat Mod5+Print exec bash -c 'mkdir -p ~/Downloads/Videos/Screen-recordings; wf-recorder -f ~/Downloads/Videos/Screen-recordings/recording-$(date +%Y%m%d-%H%M%S).mp4'
 bindsym --no-repeat Mod1+Print exec bash -c 'mkdir -p ~/Downloads/Videos/Screen-recordings; wf-recorder -a -f ~/Downloads/Videos/Screen-recordings/recording-$(date +%Y%m%d-%H%M%S).mp4'
-bindsym --no-repeat Control+Print exec bash -c 'pkill -INT -f wf-recorder'
+bindsym --no-repeat Control+Print exec bash -c 'pkill --signal INT --exact wf-recorder'
 
 #screenshot
 bindsym --no-repeat Print exec bash -c 'mkdir -p ~/Downloads/Pictures/Screenshots; grim -t png - | tee ~/Downloads/Pictures/Screenshots/screenshot-$(date +%Y%m%d-%H%M%S).png | wl-copy'
