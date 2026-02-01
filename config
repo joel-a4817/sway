@@ -70,8 +70,8 @@ for_window [app_id="org.pwmt.zathura"] opacity 0.85
    }
 
    input type:keyboard {
-       xkb_layout "us"
-       xkb_options "compose:ralt"
+       xkb_layout "eu"
+       xkb_options "compose:f2"
        repeat_delay 200
        repeat_rate 35
    }
@@ -123,8 +123,8 @@ bindsym --no-repeat $mod+Mod5+h fullscreen disable; exec $term -e bash -c 'prism
 bindsym --no-repeat $mod+Mod5+b fullscreen disable; exec $term -e bash -c 'prismlauncher --launch "Enhanced Bedwars 1.8.9"'
 
 #wifi
-bindsym --no-repeat $mod+XF86Display fullscreen disable; exec $term -T "$popup-wifi-device-select1"   -e bash -c 'nmcli dev disconnect wlp0s20f0u4; echo; nmcli dev disconnect wlp0s20f0u1; echo; nmcli dev connect wlp0s20f3; echo; read -n 1 -p "Press any key to close..."'
-bindsym --no-repeat $mod+F2 fullscreen disable; exec $term -T "$popup-wifi-device-select2"   -e bash -c 'nmcli dev connect wlp0s20f0u4; echo; nmcli dev connect wlp0s20f0u1; echo; nmcli dev disconnect wlp0s20f3; echo; read -n 1 -p "Press any key to close..."'
+bindsym --no-repeat Mod1+XF86Display fullscreen disable; exec $term -T "$popup-wifi-device-select1"   -e bash -c 'nmcli dev disconnect wlp0s20f0u4; echo; nmcli dev disconnect wlp0s20f0u1; echo; nmcli dev connect wlp0s20f3; echo; read -n 1 -p "Press any key to close..."'
+bindsym --no-repeat Mod5+XF86Display fullscreen disable; exec $term -T "$popup-wifi-device-select2"   -e bash -c 'nmcli dev connect wlp0s20f0u4; echo; nmcli dev connect wlp0s20f0u1; echo; nmcli dev disconnect wlp0s20f3; echo; read -n 1 -p "Press any key to close..."'
 bindsym --no-repeat $mod+Insert fullscreen disable; exec $term -T "$popup-wifi-select" -e bash -c 'nmcli device status; echo; nmcli device wifi list; echo; nmcli dev wifi connect --ask; read -n 1 -p "Press any key to close..."'
 
 #fastfetch
@@ -137,13 +137,13 @@ bindsym --locked --no-repeat $mod+Control+h fullscreen disable; exec $term -T "$
 bindsym --locked --no-repeat $mod+Control+a fullscreen disable; exec $term -T "$popup-f-aesthetics" -e bash -c '~/.config/sway/scripts/fastfetch/f-aesthetics.sh; echo; read -n 1 -p "Press any key to close..."'
 
 #screen-record
-bindsym --locked --no-repeat Mod5+Print exec bash -c 'mkdir -p ~/Downloads/Videos/Screen-recordings && wf-recorder -f ~/Downloads/Videos/Screen-recordings/recording-$(date +%Y%m%d-%H%M%S).mp4'
-bindsym --locked --no-repeat Mod1+Print exec bash -c 'mkdir -p ~/Downloads/Videos/Screen-recordings && wf-recorder -a -f ~/Downloads/Videos/Screen-recordings/recording-$(date +%Y%m%d-%H%M%S).mp4'
-bindsym --locked --no-repeat Control+Print exec bash -c 'pkill -INT -f "wf-recorder"'
+bindsym --no-repeat Mod5+Print exec bash -c 'mkdir -p ~/Downloads/Videos/Screen-recordings; wf-recorder -f ~/Downloads/Videos/Screen-recordings/recording-$(date +%Y%m%d-%H%M%S).mp4'
+bindsym --no-repeat Mod1+Print exec bash -c 'mkdir -p ~/Downloads/Videos/Screen-recordings; wf-recorder -a -f ~/Downloads/Videos/Screen-recordings/recording-$(date +%Y%m%d-%H%M%S).mp4'
+bindsym --no-repeat Control+Print exec bash -c 'pkill -INT -f wf-recorder'
 
 #screenshot
-bindsym --locked --no-repeat Print exec bash -c 'mkdir -p ~/Downloads/Pictures/Screenshots; ts=$(date +%Y%m%d-%H%M%S); grim -t png - | tee ~/Downloads/Pictures/Screenshots/screenshot-$ts.png | wl-copy'
-bindsym --locked --no-repeat Shift+Print exec bash -c 'mkdir -p ~/Downloads/Pictures/Screenshots; ts=$(date +%Y%m%d-%H%M%S); grim -t png -g "$(slurp)" - | tee ~/Downloads/Pictures/Screenshots/screenshot-$ts.png | wl-copy'
+bindsym --no-repeat Print exec bash -c 'mkdir -p ~/Downloads/Pictures/Screenshots; grim -t png - | tee ~/Downloads/Pictures/Screenshots/screenshot-$(date +%Y%m%d-%H%M%S).png | wl-copy'
+bindsym --no-repeat Shift+Print exec bash -c 'mkdir -p ~/Downloads/Pictures/Screenshots; grim -t png -g "$(slurp)" - | tee ~/Downloads/Pictures/Screenshots/screenshot-$(date +%Y%m%d-%H%M%S).png | wl-copy'
 
 #audio device output switch
 bindsym --locked --no-repeat $mod+XF86AudioMute fullscreen disable; exec $term -T "$popup-audio-select1" -e bash -c 'pactl set-card-profile alsa_card.usb-Jieli_Technology_JLab_JBuds_Lux_USB_4250314331393108-00 output:iec958-stereo && pactl set-default-sink alsa_output.usb-Jieli_Technology_JLab_JBuds_Lux_USB_4250314331393108-00.iec958-stereo && pactl get-default-sink; read -n 1 -p "Press any key to close..."'
