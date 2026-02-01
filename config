@@ -57,8 +57,9 @@ for_window [class="NotesHub"] opacity 0.85
 for_window [app_id="signal"] opacity 0.85
 for_window [app_id="foot"] opacity 0.85
 for_window [app_id="libreoffice"] opacity 0.85
-
-
+for_window [class="discord"] opacity 0.85
+for_window [app_id="org.pwmt.zathura"] opacity 0.85
+ 
 ### Input configuration
    input type:touchpad {
        dwt enabled
@@ -100,11 +101,13 @@ bindsym --no-repeat $mod+Shift+w fullscreen disable; exec $term -T "$popup-updat
 
 #keybinds app
 bindsym --no-repeat $mod+Print fullscreen disable; exec $term -T "$popup-tuis" -e clipse
-bindsym --no-repeat $mod+slash fullscreen disable; exec $term -T "$popup-tuis" -e yazi ~/Downloads
+bindsym --no-repeat $mod+slash fullscreen disable; exec $term -T "$popup-tuis" -e yazi
 bindsym --no-repeat $mod+BackSpace fullscreen disable; exec qutebrowser
 bindsym --no-repeat $mod+Delete fullscreen disable; exec solaar
 bindsym --no-repeat $mod+backslash fullscreen disable; exec VirtualBox
 
+bindsym --no-repeat $mod+Mod1+z fullscreen disable; exec zathura
+bindsym --no-repeat $mod+Mod1+d fullscreen disable; exec discord
 bindsym --no-repeat $mod+Mod1+l fullscreen disable; exec libreoffice
 bindsym --no-repeat $mod+Mod1+s fullscreen disable; exec signal-desktop
 bindsym --no-repeat $mod+Mod1+m fullscreen disable; exec prismlauncher
