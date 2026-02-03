@@ -105,6 +105,7 @@ bindsym --no-repeat $mod+slash fullscreen disable; exec $term -T "$popup-tuis" -
 bindsym --no-repeat $mod+BackSpace fullscreen disable; exec qutebrowser
 bindsym --no-repeat $mod+Delete fullscreen disable; exec solaar
 bindsym --no-repeat $mod+backslash fullscreen disable; exec VirtualBox
+bindsym --no-repeat $mod+Shift+slash fullscreen disable; exec $term -T "$popup-tuis" -e calcurse
 
 bindsym --no-repeat $mod+Mod1+z fullscreen disable; exec zathura
 bindsym --no-repeat $mod+Mod1+d fullscreen disable; exec discord
@@ -123,8 +124,8 @@ bindsym --no-repeat $mod+Mod5+h fullscreen disable; exec $term -e bash -c 'prism
 bindsym --no-repeat $mod+Mod5+b fullscreen disable; exec $term -e bash -c 'prismlauncher --launch "Enhanced Bedwars 1.8.9"'
 
 #wifi
-bindsym --no-repeat Mod1+XF86Display fullscreen disable; exec $term -T "$popup-wifi-device-select1"   -e bash -c 'nmcli dev disconnect wlp0s20f0u4; echo; nmcli dev disconnect wlp0s20f0u1; echo; nmcli dev connect wlp0s20f3; echo; read -n 1 -p "Press any key to close..."'
-bindsym --no-repeat Mod5+XF86Display fullscreen disable; exec $term -T "$popup-wifi-device-select2"   -e bash -c 'nmcli dev connect wlp0s20f0u4; echo; nmcli dev connect wlp0s20f0u1; echo; nmcli dev disconnect wlp0s20f3; echo; read -n 1 -p "Press any key to close..."'
+bindsym --no-repeat $mod+XF86Display fullscreen disable; exec $term -T "$popup-wifi-device-select1"   -e bash -c 'nmcli dev disconnect wlp0s20f0u4; echo; nmcli dev disconnect wlp0s20f0u1; echo; nmcli dev connect wlp0s20f3; echo; read -n 1 -p "Press any key to close..."'
+bindsym --no-repeat XF86Display fullscreen disable; exec $term -T "$popup-wifi-device-select2"   -e bash -c 'nmcli dev connect wlp0s20f0u4; echo; nmcli dev connect wlp0s20f0u1; echo; nmcli dev disconnect wlp0s20f3; echo; read -n 1 -p "Press any key to close..."'
 bindsym --no-repeat $mod+Insert fullscreen disable; exec $term -T "$popup-wifi-select" -e bash -c 'nmcli device status; echo; nmcli device wifi list; echo; nmcli dev wifi connect --ask; read -n 1 -p "Press any key to close..."'
 
 #fastfetch
