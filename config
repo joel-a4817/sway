@@ -28,7 +28,7 @@ exec ~/.config/sway/scripts/battery-warn.sh
 exec autotiling
 default_orientation auto
 exec ~/.config/sway/scripts/float-geometry-watcher.sh
-exec ~/.config/sway/scripts/borders-follow-state.sh
+exec_always ~/.config/sway/scripts/borders-follow-state.sh
 
 set $popup popup
 
@@ -46,7 +46,8 @@ for_window [app_id="foot" title="^$popup-f-info"]         floating enable, resiz
 for_window [app_id="foot" title="^$popup-f-main"]         floating enable, resize set 1800 400, move position center
 for_window [app_id="foot" title="^$popup-f-hardware"]     floating enable, resize set 1150 700, move position center
 
-for_window [app_id="foot" title="^$popup-wifi-select"]    floating enable, resize set 1200 1000, move position center
+for_window [app_id="foot" title="^$popup-wifi-check"]    floating enable, resize set 1200 1000, move position center
+for_window [app_id="foot" title="^$popup-wifi-select"]    floating enable, resize set 600 500, move position center
 for_window [app_id="foot" title="^$popup-wifi-device-select"] floating enable, resize set 500 500, move position center
 for_window [app_id="foot" title="^$popup-audio-select"]   floating enable, resize set 1200 100,  move position center
 
@@ -71,7 +72,7 @@ for_window [app_id="org.pwmt.zathura"] opacity 0.85
 
    input type:keyboard {
        xkb_layout "eu"
-       xkb_options "compose:f2"
+       xkb_options "compose:prsc"
        repeat_delay 200
        repeat_rate 35
    }
@@ -93,18 +94,22 @@ for_window [app_id="org.pwmt.zathura"] opacity 0.85
 
 # keybinds update
 bindsym --no-repeat $mod+Shift+u fullscreen disable; exec $term -T "$popup-update-rebuild" -e bash -c 'nix flake update --flake ~/nixos && sudo nixos-rebuild switch --upgrade --flake ~/nixos#rt4817; echo; read -n 1 -p "Press any key to close..."'
-# always run rebuild after pixymon update
-bindsym --no-repeat $mod+Shift+p fullscreen disable; exec $term -T "$popup-update-pixymon" -e bash -c 'cd ~/pixy2 && git pull --ff-only && cd scripts && ./build_pixymon_src.sh && cp ~/pixy2/src/host/linux/pixy.rules ~/nixos; echo; read -n 1 -p "Press any key to close..."'
-bindsym --no-repeat $mod+Shift+t fullscreen disable; exec $term -T "$popup-settime" -e bash -c '~/.config/sway/scripts/settime.sh; echo; read -n 1 -p "Press any key to close..."'
 bindsym --no-repeat $mod+Shift+o fullscreen disable; exec $term -T "$popup-update-optimise" -e bash -c 'sudo nix-collect-garbage; echo; sudo nix store optimise; echo; read -n 1 -p "Press any key to close..."'
 bindsym --no-repeat $mod+Shift+w fullscreen disable; exec $term -T "$popup-update-wipe" -e bash -c "swaynag -t warning -y overlay -m 'You pressed the wipe shortcut. Do you really want to delete all other nix configurations and reboot?' -B 'Yes, delete all other nix configurations and reboot' 'sudo nix-collect-garbage -d; echo; sudo nix store optimise; rm -Rf ~/.local/state/battery-interval-swaynag.log; reboot'"
 
+# always run rebuild after pixymon update
+bindsym --no-repeat $mod+Control+p fullscreen disable; exec $term -T "$popup-update-pixymon" -e bash -c 'cd ~/pixy2 && git pull --ff-only && cd scripts && ./build_pixymon_src.sh && cp ~/pixy2/src/host/linux/pixy.rules ~/nixos; echo; read -n 1 -p "Press any key to close..."'
+bindsym --no-repeat $mod+Control+t fullscreen disable; exec $term -T "$popup-settime" -e bash -c '~/.config/sway/scripts/settime.sh; echo; read -n 1 -p "Press any key to close..."'
+bindsym --no-repeat $mod+Control+c fullscreen disable; exec $term -T "$popup-update-calendar" -e bash -c 'rm -Rf ~/.local/share/calcurse/compass.ics; curl -L -o ~/.local/share/calcurse/compass.ics "https://mhs-vic.compass.education/download/sharedCalendar.aspx?uid=19030&key=de953c62-f1e9-475d-b0c2-83fd3c09ff62&c.ics"; echo; calcurse -D ~/.local/share/calcurse/compass -i ~/.local/share/calcurse/compass.ics; echo; read -n 1 -p "Press any key to close..."' 
+
 #keybinds app
-bindsym --no-repeat $mod+Print fullscreen disable; exec $term -T "$popup-tuis" -e clipse
-bindsym --no-repeat $mod+slash fullscreen disable; exec $term -T "$popup-tuis" -e yazi
-bindsym --no-repeat $mod+BackSpace fullscreen disable; exec qutebrowser
-bindsym --no-repeat $mod+Delete fullscreen disable; exec solaar
-bindsym --no-repeat $mod+backslash fullscreen disable; exec VirtualBox
+bindsym --no-repeat $mod+Control+Return fullscreen disable; exec $term -T "$popup-tuis" -e clipse
+bindsym --no-repeat $mod+Shift+Return fullscreen disable; exec $term -T "$popup-tuis" -e yazi
+bindsym --no-repeat $mod+Mod5+Return fullscreen disable; exec $term -T "$popup-tuis" -e calcurse
+bindsym --no-repeat $mod+Mod1+Return fullscreen disable; exec $term -T "$popup-tuis" -e calcurse -D ~/.local/share/calcurse/compass 
+bindsym --no-repeat $mod+Tab fullscreen disable; exec qutebrowser
+bindsym --no-repeat $mod+Shift+Tab fullscreen disable; exec solaar
+bindsym --no-repeat $mod+Control+Tab fullscreen disable; exec VirtualBox
 
 bindsym --no-repeat $mod+Mod1+z fullscreen disable; exec zathura
 bindsym --no-repeat $mod+Mod1+d fullscreen disable; exec discord
@@ -123,9 +128,10 @@ bindsym --no-repeat $mod+Mod5+h fullscreen disable; exec $term -e bash -c 'prism
 bindsym --no-repeat $mod+Mod5+b fullscreen disable; exec $term -e bash -c 'prismlauncher --launch "Enhanced Bedwars 1.8.9"'
 
 #wifi
-bindsym --no-repeat Mod1+XF86Display fullscreen disable; exec $term -T "$popup-wifi-device-select1"   -e bash -c 'nmcli dev disconnect wlp0s20f0u4; echo; nmcli dev disconnect wlp0s20f0u1; echo; nmcli dev connect wlp0s20f3; echo; read -n 1 -p "Press any key to close..."'
-bindsym --no-repeat Mod5+XF86Display fullscreen disable; exec $term -T "$popup-wifi-device-select2"   -e bash -c 'nmcli dev connect wlp0s20f0u4; echo; nmcli dev connect wlp0s20f0u1; echo; nmcli dev disconnect wlp0s20f3; echo; read -n 1 -p "Press any key to close..."'
-bindsym --no-repeat $mod+Insert fullscreen disable; exec $term -T "$popup-wifi-select" -e bash -c 'nmcli device status; echo; nmcli device wifi list; echo; nmcli dev wifi connect --ask; read -n 1 -p "Press any key to close..."'
+bindsym --no-repeat $mod+XF86Display fullscreen disable; exec $term -T "$popup-wifi-device-select1"   -e bash -c 'nmcli dev disconnect wlp0s20f0u4; echo; nmcli dev disconnect wlp0s20f0u1; echo; nmcli dev connect wlp0s20f3; echo; read -n 1 -p "Press any key to close..."'
+bindsym --no-repeat $mod+F2 fullscreen disable; exec $term -T "$popup-wifi-device-select2"   -e bash -c 'nmcli dev connect wlp0s20f0u4; echo; nmcli dev connect wlp0s20f0u1; echo; nmcli dev disconnect wlp0s20f3; echo; read -n 1 -p "Press any key to close..."'
+bindsym --no-repeat XF86Display fullscreen disable; exec $term -T "$popup-wifi-check" -e bash -c 'nmcli device status; echo; nmcli device wifi list; echo; read -n 1 -p "Press any key to close..."'
+bindsym --no-repeat F2 fullscreen disable; exec $term -T "$popup-wifi-select" -e bash -c 'nmcli dev wifi connect --ask; read -n 1 -p "Press any key to close..."'
 
 #fastfetch
 bindsym --locked --no-repeat $mod+Control+w fullscreen disable; exec $term -T "$popup-f-wifi" -e bash -c '~/.config/sway/scripts/fastfetch/f-wifi.sh; read -n 1 -p "Press any key to close..."'
@@ -137,13 +143,13 @@ bindsym --locked --no-repeat $mod+Control+h fullscreen disable; exec $term -T "$
 bindsym --locked --no-repeat $mod+Control+a fullscreen disable; exec $term -T "$popup-f-aesthetics" -e bash -c '~/.config/sway/scripts/fastfetch/f-aesthetics.sh; echo; read -n 1 -p "Press any key to close..."'
 
 #screen-record
-bindsym --no-repeat Mod5+Print exec bash -c 'mkdir -p ~/Downloads/Videos/Screen-recordings; wf-recorder -f ~/Downloads/Videos/Screen-recordings/recording-$(date +%Y%m%d-%H%M%S).mp4'
-bindsym --no-repeat Mod1+Print exec bash -c 'mkdir -p ~/Downloads/Videos/Screen-recordings; wf-recorder -a -f ~/Downloads/Videos/Screen-recordings/recording-$(date +%Y%m%d-%H%M%S).mp4'
-bindsym --no-repeat Control+Print exec bash -c 'pkill --signal INT --exact wf-recorder'
+bindsym --no-repeat $mod+Mod5+Insert exec bash -c 'mkdir -p ~/Downloads/Videos/Screen-recordings; wf-recorder -f ~/Downloads/Videos/Screen-recordings/recording-$(date +%Y%m%d-%H%M%S).mp4'
+bindsym --no-repeat $mod+Mod1+Insert exec bash -c 'mkdir -p ~/Downloads/Videos/Screen-recordings; wf-recorder -a -f ~/Downloads/Videos/Screen-recordings/recording-$(date +%Y%m%d-%H%M%S).mp4'
+bindsym --no-repeat $mod+Control+Insert exec bash -c 'pkill --signal INT --exact wf-recorder'
 
 #screenshot
-bindsym --no-repeat Print exec bash -c 'mkdir -p ~/Downloads/Pictures/Screenshots; grim -t png - | tee ~/Downloads/Pictures/Screenshots/screenshot-$(date +%Y%m%d-%H%M%S).png | wl-copy'
-bindsym --no-repeat Shift+Print exec bash -c 'mkdir -p ~/Downloads/Pictures/Screenshots; grim -t png -g "$(slurp)" - | tee ~/Downloads/Pictures/Screenshots/screenshot-$(date +%Y%m%d-%H%M%S).png | wl-copy'
+bindsym --no-repeat $mod+Insert exec bash -c 'mkdir -p ~/Downloads/Pictures/Screenshots; grim -t png - | tee ~/Downloads/Pictures/Screenshots/screenshot-$(date +%Y%m%d-%H%M%S).png | wl-copy'
+bindsym --no-repeat $mod+Shift+Insert exec bash -c 'mkdir -p ~/Downloads/Pictures/Screenshots; grim -t png -g "$(slurp)" - | tee ~/Downloads/Pictures/Screenshots/screenshot-$(date +%Y%m%d-%H%M%S).png | wl-copy'
 
 #audio device output switch
 bindsym --locked --no-repeat $mod+XF86AudioMute fullscreen disable; exec $term -T "$popup-audio-select1" -e bash -c 'pactl set-card-profile alsa_card.usb-Jieli_Technology_JLab_JBuds_Lux_USB_4250314331393108-00 output:iec958-stereo && pactl set-default-sink alsa_output.usb-Jieli_Technology_JLab_JBuds_Lux_USB_4250314331393108-00.iec958-stereo && pactl get-default-sink; read -n 1 -p "Press any key to close..."'
