@@ -28,7 +28,7 @@ exec ~/.config/sway/scripts/battery-warn.sh
 exec autotiling
 default_orientation auto
 exec ~/.config/sway/scripts/float-geometry-watcher.sh
-exec ~/.config/sway/scripts/borders-follow-state.sh
+exec_always ~/.config/sway/scripts/borders-follow-state.sh
 
 set $popup popup
 
