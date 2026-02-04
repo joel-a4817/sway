@@ -100,7 +100,7 @@ bindsym --no-repeat $mod+Shift+w fullscreen disable; exec $term -T "$popup-updat
 # always run rebuild after pixymon update
 bindsym --no-repeat $mod+Control+p fullscreen disable; exec $term -T "$popup-update-pixymon" -e bash -c 'cd ~/pixy2 && git pull --ff-only && cd scripts && ./build_pixymon_src.sh && cp ~/pixy2/src/host/linux/pixy.rules ~/nixos; echo; read -n 1 -p "Press any key to close..."'
 bindsym --no-repeat $mod+Control+t fullscreen disable; exec $term -T "$popup-settime" -e bash -c '~/.config/sway/scripts/settime.sh; echo; read -n 1 -p "Press any key to close..."'
-bindsym --no-repeat $mod+Control+c fullscreen disable; exec $term -T "$popup-update-calendar" -e bash -c 'rm -Rf ~/.local/share/calcurse/compass.ics; curl -L -o ~/.local/share/calcurse/compass.ics "https://mhs-vic.compass.education/download/sharedCalendar.aspx?uid=19030&key=de953c62-f1e9-475d-b0c2-83fd3c09ff62&c.ics"; echo; calcurse -D ~/.local/share/calcurse/compass -i ~/.local/share/calcurse/compass.ics; echo; read -n 1 -p "Press any key to close..."' 
+bindsym --no-repeat $mod+Control+c fullscreen disable; exec $term -T "$popup-update-calendar" -e bash -c 'rm -Rf ~/.local/share/calcurse/compass.ics ~/.local/share/calcurse/compass; curl -L -o ~/.local/share/calcurse/compass.ics "https://mhs-vic.compass.education/download/sharedCalendar.aspx?uid=19030&key=de953c62-f1e9-475d-b0c2-83fd3c09ff62&c.ics"; echo; calcurse -D ~/.local/share/calcurse/compass -i ~/.local/share/calcurse/compass.ics; echo; read -n 1 -p "Press any key to close..."' 
 
 #keybinds app
 bindsym --no-repeat $mod+Control+Return fullscreen disable; exec $term -T "$popup-tuis" -e clipse
