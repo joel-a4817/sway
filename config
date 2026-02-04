@@ -72,7 +72,7 @@ for_window [app_id="org.pwmt.zathura"] opacity 0.85
 
    input type:keyboard {
        xkb_layout "eu"
-       xkb_options "compose:prsc"
+       xkb_options "compose:insert"
        repeat_delay 200
        repeat_rate 35
    }
@@ -143,13 +143,13 @@ bindsym --locked --no-repeat $mod+Control+h fullscreen disable; exec $term -T "$
 bindsym --locked --no-repeat $mod+Control+a fullscreen disable; exec $term -T "$popup-f-aesthetics" -e bash -c '~/.config/sway/scripts/fastfetch/f-aesthetics.sh; echo; read -n 1 -p "Press any key to close..."'
 
 #screen-record
-bindsym --no-repeat $mod+Mod5+Insert exec bash -c 'mkdir -p ~/Downloads/Videos/Screen-recordings; wf-recorder -f ~/Downloads/Videos/Screen-recordings/recording-$(date +%Y%m%d-%H%M%S).mp4'
-bindsym --no-repeat $mod+Mod1+Insert exec bash -c 'mkdir -p ~/Downloads/Videos/Screen-recordings; wf-recorder -a -f ~/Downloads/Videos/Screen-recordings/recording-$(date +%Y%m%d-%H%M%S).mp4'
-bindsym --no-repeat $mod+Control+Insert exec bash -c 'pkill --signal INT --exact wf-recorder'
+bindsym --no-repeat $mod+Mod5+Print exec bash -c 'mkdir -p ~/Downloads/Videos/Screen-recordings; wf-recorder -f ~/Downloads/Videos/Screen-recordings/recording-$(date +%Y%m%d-%H%M%S).mp4'
+bindsym --no-repeat $mod+Mod1+Print exec bash -c 'mkdir -p ~/Downloads/Videos/Screen-recordings; wf-recorder -a -f ~/Downloads/Videos/Screen-recordings/recording-$(date +%Y%m%d-%H%M%S).mp4'
+bindsym --no-repeat $mod+Control+Print exec bash -c 'pkill --signal INT --exact wf-recorder'
 
 #screenshot
-bindsym --no-repeat $mod+Insert exec bash -c 'mkdir -p ~/Downloads/Pictures/Screenshots; grim -t png - | tee ~/Downloads/Pictures/Screenshots/screenshot-$(date +%Y%m%d-%H%M%S).png | wl-copy'
-bindsym --no-repeat $mod+Shift+Insert exec bash -c 'mkdir -p ~/Downloads/Pictures/Screenshots; grim -t png -g "$(slurp)" - | tee ~/Downloads/Pictures/Screenshots/screenshot-$(date +%Y%m%d-%H%M%S).png | wl-copy'
+bindsym --no-repeat $mod+Print exec bash -c 'mkdir -p ~/Downloads/Pictures/Screenshots; grim -t png - | tee ~/Downloads/Pictures/Screenshots/screenshot-$(date +%Y%m%d-%H%M%S).png | wl-copy'
+bindsym --no-repeat $mod+Shift+Print exec bash -c 'mkdir -p ~/Downloads/Pictures/Screenshots; grim -t png -g "$(slurp)" - | tee ~/Downloads/Pictures/Screenshots/screenshot-$(date +%Y%m%d-%H%M%S).png | wl-copy'
 
 #audio device output switch
 bindsym --locked --no-repeat $mod+XF86AudioMute fullscreen disable; exec $term -T "$popup-audio-select1" -e bash -c 'pactl set-card-profile alsa_card.usb-Jieli_Technology_JLab_JBuds_Lux_USB_4250314331393108-00 output:iec958-stereo && pactl set-default-sink alsa_output.usb-Jieli_Technology_JLab_JBuds_Lux_USB_4250314331393108-00.iec958-stereo && pactl get-default-sink; read -n 1 -p "Press any key to close..."'
