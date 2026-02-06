@@ -95,12 +95,12 @@ for_window [app_id="org.pwmt.zathura"] opacity 0.85
 # keybinds update
 bindsym --no-repeat $mod+Shift+u fullscreen disable; exec $term -T "$popup-update-rebuild" -e bash -c 'nix flake update --flake ~/nixos && sudo nixos-rebuild switch --upgrade --flake ~/nixos#rt4817; echo; read -n 1 -p "Press any key to close..."'
 bindsym --no-repeat $mod+Shift+o fullscreen disable; exec $term -T "$popup-update-optimise" -e bash -c 'sudo nix-collect-garbage; echo; sudo nix store optimise; echo; read -n 1 -p "Press any key to close..."'
-bindsym --no-repeat $mod+Shift+w fullscreen disable; exec $term -T "$popup-update-wipe" -e bash -c "swaynag -t warning -y overlay -m 'You pressed the wipe shortcut. Do you really want to delete all other nix configurations and reboot?' -B 'Yes, delete all other nix configurations and reboot' 'sudo nix-collect-garbage -d; echo; sudo nix store optimise; rm -Rf ~/.local/state/battery-interval-swaynag.log; reboot'"
+bindsym --no-repeat $mod+Shift+w fullscreen disable; exec $term -T "$popup-update-wipe" -e bash -c "swaynag -t warning -y overlay -m 'You pressed the wipe shortcut. Do you really want to delete all other nix configurations and reboot?' -B 'Yes, delete all other nix configurations and reboot' 'sudo nix-collect-garbage -d; echo; sudo nix store optimise; rm -rf ~/.local/state/battery-interval-swaynag.log; reboot'"
 
 # always run rebuild after pixymon update
 bindsym --no-repeat $mod+Control+p fullscreen disable; exec $term -T "$popup-update-pixymon" -e bash -c 'cd ~/pixy2 && git pull --ff-only && cd scripts && ./build_pixymon_src.sh && cp ~/pixy2/src/host/linux/pixy.rules ~/nixos; echo; read -n 1 -p "Press any key to close..."'
 bindsym --no-repeat $mod+Control+t fullscreen disable; exec $term -T "$popup-settime" -e bash -c '~/.config/sway/scripts/settime.sh; echo; read -n 1 -p "Press any key to close..."'
-bindsym --no-repeat $mod+Control+c fullscreen disable; exec $term -T "$popup-update-calendar" -e bash -c 'rm -Rf ~/.local/share/calcurse/compass.ics ~/.local/share/calcurse/compass; curl -L -o ~/.local/share/calcurse/compass.ics "https://mhs-vic.compass.education/download/sharedCalendar.aspx?uid=19030&key=de953c62-f1e9-475d-b0c2-83fd3c09ff62&c.ics"; echo; calcurse -D ~/.local/share/calcurse/compass -i ~/.local/share/calcurse/compass.ics; echo; read -n 1 -p "Press any key to close..."' 
+bindsym --no-repeat $mod+Control+c fullscreen disable; exec $term -T "$popup-update-calendar" -e bash -c 'rm -rf ~/.local/share/calcurse/compass.ics ~/.local/share/calcurse/compass; curl -L -o ~/.local/share/calcurse/compass.ics "https://mhs-vic.compass.education/download/sharedCalendar.aspx?uid=19030&key=de953c62-f1e9-475d-b0c2-83fd3c09ff62&c.ics"; echo; calcurse -D ~/.local/share/calcurse/compass -i ~/.local/share/calcurse/compass.ics; echo; read -n 1 -p "Press any key to close..."' 
 
 #keybinds app
 bindsym --no-repeat $mod+Control+Return fullscreen disable; exec $term -T "$popup-tuis" -e clipse
@@ -198,9 +198,9 @@ client.background        $bg
     bindsym $mod+Shift+c reload
 
     # system off options
-    bindsym --no-repeat --locked $mod+Shift+e exec bash -c "swaynag -t warning -y overlay -m 'You pressed the exit shortcut. Do you really want to exit sway?' -B 'Yes, exit sway' 'rm -Rf ~/.local/state/battery-interval-swaynag.log && swaymsg exit'"
-bindsym --locked $mod+Escape exec bash -c 'rm -Rf ~/.local/state/battery-interval-swaynag.log && swaylock -F -fi /home/joel/.config/sway/mcqueen.jpeg && systemctl suspend'
-bindsym --no-repeat --locked $mod+Shift+r exec bash -c "swaynag -t warning -y overlay -m 'You pressed the reboot shortcut. Do you really want to reboot your device?' -B 'Yes, reboot my device' 'rm -Rf ~/.local/state/battery-interval-swaynag.log && reboot'"
+    bindsym --no-repeat --locked $mod+Shift+e exec bash -c "swaynag -t warning -y overlay -m 'You pressed the exit shortcut. Do you really want to exit sway?' -B 'Yes, exit sway' 'rm -rf ~/.local/state/battery-interval-swaynag.log && swaymsg exit'"
+bindsym --locked $mod+Escape exec bash -c 'rm -rf ~/.local/state/battery-interval-swaynag.log && swaylock -F -fi /home/joel/.config/sway/mcqueen.jpeg && systemctl suspend'
+bindsym --no-repeat --locked $mod+Shift+r exec bash -c "swaynag -t warning -y overlay -m 'You pressed the reboot shortcut. Do you really want to reboot your device?' -B 'Yes, reboot my device' 'rm -rf ~/.local/state/battery-interval-swaynag.log && reboot'"
 
 #
 # Moving around:
