@@ -1,49 +1,56 @@
 # The rule for how windows tile/float when switching states. Remembers floating position between states and tiles properly according to autotiling rules.
 #!/usr/bin/env bash
+set -euo pipefail
 
-STATE_DIR="$HOME/.cache/sway-float"
+STATE_DIR="${HOME}/.cache/sway-float"
 mkdir -p "$STATE_DIR"
 
-LOCKFILE="$STATE_DIR/.lock"
+# Get focused node (id, state, identity)
+focused_json="$(swaymsg -t get_tree -r | jq -rc '
+  .. | objects | select(.focused==true) |
+  {id, floating, app_id, class: .window_properties.class, pid}
+')"
+[ -n "$focused_json" ] || exit 0
 
-while true; do
-    # Get currently focused window
-    info=$(swaymsg -t get_tree | jq -r '
-        .. | objects | select(.focused == true)
-        | {
-            floating: .floating,
-            fullscreen: .fullscreen_mode,
-            rect: .rect,
-            app_id: .app_id,
-            class: .window_properties.class,
-            pid: .pid
-        }')
+floating="$(jq -r '.floating' <<<"$focused_json")"
+app_id="$(jq -r '.app_id // empty' <<<"$focused_json")"
+klass="$(jq -r '.class // empty' <<<"$focused_json")"
+pid="$(jq -r '.pid // empty' <<<"$focused_json")"
 
-    floating=$(jq -r '.floating' <<<"$info")
-    fullscreen=$(jq -r '.fullscreen' <<<"$info")
+# Stable key per window identity
+if [[ -n "$app_id" ]]; then
+  key="app_${app_id}"
+elif [[ -n "$klass" ]]; then
+  key="class_${klass}"
+else
+  key="pid_${pid}"
+fi
 
-    # Only record REAL floating geometry and if watcher is not locked
-    if [[ "$floating" == "user_on" && "$fullscreen" == "0" && ! -f "$LOCKFILE" ]]; then
-        app_id=$(jq -r '.app_id // empty' <<<"$info")
-        class=$(jq -r '.class // empty' <<<"$info")
-        pid=$(jq -r '.pid // empty' <<<"$info")
+meta_file="${STATE_DIR}/${key}.meta.json"
 
-        if [[ -n "$app_id" ]]; then
-            key="app_$app_id"
-        elif [[ -n "$class" ]]; then
-            key="class_$class"
-        else
-            key="pid_$pid"
-        fi
+if [[ "$floating" == "user_on" ]]; then
+  # FLOATING -> TILED
+  parent_mark="$(jq -r '.parent_mark // empty' "$meta_file" 2>/dev/null || true)"
 
-        # Only write if rect changed
-        old_rect_file="$STATE_DIR/$key.json"
-        new_rect=$(jq '.rect' <<<"$info")
-        if [[ ! -f "$old_rect_file" ]] || ! cmp -s <(echo "$new_rect") "$old_rect_file"; then
-            echo "$new_rect" > "$old_rect_file"
-        fi
-    fi
+  swaymsg 'floating disable' >/dev/null
 
-    sleep 0.15
-done
+  if [[ -n "$parent_mark" ]]; then
+    # Only do the restore if the mark is present; otherwise, bail.
+    # (move to mark <name> is a standard Sway command)  # cite marker
+    swaymsg "move to mark $parent_mark" >/dev/null || true
+  fi
 
+else
+  # TILED -> FLOATING
+  uid="$(date +%s%N)"
+  mark_f="__copi_focused_${uid}"
+  mark_p="__copi_parent_${uid}"
+
+  # Mark focused and its parent; keep focus on original window
+  swaymsg "mark --add $mark_f, focus parent, mark --add $mark_p, [con_mark=\"$mark_f\"] focus" >/dev/null
+
+  # Persist only the parent mark; no quadrant/output fallback
+  jq -nc --arg pm "$mark_p" '{parent_mark:$pm}' > "$meta_file"
+
+  swaymsg 'floating enable' >/dev/null
+fi
