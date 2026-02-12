@@ -1,4 +1,5 @@
 # The rule for how windows tile/float when switching states. Remembers floating position between states and tiles properly according to autotiling rules.
+# Auto-tiling already manages what you need for tiling states. This is just to remember floating.
 #!/usr/bin/env bash
 
 STATE_DIR="$HOME/.cache/sway-float"
