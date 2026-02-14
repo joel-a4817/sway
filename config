@@ -117,9 +117,7 @@ bindsym --no-repeat $mod+Mod1+d fullscreen disable; exec discord
 bindsym --no-repeat $mod+Mod1+l fullscreen disable; exec libreoffice
 bindsym --no-repeat $mod+Mod1+s fullscreen disable; exec signal-desktop
 bindsym --no-repeat $mod+Mod1+m fullscreen disable; exec prismlauncher
-bindsym --no-repeat $mod+Mod1+g fullscreen disable; exec gitkraken
 bindsym --no-repeat $mod+Mod1+k fullscreen disable; exec kicad
-bindsym --no-repeat $mod+Mod1+p fullscreen disable; exec prusa-slicer
 bindsym --no-repeat $mod+Mod1+b fullscreen disable; exec bambu-studio
 bindsym --no-repeat $mod+Mod1+n fullscreen disable; exec bash -c 'appimage-run /home/joel/Downloads/Apps/NotesHub-3.10.0-x64.AppImage & until swaymsg -t get_tree | grep -q "NotesHub"; do sleep 0.05; done; swaymsg [class="NotesHub"] floating enable; sleep 0.3; swaymsg [class="NotesHub"] floating disable; wait'
 
