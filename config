@@ -111,7 +111,7 @@ bindsym --no-repeat $mod+Tab fullscreen disable; exec qutebrowser
 bindsym --no-repeat $mod+Shift+Tab fullscreen disable; exec solaar
 bindsym --no-repeat $mod+Control+Tab fullscreen disable; exec VirtualBox
 
-bindsym --no-repeat $mod+Mod1+c fullscreen disable; exec snapshot
+bindsym --no-repeat $mod+Mod1+c fullscreen disable; exec kamoso
 bindsym --no-repeat $mod+Mod1+z fullscreen disable; exec zathura
 bindsym --no-repeat $mod+Mod1+d fullscreen disable; exec discord
 bindsym --no-repeat $mod+Mod1+l fullscreen disable; exec libreoffice
