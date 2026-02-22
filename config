@@ -129,8 +129,9 @@ bindsym --no-repeat $mod+Mod5+b fullscreen disable; exec $term -e bash -c 'prism
 #wifi
 bindsym --no-repeat $mod+XF86Display fullscreen disable; exec $term -T "$popup-wifi-device-select1"   -e bash -c 'nmcli dev disconnect wlp0s20f0u4; echo; nmcli dev disconnect wlp0s20f0u1; echo; nmcli dev connect wlp0s20f3; echo; read -n 1 -p "Press any key to close..."'
 bindsym --no-repeat $mod+F2 fullscreen disable; exec $term -T "$popup-wifi-device-select2"   -e bash -c 'nmcli dev connect wlp0s20f0u4; echo; nmcli dev connect wlp0s20f0u1; echo; nmcli dev disconnect wlp0s20f3; echo; read -n 1 -p "Press any key to close..."'
+bindsym --no-repeat $mod+XF86Tools fullscreen disable; exec $term -T "$popup-wifi-device-select2"   -e bash -c 'nmcli dev connect wlp0s20f0u4; echo; nmcli dev connect wlp0s20f0u1; echo; nmcli dev disconnect wlp0s20f3; echo; read -n 1 -p "Press any key to close..."'
 bindsym --no-repeat XF86Display fullscreen disable; exec $term -T "$popup-wifi-check" -e bash -c 'nmcli device status; echo; nmcli device wifi list; echo; read -n 1 -p "Press any key to close..."'
-bindsym --no-repeat F2 fullscreen disable; exec $term -T "$popup-wifi-select" -e bash -c 'nmcli dev wifi connect --ask; read -n 1 -p "Press any key to close..."'
+bindsym --no-repeat XF86Tools fullscreen disable; exec $term -T "$popup-wifi-select" -e bash -c 'nmcli dev wifi connect --ask; read -n 1 -p "Press any key to close..."'
 
 #fastfetch
 bindsym --locked --no-repeat $mod+Control+w fullscreen disable; exec $term -T "$popup-f-wifi" -e bash -c '~/.config/sway/scripts/fastfetch/f-wifi.sh; read -n 1 -p "Press any key to close..."'
