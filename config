@@ -16,9 +16,14 @@ set $up k
 set $right l
 # Your preferred terminal emulator
 set $term foot
+set $termid foot
 # Your preferred application launcher
 set $menu wmenu-run
 seat * xcursor_theme Bibata-Modern-Amber 32
+
+# Start wvkbd
+exec sunshine &
+bindsym $mod+delete exec wvkbd-mobintl -L 400
 
 # window opening rules
 ## execs 
@@ -34,29 +39,29 @@ set $popup popup
 
 # Specific popups (self-contained: floating + resize + center)
 
-for_window [app_id="foot" title="^$popup-update"]         floating enable, resize set 1200 600, move position center
-for_window [app_id="foot" title="^$popup-settime$"]       floating enable, resize set 500 150,  move position center
-for_window [app_id="foot" title="^$popup-tuis"]           floating enable, resize set 1000 700, move position center
+for_window [app_id="$termid" title="^$popup-update"]         floating enable, resize set 1200 600, move position center
+for_window [app_id="$termid" title="^$popup-settime$"]       floating enable, resize set 500 150,  move position center
+for_window [app_id="$termid" title="^$popup-tuis"]           floating enable, resize set 1000 700, move position center
 
-for_window [app_id="foot" title="^$popup-f-aesthetics"]   floating enable, resize set 800 450,  move position center
-for_window [app_id="foot" title="^$popup-f-system"]       floating enable, resize set 850 600,  move position center
-for_window [app_id="foot" title="^$popup-f-devices"]      floating enable, resize set 700 400,  move position center
-for_window [app_id="foot" title="^$popup-f-wifi"]         floating enable, resize set 1450 450, move position center
-for_window [app_id="foot" title="^$popup-f-info"]         floating enable, resize set 1200 750, move position center
-for_window [app_id="foot" title="^$popup-f-main"]         floating enable, resize set 1800 400, move position center
-for_window [app_id="foot" title="^$popup-f-hardware"]     floating enable, resize set 1150 700, move position center
+for_window [app_id="$termid" title="^$popup-f-aesthetics"]   floating enable, resize set 800 450,  move position center
+for_window [app_id="$termid" title="^$popup-f-system"]       floating enable, resize set 850 600,  move position center
+for_window [app_id="$termid" title="^$popup-f-devices"]      floating enable, resize set 700 400,  move position center
+for_window [app_id="$termid" title="^$popup-f-wifi"]         floating enable, resize set 1450 450, move position center
+for_window [app_id="$termid" title="^$popup-f-info"]         floating enable, resize set 1200 750, move position center
+for_window [app_id="$termid" title="^$popup-f-main"]         floating enable, resize set 1800 400, move position center
+for_window [app_id="$termid" title="^$popup-f-hardware"]     floating enable, resize set 1150 700, move position center
 
-for_window [app_id="foot" title="^$popup-wifi-check"]    floating enable, resize set 1200 1000, move position center
-for_window [app_id="foot" title="^$popup-wifi-select"]    floating enable, resize set 600 500, move position center
-for_window [app_id="foot" title="^$popup-wifi-device-select"] floating enable, resize set 500 500, move position center
-for_window [app_id="foot" title="^$popup-audio-select"]   floating enable, resize set 1200 100,  move position center
+for_window [app_id="$termid" title="^$popup-wifi-check"]    floating enable, resize set 1200 1000, move position center
+for_window [app_id="$termid" title="^$popup-wifi-select"]    floating enable, resize set 600 500, move position center
+for_window [app_id="$termid" title="^$popup-wifi-device-select"] floating enable, resize set 500 500, move position center
+for_window [app_id="$termid" title="^$popup-audio-select"]   floating enable, resize set 1200 100,  move position center
 
 for_window [app_id="yazi-nvim"] floating enable, move position center, resize set 1000 700, opacity 0.85
 for_window [app_id="PrismLauncher"] floating enable, move position center
 for_window [app_id="qutebrowser"] opacity 0.85
 for_window [class="NotesHub"] opacity 0.85
 for_window [app_id="signal"] opacity 0.85
-for_window [app_id="foot"] opacity 0.85
+for_window [app_id="$termid"] opacity 0.85
 for_window [app_id="libreoffice"] opacity 0.85
 for_window [class="discord"] opacity 0.85
 for_window [app_id="org.pwmt.zathura"] opacity 0.85
@@ -93,7 +98,7 @@ for_window [app_id="org.pwmt.zathura"] opacity 0.85
 # User keybinds
 
 # keybinds update
-bindsym --no-repeat $mod+Shift+u fullscreen disable; exec $term -T "$popup-update-rebuild" -e bash -c 'nix flake update --flake ~/nixos && sudo nixos-rebuild switch --upgrade --impure --flake ~/nixos#rt4817; echo; read -n 1 -p "Press any key to close..."'
+bindsym --no-repeat $mod+Shift+u fullscreen disable; exec $term -T "$popup-update-rebuild" -e bash -c 'nix flake update --flake ~/nixos && sudo nixos-rebuild boot --upgrade --impure --flake ~/nixos#rt4817; echo; read -n 1 -p "Press any key to close..."'
 bindsym --no-repeat $mod+Shift+o fullscreen disable; exec $term -T "$popup-update-optimise" -e bash -c 'sudo nix-collect-garbage; echo; sudo nix store optimise; echo; read -n 1 -p "Press any key to close..."'
 bindsym --no-repeat $mod+Shift+w fullscreen disable; exec $term -T "$popup-update-wipe" -e bash -c "swaynag -t warning -y overlay -m 'You pressed the wipe shortcut. Do you really want to delete all other nix configurations and reboot?' -B 'Yes, delete all other nix configurations and reboot' 'sudo nix-collect-garbage -d; echo; sudo nix store optimise; rm -rf ~/.local/state/battery-interval-swaynag.log; reboot'"
 
