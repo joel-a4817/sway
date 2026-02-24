@@ -23,7 +23,7 @@ seat * xcursor_theme Bibata-Modern-Amber 32
 
 # Start wvkbd
 exec sunshine &
-bindsym $mod+delete exec wvkbd-mobintl -L 400
+bindsym $mod+delete exec wvkbd-mobintl -L 400 --alpha 216
 
 # window opening rules
 ## execs 
@@ -65,7 +65,7 @@ for_window [app_id="$termid"] opacity 0.85
 for_window [app_id="libreoffice"] opacity 0.85
 for_window [class="discord"] opacity 0.85
 for_window [app_id="org.pwmt.zathura"] opacity 0.85
- 
+
 ### Input configuration
    input type:touchpad {
        dwt enabled
