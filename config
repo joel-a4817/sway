@@ -21,6 +21,8 @@ set $termid foot
 set $menu wmenu-run
 seat * xcursor_theme Bibata-Modern-Amber 32
 
+include /etc/sway/config.d/*
+
 # Start wvkbd
 exec sunshine &
 bindsym $mod+delete exec wvkbd-mobintl -L 400 --alpha 216
@@ -28,7 +30,7 @@ bindsym $mod+delete exec wvkbd-mobintl -L 400 --alpha 216
 # window opening rules
 ## execs 
 # Clipboard https://github.com/savedra1/clipse?tab=readme-ov-file
-exec clipse -listen
+exec_always clipse -listen
 exec ~/.config/sway/scripts/battery-warn.sh
 exec autotiling
 default_orientation auto
@@ -325,6 +327,4 @@ bindsym --no-repeat $mod+r mode "resize"
      bindsym --locked $mod+XF86AudioLowerVolume exec pactl set-sink-volume @DEFAULT_SINK@ 5%
      bindsym --locked $mod+XF86AudioRaiseVolume exec pactl set-sink-volume @DEFAULT_SINK@ 100%
      bindsym --locked $mod+XF86MonBrightnessDown exec brightnessctl set 5%
-     bindsym --locked $mod+XF86MonBrightnessUp exec brightnessctl set 100%
-    
-include /etc/sway/config.d/*
+     bindsym --locked $mod+XF86MonBrightnessUp exec brightnessctl set 100%    
