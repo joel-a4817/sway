@@ -25,7 +25,7 @@ include /etc/sway/config.d/*
 
 # Start wvkbd
 #bindsym $mod+delete exec wvkbd-mobintl -L 400 --alpha 216
-exec_always wvkbd-mobintl --hidden
+exec_always wvkbd-mobintl --hidden --alpha 216 -L 360 &
 # Toggle wvkbd from the keyboard (uses the documented toggle signal)
 bindsym $mod+delete exec pkill -RTMIN wvkbd
 
@@ -34,14 +34,13 @@ exec_always swaynag \
   --edge bottom \
   --layer overlay \
   --message "" \
-  --dismiss-button "×" \
   --button-no-terminal "⌨" "pkill -RTMIN wvkbd" \
   --background 000000AA \
   --button-background 222222CC \
   --text FFFFFF \
-  --button-border-size 0 \
-  --button-gap 4 \
-  --button-margin-right 8
+  --button-border-size 2 \
+  --button-gap 48 \
+  --border FF8800CC
 
 # window opening rules
 ## execs 
