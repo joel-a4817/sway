@@ -24,7 +24,24 @@ seat * xcursor_theme Bibata-Modern-Amber 32
 include /etc/sway/config.d/*
 
 # Start wvkbd
-bindsym $mod+delete exec wvkbd-mobintl -L 400 --alpha 216
+#bindsym $mod+delete exec wvkbd-mobintl -L 400 --alpha 216
+exec_always wvkbd-mobintl --hidden
+# Toggle wvkbd from the keyboard (uses the documented toggle signal)
+bindsym $mod+delete exec pkill -RTMIN wvkbd
+
+# Start a minimal swaynag with a ⌨ button to toggle wvkbd
+exec_always swaynag \
+  --edge bottom \
+  --layer overlay \
+  --message "" \
+  --dismiss-button "×" \
+  --button-no-terminal "⌨" "pkill -RTMIN wvkbd" \
+  --background 000000AA \
+  --button-background 222222CC \
+  --text FFFFFF \
+  --button-border-size 0 \
+  --button-gap 4 \
+  --button-margin-right 8
 
 # window opening rules
 ## execs 
