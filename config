@@ -24,7 +24,6 @@ seat * xcursor_theme Bibata-Modern-Amber 32
 include /etc/sway/config.d/*
 
 # Start wvkbd
-exec sunshine &
 bindsym $mod+delete exec wvkbd-mobintl -L 400 --alpha 216
 
 # window opening rules
