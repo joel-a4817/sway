@@ -148,7 +148,7 @@ bindsym --no-repeat $mod+Mod5+a fullscreen disable; exec VBoxManage startvm "w11
 bindsym --no-repeat $mod+Mod5+l fullscreen disable; exec $term -e bash -c 'prismlauncher --launch "1.21.9(1)"'
 bindsym --no-repeat $mod+Mod5+h fullscreen disable; exec $term -e bash -c 'prismlauncher --launch "1.21.4"'
 bindsym --no-repeat $mod+Mod5+b fullscreen disable; exec $term -e bash -c 'prismlauncher --launch "Enhanced Bedwars 1.8.9"'
-bindsym --no-repeat $mod+Mod5+s fullscreen disable; exec $term -e bash -c syncthing
+bindsym --no-repeat $mod+Mod5+s fullscreen disable; exec syncthing
 
 #wifi
 bindsym --no-repeat $mod+XF86Display fullscreen disable; exec $term -T "$popup-wifi-device-select1"   -e bash -c 'nmcli dev disconnect wlp0s20f0u4; echo; nmcli dev disconnect wlp0s20f0u1; echo; nmcli dev connect wlp0s20f3; echo; read -n 1 -p "Press any key to close..."'
