@@ -24,10 +24,9 @@ seat * xcursor_theme Bibata-Modern-Amber 32
 include /etc/sway/config.d/*
 
 # Start wvkbd
-#bindsym $mod+delete exec wvkbd-mobintl -L 400 --alpha 216
 exec_always wvkbd-mobintl --hidden --alpha 216 -L 360 &
-# Toggle wvkbd from the keyboard (uses the documented toggle signal)
-bindsym $mod+delete exec pkill -RTMIN wvkbd
+# Toggle wvkbd from the keyboard
+bindsym $mod+Shift+delete exec pkill -RTMIN wvkbd
 
 # Start a minimal swaynag with a ⌨ button to toggle wvkbd
 exec_always swaynag \
@@ -200,7 +199,7 @@ client.unfocused         $bg      $bg         $fg    $bg        $bg
 client.urgent            #BF616A  #BF616A     $fg    #BF616A    #BF616A
 client.background        $bg
 
-bindsym $mod+BackSpace exec ~/.config/sway/scripts/toggle-rotate.sh
+bindsym $mod+Escape exec ~/.config/sway/scripts/toggle-rotate.sh
 
 ### Key bindings
 #
@@ -224,7 +223,7 @@ bindsym $mod+BackSpace exec ~/.config/sway/scripts/toggle-rotate.sh
 
     # system off options
     bindsym --no-repeat --locked $mod+Shift+e exec bash -c "swaynag -t warning -y overlay -m 'You pressed the exit shortcut. Do you really want to exit sway?' -B 'Yes, exit sway' 'rm -rf ~/.local/state/battery-interval-swaynag.log && swaymsg exit'"
-bindsym --locked $mod+Escape exec bash -c 'rm -rf ~/.local/state/battery-interval-swaynag.log && swaylock -F -fi /home/joel/.config/sway/mcqueen.jpeg && systemctl suspend'
+bindsym --locked $mod+Ctrl+Escape exec bash -c 'rm -rf ~/.local/state/battery-interval-swaynag.log && swaylock -F -fi /home/joel/.config/sway/mcqueen.jpeg && systemctl suspend'
 bindsym --no-repeat --locked $mod+Shift+r exec bash -c "swaynag -t warning -y overlay -m 'You pressed the reboot shortcut. Do you really want to reboot your device?' -B 'Yes, reboot my device' 'rm -rf ~/.local/state/battery-interval-swaynag.log && reboot'"
 
 #
