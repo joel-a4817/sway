@@ -26,7 +26,7 @@ include /etc/sway/config.d/*
 # Start wvkbd
 exec_always wvkbd-mobintl --hidden --alpha 216 -L 360 &
 # Toggle wvkbd from the keyboard
-bindsym $mod+Shift+delete exec pkill -RTMIN wvkbd
+bindsym $mod+Shift+Escape exec pkill -RTMIN wvkbd
 
 # Start a minimal swaynag with a ⌨ button to toggle wvkbd
 exec_always swaynag \
