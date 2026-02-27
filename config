@@ -200,6 +200,14 @@ client.urgent            #BF616A  #BF616A     $fg    #BF616A    #BF616A
 client.background        $bg
 
 bindsym $mod+Escape exec ~/.config/sway/scripts/toggle-rotate.sh
+# Map absolute devices to the internal panel so they follow rotation
+input "1386:18785:Wacom_HID_4961_Finger" {
+  map_to_output eDP-1
+}
+
+input "1386:18785:Wacom_HID_4961_Pen" {
+  map_to_output eDP-1
+}
 
 ### Key bindings
 #
