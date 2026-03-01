@@ -1,5 +1,4 @@
-#!/usr/bin/env nix-shell
-#! nix-shell -i bash -p procps util-linux
+#!/usr/bin/env bash
 set -euo pipefail
 
 OUT="eDP-1"
