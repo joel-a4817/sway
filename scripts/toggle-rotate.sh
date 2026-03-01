@@ -1,10 +1,11 @@
-#!/usr/bin/env bash
+#!/usr/bin/env nix-shell
+#! nix-shell -i bash -p procps util-linux
 set -euo pipefail
 
-OUT="eDP-1"   # keep it simple; you only use this display
+OUT="eDP-1"
 
 ROTATOR="/home/joel/.config/sway/scripts/rotate-touchpad.py"
-TPDEV="/dev/input/syna-touchpad"
+TPDEV="/dev/input/touchpad-internal"
 LOG="/tmp/rotate-touchpad.log"
 
 PKILL="/run/current-system/sw/bin/pkill"
