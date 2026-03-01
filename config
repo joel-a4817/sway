@@ -166,13 +166,13 @@ bindsym --locked --no-repeat $mod+Control+h fullscreen disable; exec $term -T "$
 bindsym --locked --no-repeat $mod+Control+a fullscreen disable; exec $term -T "$popup-f-aesthetics" -e bash -c '~/.config/sway/scripts/fastfetch/f-aesthetics.sh; echo; read -n 1 -p "Press any key to close..."'
 
 #screen-record
-bindsym --no-repeat $mod+Mod5+Print exec bash -c 'mkdir -p ~/Downloads/Videos/Screen-recordings; wf-recorder -f ~/Downloads/Videos/Screen-recordings/recording-$(date +%Y%m%d-%H%M%S).mp4'
-bindsym --no-repeat $mod+Mod1+Print exec bash -c 'mkdir -p ~/Downloads/Videos/Screen-recordings; wf-recorder -a -f ~/Downloads/Videos/Screen-recordings/recording-$(date +%Y%m%d-%H%M%S).mp4'
+bindsym --no-repeat $mod+Mod5+Print exec bash -c 'mkdir -p ~/Downloads/Camera/Screen-recordings; wf-recorder -f ~/Downloads/Camera/Screen-recordings/recording-$(date +%Y%m%d-%H%M%S).mp4'
+bindsym --no-repeat $mod+Mod1+Print exec bash -c 'mkdir -p ~/Downloads/Camera/Screen-recordings; wf-recorder -a -f ~/Downloads/Camera/Screen-recordings/recording-$(date +%Y%m%d-%H%M%S).mp4'
 bindsym --no-repeat $mod+Control+Print exec bash -c 'pkill --signal INT --exact wf-recorder'
 
 #screenshot
-bindsym --no-repeat $mod+Print exec bash -c 'mkdir -p ~/Downloads/Pictures/Screenshots; grim -t png - | tee ~/Downloads/Pictures/Screenshots/screenshot-$(date +%Y%m%d-%H%M%S).png | wl-copy'
-bindsym --no-repeat $mod+Shift+Print exec bash -c 'mkdir -p ~/Downloads/Pictures/Screenshots; grim -t png -g "$(slurp)" - | tee ~/Downloads/Pictures/Screenshots/screenshot-$(date +%Y%m%d-%H%M%S).png | wl-copy'
+bindsym --no-repeat $mod+Print exec bash -c 'mkdir -p ~/Downloads/Camera/Screenshots; grim -t png - | tee ~/Downloads/Camera/Screenshots/screenshot-$(date +%Y%m%d-%H%M%S).png | wl-copy'
+bindsym --no-repeat $mod+Shift+Print exec bash -c 'mkdir -p ~/Downloads/Camera/Screenshots; grim -t png -g "$(slurp)" - | tee ~/Downloads/Camera/Screenshots/screenshot-$(date +%Y%m%d-%H%M%S).png | wl-copy'
 
 #audio device output switch
 bindsym --locked --no-repeat $mod+XF86AudioMute fullscreen disable; exec $term -T "$popup-audio-select1" -e bash -c 'pactl set-card-profile alsa_card.usb-Jieli_Technology_JLab_JBuds_Lux_USB_4250314331393108-00 output:iec958-stereo && pactl set-default-sink alsa_output.usb-Jieli_Technology_JLab_JBuds_Lux_USB_4250314331393108-00.iec958-stereo && pactl get-default-sink; read -n 1 -p "Press any key to close..."'
@@ -200,14 +200,6 @@ client.urgent            #BF616A  #BF616A     $fg    #BF616A    #BF616A
 client.background        $bg
 
 bindsym $mod+Escape exec ~/.config/sway/scripts/toggle-rotate.sh
-# Map absolute devices to the internal panel so they follow rotation
-input "1386:18785:Wacom_HID_4961_Finger" {
-  map_to_output eDP-1
-}
-
-input "1386:18785:Wacom_HID_4961_Pen" {
-  map_to_output eDP-1
-}
 
 ### Key bindings
 #

@@ -1,86 +1,49 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Usage:
-#   toggle-rotate.sh [--mode 2|4] [OUTPUT]
-#   default: --mode=4 and auto-detect focused output
-#
-#  --mode=2 : cycles normal <-> 180   (friendlier with touchpads)
-#  --mode=4 : cycles normal -> 90 -> 180 -> 270 -> normal
+OUT="eDP-1"   # keep it simple; you only use this display
 
-MODE=4
-if [[ "${1:-}" == "--mode" ]]; then
-  MODE="${2:-4}"
-  shift 2
-fi
+ROTATOR="/home/joel/.config/sway/scripts/rotate-touchpad.py"
+TPDEV="/dev/input/syna-touchpad"
+LOG="/tmp/rotate-touchpad.log"
 
-# Ensure jq exists
-if ! command -v jq >/dev/null 2>&1; then
-  echo "Error: jq is required (install jq)" >&2
-  exit 1
-fi
+# EXACT paths from `sudo -l`
+PKILL="/nix/store/k870vxfbxawhyx2726aygb5v5is4si4b-procps-4.0.6/bin/pkill"
+SETSID="/nix/store/ilk5qzvkadnj7lx58hfinfvl7jmhriq6-util-linux-2.41.3-bin/bin/setsid"
 
-# Pick output: arg, focused, or first active
-if [[ $# -ge 1 ]]; then
-  out="$1"
-else
-  out=$(
-    swaymsg -t get_tree \
-    | jq -r '.. | objects | select(.focused == true) | .output // empty' \
-    | head -n1
-  )
-  if [[ -z "${out:-}" ]]; then
-    out=$(
-      swaymsg -t get_outputs \
-      | jq -r '[.[] | select(.active==true)][0].name // empty'
-    )
-  fi
-fi
+need() { command -v "$1" >/dev/null 2>&1 || { echo "Missing: $1" >&2; exit 1; }; }
+need swaymsg
+need jq
 
-if [[ -z "${out:-}" ]]; then
-  echo "Error: could not determine target output" >&2
-  exit 1
-fi
+# Current transform (normal|90|180|270)
+CUR="$(swaymsg -t get_outputs -r | jq -r --arg o "$OUT" '.[] | select(.name==$o) | (.transform // "normal")')"
+case "$CUR" in normal|90|180|270) : ;; *) CUR="normal" ;; esac
 
-# Current transform
-cur=$(
-  swaymsg -t get_outputs \
-  | jq -r --arg OUT "$out" '.[] | select(.name == $OUT) | .transform // empty'
-)
-
-case "${cur:-}" in
-  normal|90|180|270) ;;  # ok
-  *) cur="normal" ;;
+# Next transform (4-way cycle)
+case "$CUR" in
+  normal) NEXT="90" ;;
+  90)     NEXT="180" ;;
+  180)    NEXT="270" ;;
+  270)    NEXT="normal" ;;
 esac
 
-# Next transform
-next=""
-if [[ "$MODE" == "2" ]]; then
-  case "$cur" in
-    normal) next="180" ;;
-    180)    next="normal" ;;
-    90)     next="180" ;;   # normalize back to the 2-step lane
-    270)    next="normal" ;;
-  esac
-else
-  case "$cur" in
-    normal) next="90" ;;
-    90)     next="180" ;;
-    180)    next="270" ;;
-    270)    next="normal" ;;
-  esac
-fi
+# Inverse mapping so touchpad always FEELS like rotation=0
+case "$NEXT" in
+  normal) TPROT="0" ;;
+  90)     TPROT="270" ;;
+  180)    TPROT="180" ;;
+  270)    TPROT="90" ;;
+esac
 
-# Apply rotation
-swaymsg output "$out" transform "$next" >/dev/null
+# Rotate screen (sway supports normal/90/180/270) [3](https://www.mankier.com/1/swaymsg)
+swaymsg -q "output $OUT transform $NEXT"
 
-# Map absolute devices (touchscreen/tablet) to the chosen output
-map_ids=$(
-  swaymsg -t get_inputs --raw \
-  | jq -r '.[] | select(.type=="touch" or .type=="tablet_tool" or .type=="tablet_pad") | .identifier'
-)
+# Kill previous rotator (NOPASSWD-allowed), ignore if not running
+sudo -n "$PKILL" -f "$ROTATOR" >/dev/null 2>&1 || true
 
-while IFS= read -r id; do
-  [[ -z "$id" ]] && continue
-  swaymsg input "$id" map_to_output "$out" >/dev/null || true
-done <<< "$map_ids"
+# Start new rotator detached (NOPASSWD-allowed)
+# The rotator must keep running to keep the uinput virtual device alive. [4](https://download.autodesk.com/global/docs/maya2014/en_us/files/Transforming_objects_Move_rotate_or_scale_components_with_reflection.htm)[5](https://www.youtube.com/watch?v=zkCnwc5i1GU)
+sudo -n "$SETSID" -f "$ROTATOR" --dev "$TPDEV" --rot "$TPROT" >>"$LOG" 2>&1 || {
+  echo "Touchpad rotator failed. Check: $LOG" >&2
+  exit 0
+}
