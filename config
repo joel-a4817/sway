@@ -38,8 +38,6 @@ exec_always swaynag \
   --button-gap 48 \
   --border FF8800CC
 
-exec /run/current-system/sw/lib/polkit-gnome/polkit-gnome-authentication-agent-1
-
 # window opening rules
 ## execs 
 # Clipboard https://github.com/savedra1/clipse?tab=readme-ov-file
@@ -225,7 +223,7 @@ bindsym --no-repeat $mod+Shift+Escape exec ~/.config/sway/scripts/toggle-rotate-
 
     # system off options
     bindsym --no-repeat --locked $mod+Shift+e exec bash -c "swaynag -t warning -y overlay -m 'You pressed the exit shortcut. Do you really want to exit sway?' -B 'Yes, exit sway' 'rm -rf ~/.local/state/battery-interval-swaynag.log && swaymsg exit'"
-bindsym --locked $mod+Ctrl+Escape exec bash -c 'rm -rf ~/.local/state/battery-interval-swaynag.log && swaylock -F -fi /home/joel/.config/sway/mcqueen.jpeg && systemctl suspend'
+bindsym --no-repeat --locked $mod+Ctrl+Escape exec bash -c 'rm -rf ~/.local/state/battery-interval-swaynag.log && swaylock -F -fi /home/joel/.config/sway/mcqueen.jpeg && systemctl suspend'
 bindsym --no-repeat --locked $mod+Shift+r exec bash -c "swaynag -t warning -y overlay -m 'You pressed the reboot shortcut. Do you really want to reboot your device?' -B 'Yes, reboot my device' 'rm -rf ~/.local/state/battery-interval-swaynag.log && reboot'"
 
 #
@@ -348,4 +346,3 @@ bindsym --no-repeat $mod+r mode "resize"
      bindsym --locked $mod+XF86AudioRaiseVolume exec pactl set-sink-volume @DEFAULT_SINK@ 100%
      bindsym --locked $mod+XF86MonBrightnessDown exec brightnessctl set 5%
      bindsym --locked $mod+XF86MonBrightnessUp exec brightnessctl set 100%    
-exec ~/papercut-client/pc-client-linux.sh
