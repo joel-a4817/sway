@@ -25,8 +25,6 @@ include /etc/sway/config.d/*
 
 # Start wvkbd
 exec_always wvkbd-mobintl --hidden --alpha 216 -L 360 &
-# Toggle wvkbd from the keyboard
-
 # Start a minimal swaynag with a ⌨ button to toggle wvkbd
 exec_always swaynag \
   --edge bottom \
@@ -39,6 +37,8 @@ exec_always swaynag \
   --button-border-size 2 \
   --button-gap 48 \
   --border FF8800CC
+
+exec /run/current-system/sw/lib/polkit-gnome/polkit-gnome-authentication-agent-1
 
 # window opening rules
 ## execs 
@@ -147,13 +147,15 @@ bindsym --no-repeat $mod+Mod5+l fullscreen disable; exec $term -e bash -c 'prism
 bindsym --no-repeat $mod+Mod5+h fullscreen disable; exec $term -e bash -c 'prismlauncher --launch "1.21.4"'
 bindsym --no-repeat $mod+Mod5+b fullscreen disable; exec $term -e bash -c 'prismlauncher --launch "Enhanced Bedwars 1.8.9"'
 bindsym --no-repeat $mod+Mod5+s fullscreen disable; exec syncthing
+bindsym --no-repeat $mod+Mod5+p fullscreen disable; exec ~/papercut/pc-client-linux.sh
 
 #wifi
 bindsym --no-repeat $mod+XF86Display fullscreen disable; exec $term -T "$popup-wifi-device-select1"   -e bash -c 'nmcli dev disconnect wlp0s20f0u4; echo; nmcli dev disconnect wlp0s20f0u1; echo; nmcli dev connect wlp0s20f3; echo; read -n 1 -p "Press any key to close..."'
-bindsym --no-repeat $mod+F2 fullscreen disable; exec $term -T "$popup-wifi-device-select2"   -e bash -c 'nmcli dev connect wlp0s20f0u4; echo; nmcli dev connect wlp0s20f0u1; echo; nmcli dev disconnect wlp0s20f3; echo; read -n 1 -p "Press any key to close..."'
 bindsym --no-repeat $mod+XF86Tools fullscreen disable; exec $term -T "$popup-wifi-device-select2"   -e bash -c 'nmcli dev connect wlp0s20f0u4; echo; nmcli dev connect wlp0s20f0u1; echo; nmcli dev disconnect wlp0s20f3; echo; read -n 1 -p "Press any key to close..."'
 bindsym --no-repeat XF86Display fullscreen disable; exec $term -T "$popup-wifi-check" -e bash -c 'nmcli device status; echo; nmcli device wifi list; echo; read -n 1 -p "Press any key to close..."'
 bindsym --no-repeat XF86Tools fullscreen disable; exec $term -T "$popup-wifi-select" -e bash -c 'nmcli dev wifi connect --ask; read -n 1 -p "Press any key to close..."'
+bindsym --no-repeat F2 fullscreen disable; exec $term -T "$popup-wifi-select" -e bash -c 'nmcli dev wifi connect --ask; read -n 1 -p "Press any key to close..."'
+bindsym --no-repeat $mod+F2 fullscreen disable; exec $term -T "$popup-wifi-device-select2"   -e bash -c 'nmcli dev connect wlp0s20f0u4; echo; nmcli dev connect wlp0s20f0u1; echo; nmcli dev disconnect wlp0s20f3; echo; read -n 1 -p "Press any key to close..."'
 
 #fastfetch
 bindsym --locked --no-repeat $mod+Control+w fullscreen disable; exec $term -T "$popup-f-wifi" -e bash -c '~/.config/sway/scripts/fastfetch/f-wifi.sh; read -n 1 -p "Press any key to close..."'
@@ -346,3 +348,4 @@ bindsym --no-repeat $mod+r mode "resize"
      bindsym --locked $mod+XF86AudioRaiseVolume exec pactl set-sink-volume @DEFAULT_SINK@ 100%
      bindsym --locked $mod+XF86MonBrightnessDown exec brightnessctl set 5%
      bindsym --locked $mod+XF86MonBrightnessUp exec brightnessctl set 100%    
+exec ~/papercut-client/pc-client-linux.sh
