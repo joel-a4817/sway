@@ -142,7 +142,7 @@ bindsym --no-repeat $mod+Mod1+k fullscreen disable; exec kicad
 bindsym --no-repeat $mod+Mod1+b fullscreen disable; exec bambu-studio
 bindsym --no-repeat $mod+Mod1+n fullscreen disable; exec bash -c 'appimage-run /home/joel/Downloads/Apps/NotesHub-3.10.0-x64.AppImage & until swaymsg -t get_tree | grep -q "NotesHub"; do sleep 0.05; done; swaymsg [class="NotesHub"] floating enable; sleep 0.3; swaymsg [class="NotesHub"] floating disable; wait'
 
-bindsym --no-repeat $mod+Mod5+a fullscreen disable; exec VBoxManage startvm "w11" --type gui
+bindsym --no-repeat $mod+Mod5+w fullscreen disable; exec VBoxManage startvm "w11" --type gui
 bindsym --no-repeat $mod+Mod5+l fullscreen disable; exec $term -e bash -c 'prismlauncher --launch "1.21.9(1)"'
 bindsym --no-repeat $mod+Mod5+h fullscreen disable; exec $term -e bash -c 'prismlauncher --launch "1.21.4"'
 bindsym --no-repeat $mod+Mod5+b fullscreen disable; exec $term -e bash -c 'prismlauncher --launch "Enhanced Bedwars 1.8.9"'
