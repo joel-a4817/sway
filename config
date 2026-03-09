@@ -24,7 +24,7 @@ seat * xcursor_theme Bibata-Modern-Amber 32
 include /etc/sway/config.d/*
 
 # Start wvkbd
-exec_always wvkbd-mobintl --hidden --alpha 216 -L 360 &
+exec wvkbd-mobintl --hidden --alpha 216 -L 360 -H 640 &
 # Start a minimal swaynag with a ⌨ button to toggle wvkbd
 exec_always swaynag \
   --edge bottom \
