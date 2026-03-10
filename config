@@ -183,7 +183,7 @@ bindsym --locked --no-repeat $mod+XF86AudioMicMute fullscreen disable; exec $ter
 output * bg /home/joel/.config/sway/mcqueen-blurred.jpeg fill
 
 # Other settings
-output eDP-1 allow_tearing yes
+output eDP-1 allow_tearing no
 output * max_render_time off
 default_border pixel
 
