@@ -169,7 +169,7 @@ bindsym --locked --no-repeat $mod+Control+a fullscreen disable; exec $term -T "$
 #screen-record
 bindsym --no-repeat $mod+Mod5+Print exec bash -c 'mkdir -p ~/Downloads/Camera/rt4817/Screen-recordings; wf-recorder -f ~/Downloads/Camera/rt4817/Screen-recordings/recording-$(date +%Y%m%d-%H%M%S).mkv'
 bindsym --no-repeat $mod+Mod1+Print exec bash -c 'mkdir -p ~/Downloads/Camera/rt4817/Screen-recordings; wf-recorder -a -f ~/Downloads/Camera/rt4817/Screen-recordings/recording-$(date +%Y%m%d-%H%M%S).mkv'
-bindsym --no-repeat $mod+Control+Print exec bash -c 'pkill -INT -x wf-recorder'
+bindsym --no-repeat $mod+Control+Print exec bash -c 'pkill -f wf-recorder'
 
 #screenshot
 bindsym --no-repeat $mod+Print exec bash -c 'mkdir -p ~/Downloads/Camera/rt4817/Screenshots; grim -t png - | tee ~/Downloads/Camera/rt4817/Screenshots/screenshot-$(date +%Y%m%d-%H%M%S).png | wl-copy'
