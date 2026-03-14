@@ -98,7 +98,6 @@ for_window [app_id="org.pwmt.zathura"] opacity 0.85
    input type:pointer {
        accel_profile flat
        pointer_accel 0
-       natural_scroll enabled
    }
 
   input type:touch {
