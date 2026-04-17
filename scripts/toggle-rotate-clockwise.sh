@@ -112,3 +112,10 @@ sudo -n "$SETSID" -f "$MOUSE_ROTATOR" \
     exit 0
 }
 
+STATE_FILE="$HOME/.cache/sway-rotation-state"
+
+val=0
+[ -f "$STATE_FILE" ] && val=$(cat "$STATE_FILE")
+
+val=$(( (val + 3) % 4 ))
+echo "$val" > "$STATE_FILE"

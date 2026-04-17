@@ -23,20 +23,8 @@ seat * xcursor_theme Bibata-Modern-Amber 32
 
 include /etc/sway/config.d/*
 
-# Start wvkbd
-exec wvkbd-mobintl --hidden --alpha 216 -L 360 -H 640 &
 # Start a minimal swaynag with a ⌨ button to toggle wvkbd
-exec_always swaynag \
-  --edge bottom \
-  --layer overlay \
-  --message "" \
-  --button-no-terminal "⌨" "pkill -RTMIN wvkbd" \
-  --background 000000AA \
-  --button-background 222222CC \
-  --text FFFFFF \
-  --button-border-size 2 \
-  --button-gap 48 \
-  --border FF8800CC
+exec_always ~/.config/sway/scripts/start-swaynag.sh
 
 # window opening rules
 ## execs 
@@ -203,8 +191,8 @@ client.unfocused         $bg      $bg         $fg    $bg        $bg
 client.urgent            #BF616A  #BF616A     $fg    #BF616A    #BF616A
 client.background        $bg
 
-bindsym --no-repeat $mod+Escape exec ~/.config/sway/scripts/toggle-rotate-anticlockwise.sh
-bindsym --no-repeat $mod+Shift+Escape exec ~/.config/sway/scripts/toggle-rotate-clockwise.sh
+bindsym --no-repeat $mod+Escape exec bash -c '~/.config/sway/scripts/toggle-rotate-anticlockwise.sh; ~/.config/sway/scripts/rotation-restore.sh'
+bindsym --no-repeat $mod+Shift+Escape exec bash -c '~/.config/sway/scripts/toggle-rotate-clockwise.sh; ~/.config/sway/scripts/rotation-restore.sh'
 
 ### Key bindings
 #
@@ -224,7 +212,8 @@ bindsym --no-repeat $mod+Shift+Escape exec ~/.config/sway/scripts/toggle-rotate-
     bindsym --no-repeat $mod+Grave exec ~/.config/sway/scripts/toggle-floating-mod.sh
 
     # Reload the configuration file
-    bindsym $mod+Shift+c reload
+
+bindsym $mod+Shift+c exec ~/.config/sway/scripts/rotation-restore.sh
 
     # system off options
     bindsym --no-repeat --locked $mod+Shift+e exec bash -c "swaynag -t warning -y overlay -m 'You pressed the exit shortcut. Do you really want to exit sway?' -B 'Yes, exit sway' 'rm -rf ~/.local/state/battery-interval-swaynag.log && swaymsg exit'"

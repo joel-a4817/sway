@@ -111,3 +111,11 @@ sudo -n "$SETSID" -f "$MOUSE_ROTATOR" \
     echo "Mouse rotator failed. Check: $MOUSE_LOG" >&2
     exit 0
 }
+
+STATE_FILE="$HOME/.cache/sway-rotation-state"
+
+val=0
+[ -f "$STATE_FILE" ] && val=$(cat "$STATE_FILE")
+
+val=$(( (val + 1) % 4 ))
+echo "$val" > "$STATE_FILE"
