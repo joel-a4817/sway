@@ -7,13 +7,6 @@ from evdev import InputDevice, UInput, ecodes
 REL_X = ecodes.REL_X
 REL_Y = ecodes.REL_Y
 
-current_rotation = args.rot   # or however you store it
-def reset_to_normal(signum, frame):
-    global current_rotation
-    current_rotation = 0
-
-signal.signal(signal.SIGHUP, reset_to_normal)
-
 def rotate(dx, dy, rot):
     if rot == 0:
         return dx, dy

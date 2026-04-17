@@ -10,13 +10,6 @@ MT_X  = ecodes.ABS_MT_POSITION_X
 MT_Y  = ecodes.ABS_MT_POSITION_Y
 MT_SLOT = ecodes.ABS_MT_SLOT
 
-current_rotation = args.rot   # or however you store it
-def reset_to_normal(signum, frame):
-    global current_rotation
-    current_rotation = 0
-
-signal.signal(signal.SIGHUP, reset_to_normal)
-
 def rotate_xy(x, y, max_x, max_y, rot):
     # rot in {0, 90, 180, 270} clockwise
     if rot == 0:
