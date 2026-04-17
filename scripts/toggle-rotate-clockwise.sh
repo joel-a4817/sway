@@ -8,7 +8,7 @@ TPDEV="/dev/input/touchpad-internal"
 LOG="/tmp/rotate-touchpad.log"
 
 MOUSE_ROTATOR="/home/joel/.config/sway/scripts/rotate-mouse.py"
-MOUSE_DEV="/dev/input/event19"
+MOUSE_DEV="/dev/input/mouse-internal"
 MOUSE_LOG="/tmp/rotate-mouse.log"
 
 PKILL="/run/current-system/sw/bin/pkill"
