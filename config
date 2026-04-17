@@ -23,11 +23,9 @@ seat * xcursor_theme Bibata-Modern-Amber 32
 
 include /etc/sway/config.d/*
 
-# Start a minimal swaynag with a ⌨ button to toggle wvkbd
+#swaynag with wvkbd 
 exec_always ~/.config/sway/scripts/start-swaynag.sh
 
-# window opening rules
-## execs 
 # Clipboard https://github.com/savedra1/clipse?tab=readme-ov-file
 exec_always clipse -listen
 exec ~/.config/sway/scripts/battery-warn.sh
