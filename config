@@ -96,6 +96,10 @@ bindsym Print exec ~/.config/sway/scripts/toggle-opacity.sh
     map_to_output eDP-1
   }
 
+# Disable noisy / broken tablet pen (proximity spam)
+input "1386:20983:Wacom_Pen_and_multitouch_sensor_Pen" {
+    events disabled
+}
 
 # User keybinds
 
