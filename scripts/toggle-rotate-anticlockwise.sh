@@ -7,6 +7,10 @@ ROTATOR="/home/joel/.config/sway/scripts/rotate-touchpad.py"
 TPDEV="/dev/input/touchpad-internal"
 LOG="/tmp/rotate-touchpad.log"
 
+MOUSE_ROTATOR="/home/joel/.config/sway/scripts/rotate-mouse.py"
+MOUSE_DEV="/dev/input/event19"
+MOUSE_LOG="/tmp/rotate-mouse.log"
+
 PKILL="/run/current-system/sw/bin/pkill"
 SETSID="/run/current-system/sw/bin/setsid"
 
@@ -55,12 +59,12 @@ apply_input_transform() {
 CUR="$(swaymsg -t get_outputs -r | jq -r --arg o "$OUT" '.[] | select(.name==$o) | (.transform // "normal")')"
 case "$CUR" in normal|90|180|270) : ;; *) CUR="normal" ;; esac
 
-case "$CUR" in
-  normal) NEXT="270" ;;
-  270)     NEXT="180" ;;
-  180)    NEXT="90" ;;
-  90)    NEXT="normal" ;;
-esac
+  case "$CUR" in
+    normal) NEXT="270" ;;
+    270)     NEXT="180" ;;
+    180)    NEXT="90" ;;
+    90)    NEXT="normal" ;;
+  esac
 
 # Touchpad rotation (your Python tool wants the inverse mapping)
 case "$NEXT" in
@@ -99,4 +103,11 @@ sudo -n "$SETSID" -f "$ROTATOR" --dev "$TPDEV" --rot "$TPROT" >>"$LOG" 2>&1 || {
   exit 0
 }
 
-exit 0
+# --- Kick (restart) your mouse rotator with the SAME angle ---
+sudo -n "$PKILL" -f "$MOUSE_ROTATOR" >/dev/null 2>&1 || true
+sudo -n "$SETSID" -f "$MOUSE_ROTATOR" \
+  --dev "$MOUSE_DEV" \
+  --rot "$TPROT" >>"$MOUSE_LOG" 2>&1 || {
+    echo "Mouse rotator failed. Check: $MOUSE_LOG" >&2
+    exit 0
+}
