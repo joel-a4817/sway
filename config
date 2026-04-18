@@ -64,7 +64,7 @@ for_window [app_id="signal"] opacity 0.85
 for_window [app_id="$termid"] opacity 0.85
 for_window [app_id="libreoffice"] opacity 0.85
 for_window [class="discord"] opacity 0.85
-for_window [app_id="org.pwmt.zathura"] opacity 0.85
+#for_window [app_id="org.pwmt.zathura"] opacity 0.85
 
 bindsym Print exec ~/.config/sway/scripts/toggle-opacity.sh
 
