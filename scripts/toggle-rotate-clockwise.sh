@@ -60,10 +60,10 @@ CUR="$(swaymsg -t get_outputs -r | jq -r --arg o "$OUT" '.[] | select(.name==$o)
 case "$CUR" in normal|90|180|270) : ;; *) CUR="normal" ;; esac
 
   case "$CUR" in
-    normal) NEXT="90" ;;
-    270)     NEXT="normal" ;;
-    180)    NEXT="270" ;;
-    90)    NEXT="180" ;;
+    normal) NEXT="270" ;;
+    270)     NEXT="180" ;;
+    180)    NEXT="90" ;;
+    90)    NEXT="normal" ;;
   esac
 
 # Touchpad rotation (your Python tool wants the inverse mapping)
