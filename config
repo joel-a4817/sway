@@ -197,9 +197,9 @@ client.unfocused         $bg      $bg         $fg    $bg        $bg
 client.urgent            #BF616A  #BF616A     $fg    #BF616A    #BF616A
 client.background        $bg
 
-bindsym --no-repeat $mod+Escape exec bash -c '~/.config/sway/scripts/toggle-rotate-clockwise.sh; ~/.config/sway/scripts/rotation-restore.sh'
-bindsym --no-repeat $mod+Shift+Escape exec bash -c '~/.config/sway/scripts/toggle-rotate-anticlockwise.sh; ~/.config/sway/scripts/rotation-restore.sh'
-bindsym --no-repeat $mod+Control+Escape exec bash -c '~/.config/sway/scripts/toggle-rotate-no-mouse.sh; ~/.config/sway/scripts/rotation-restore.sh'
+bindsym --no-repeat $mod+Escape exec bash -c '~/.config/sway/scripts/toggle-rotate.sh; ~/.config/sway/scripts/rotation-restore.sh'
+bindsym --no-repeat $mod+Shift+Escape exec bash -c '~/.config/sway/scripts/toggle-rotate-no-mouse.sh; ~/.config/sway/scripts/rotation-restore.sh'
+bindsym --no-repeat $mod+Control+Escape exec bash -c '~/.config/sway/scripts/toggle-rotate-no-transform.sh; ~/.config/sway/scripts/rotation-restore.sh'
 
 ### Key bindings
 #
