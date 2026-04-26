@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Battery warnings via swaynag: every 3 minutes after hitting 25%.
-# Robust against sway reloads, suspend/resume, battery flaps, and nag stacking.
+# Battery warnings via swaynag: fullscreen overlay every 3 minutes after threshold.
+# Triggers in ALL states except Charging/Full.
+# Forces display to eDP-1 (safe with external monitors).
+# Robust against sway reloads, suspend/resume, battery flaps, and invisible nags.
 
 set -euo pipefail
 
@@ -10,7 +12,8 @@ NAG_INTERVAL_SEC=180
 THRESHOLD=25
 EXIT_HYSTERESIS=2
 REENTRY_BACKOFF_SEC=90
-SKIP_IF_SWAYNAG_RUNNING=true
+
+FORCE_OUTPUT="eDP-1"
 
 STATE_DIR="${HOME}/.local/state"
 LOG="${STATE_DIR}/battery-interval-swaynag.log"
@@ -36,9 +39,7 @@ if ! flock -n 9; then
   exit 0
 fi
 
-export TERMINAL="${TERMINAL:-foot}"
-
-echo "$(date -Iseconds) [START] watcher on ${BAT_PATH} (threshold=${THRESHOLD}%)" >>"$LOG"
+echo "$(date -Iseconds) [START] watcher on ${BAT_PATH} (threshold=${THRESHOLD}%, output=${FORCE_OUTPUT})" >>"$LOG"
 
 low_mode=0
 last_nag_time=0
@@ -56,22 +57,29 @@ while true; do
   cap=${cap//[[:space:]]/}
   now=${EPOCHSECONDS:-$(date +%s)}
 
+  # ---- power-state normalization ----
+  powered=false
+  [[ "$status" == "Charging" || "$status" == "Full" ]] && powered=true
+
   # ---- enter low-mode ----
-  if [[ "$status" == "Discharging" && "$cap" =~ ^[0-9]+$ && $cap -le $THRESHOLD ]]; then
+  if [[ "$powered" == "false" &&
+        "$cap" =~ ^[0-9]+$ &&
+        $cap -le $THRESHOLD ]]; then
     if (( low_mode == 0 )); then
       if (( last_exit_time == 0 || now - last_exit_time >= REENTRY_BACKOFF_SEC )); then
         last_nag_time=0
       fi
       low_mode=1
-      echo "$(date -Iseconds) [STATE] enter low-mode (cap=${cap}%)" >>"$LOG"
+      echo "$(date -Iseconds) [STATE] enter low-mode (status=$status cap=${cap}%)" >>"$LOG"
     fi
   else
     # ---- exit low-mode ----
     exit_due_to_status=0
     exit_due_to_hysteresis=0
 
-    [[ "$status" != "Discharging" ]] && exit_due_to_status=1
-    [[ "$cap" =~ ^[0-9]+$ && $cap -gt $((THRESHOLD + EXIT_HYSTERESIS)) ]] && exit_due_to_hysteresis=1
+    [[ "$powered" == "true" ]] && exit_due_to_status=1
+    [[ "$cap" =~ ^[0-9]+$ &&
+       $cap -gt $((THRESHOLD + EXIT_HYSTERESIS)) ]] && exit_due_to_hysteresis=1
 
     if (( low_mode == 1 && (exit_due_to_status || exit_due_to_hysteresis) )); then
       low_mode=0
@@ -83,17 +91,22 @@ while true; do
   # ---- nag logic ----
   if (( low_mode == 1 )); then
     if (( last_nag_time == 0 || now - last_nag_time >= NAG_INTERVAL_SEC )); then
-      if [[ "$SKIP_IF_SWAYNAG_RUNNING" == "true" ]] && pgrep -x swaynag >/dev/null 2>&1; then
-        echo "$(date -Iseconds) [INFO] swaynag already running; skip" >>"$LOG"
-      else
-        msg="Battery is at ${cap}%. Plug in now!"
-        swaynag -t warning -y overlay -m "$msg" -s "OK"
-        last_nag_time=$now
-        echo "$(date -Iseconds) [WARN] ${msg}" >>"$LOG"
-      fi
+      # Kill stale/invisible swaynags (external monitor / dead output fix)
+      pkill -x swaynag 2>/dev/null || true
+
+      msg="Battery is at ${cap}%. Plug in now!"
+
+      swaynag \
+        -o "$FORCE_OUTPUT" \
+        -t warning \
+        -y overlay \
+        -m "$msg" \
+        -s "OK"
+
+      last_nag_time=$now
+      echo "$(date -Iseconds) [WARN] ${msg}" >>"$LOG"
     fi
   fi
 
   sleep "$POLL_SEC"
 done
-
