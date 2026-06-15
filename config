@@ -130,7 +130,7 @@ bindsym --no-repeat $mod+Shift+Tab fullscreen disable; exec vieb
 bindsym --no-repeat $mod+Control+Tab fullscreen disable; exec solaar
 
 bindsym --no-repeat $mod+Mod1+v fullscreen disable; exec VirtualBox
-bindsym --no-repeat $mod+Mod1+w fullscreen disable; exec waydroid session start; exec waydroid
+bindsym --no-repeat $mod+Mod1+w fullscreen disable; exec bash -c 'waydroid session stop; waydroid session start; waydroid'
 
 bindsym --no-repeat $mod+Mod1+a fullscreen disable; exec anki
 bindsym --no-repeat $mod+Mod1+m fullscreen disable; exec moonlight
