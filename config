@@ -66,7 +66,7 @@ for_window [app_id="libreoffice"] opacity 0.85
 for_window [class="discord"] opacity 0.85
 #for_window [app_id="org.pwmt.zathura"] opacity 0.85
 
-bindsym Print exec ~/.config/sway/scripts/toggle-opacity.sh
+bindsym F11 exec ~/.config/sway/scripts/toggle-opacity.sh
 
 ### Input configuration
    input type:touchpad {
@@ -199,7 +199,7 @@ client.background        $bg
 
 bindsym --no-repeat $mod+Tab exec bash -c '~/.config/sway/scripts/toggle-rotate.sh; ~/.config/sway/scripts/rotation-restore.sh'
 bindsym --no-repeat $mod+Escape exec bash -c '~/.config/sway/scripts/toggle-rotate-no-mouse.sh; ~/.config/sway/scripts/rotation-restore.sh'
-# bindsym --no-repeat $mod+Mod5+Escape exec bash -c '~/.config/sway/scripts/toggle-rotate-no-transform.sh; ~/.config/sway/scripts/rotation-restore.sh'
+bindsym --no-repeat $mod+Print exec bash -c '~/.config/sway/scripts/toggle-rotate-no-transform.sh; ~/.config/sway/scripts/rotation-restore.sh'
 
 ### Key bindings
 #
@@ -216,7 +216,7 @@ bindsym --no-repeat $mod+Escape exec bash -c '~/.config/sway/scripts/toggle-rota
 
     # mouse button for dragging.
     floating_modifier $mod normal
-    bindsym --no-repeat $mod+Print exec ~/.config/sway/scripts/toggle-floating-mod.sh
+    bindsym --no-repeat F12 exec ~/.config/sway/scripts/toggle-floating-mod.sh
 
     # Reload the configuration file
 
