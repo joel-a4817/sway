@@ -111,22 +111,23 @@ input "1386:20983:Wacom_Pen_and_multitouch_sensor_Finger" {
 bindsym --no-repeat $mod+Shift+u fullscreen disable; exec $term -T "$popup-update-rebuild" -e bash -c 'nix flake update --flake ~/nixos && sudo nixos-rebuild boot --impure --flake ~/nixos#rt4817; echo; read -n 1 -p "Press any key to close..."'
 bindsym --no-repeat $mod+Shift+m fullscreen disable; exec $term -T "$popup-update-rebuild" -e bash -c 'nix flake update --flake ~/nixos && sudo nixos-rebuild boot --impure --flake ~/nixos#rt4817 --cores 1 --max-jobs 1; echo; read -n 1 -p "Press any key to close..."'
 bindsym --no-repeat $mod+Shift+o fullscreen disable; exec $term -T "$popup-update-optimise" -e bash -c 'sudo nix-collect-garbage; echo; sudo nix store optimise; echo; read -n 1 -p "Press any key to close..."'
-bindsym --no-repeat $mod+Shift+w fullscreen disable; exec $term -T "$popup-update-wipe" -e bash -c "swaynag -t warning -y overlay -m 'You pressed the wipe shortcut. Do you really want to delete all other nix configurations and reboot?' -B 'Yes, delete all other nix configurations and reboot' 'sudo nix-collect-garbage -d; echo; sudo nix store optimise; rm -rf ~/.local/state/battery-interval-swaynag.log; reboot'"
+bindsym --no-repeat $mod+Shift+e fullscreen disable; exec $term -T "$popup-update-wipe" -e bash -c "swaynag -t warning -y overlay -m 'You pressed the wipe shortcut. Do you really want to delete all other nix configurations and reboot?' -B 'Yes, delete all other nix configurations and reboot' 'sudo nix-collect-garbage -d; echo; sudo nix store optimise; rm -rf ~/.local/state/battery-interval-swaynag.log; reboot'"
 
 # always run rebuild after pixymon update
-bindsym --no-repeat $mod+Control+p fullscreen disable; exec $term -T "$popup-update-pixymon" -e bash -c "swaynag -t warning -y overlay -m 'You pressed the update pixymon shortcut. Do you really want to update pixymon?' -B 'Yes, update pixymon' 'cd ~/pixy2; git pull --ff-only; cd scripts; ./build_pixymon_src.sh; cp ~/pixy2/src/host/linux/pixy.rules ~/nixos; echo; read -n 1 -p 'Press any key to close...''"
-bindsym --no-repeat $mod+Control+t fullscreen disable; exec $term -T "$popup-settime" -e bash -c '~/.config/sway/scripts/settime.sh; echo; read -n 1 -p "Press any key to close..."'
-bindsym --no-repeat $mod+Control+k fullscreen disable; exec $term -T "$popup-update-calendar" -e bash -c 'cp -f ~/.local/share/calcurse/todo ~/Documents/Calendar; cp -rf ~/.local/share/calcurse/notes ~/Documents/Calendar; echo "todo, notes merge complete"; rm -rf ~/.local/share/calcurse/personal.ics; cd ~/.local/share/calcurse; calcurse -x > personal.ics; echo "personal.ics merge complete"; read -n 1 -p "Press any key to close..."'
-bindsym --no-repeat $mod+Control+c fullscreen disable; exec $term -T "$popup-update-calendar" -e bash -c 'rm -rf ~/.local/share/calcurse/compass.ics ~/.local/share/calcurse/compass; curl -L -o ~/.local/share/calcurse/compass.ics "https://mhs-vic.compass.education/download/sharedCalendar.aspx?uid=19030&key=de953c62-f1e9-475d-b0c2-83fd3c09ff62&c.ics"; echo; calcurse -D ~/.local/share/calcurse/compass -i ~/.local/share/calcurse/compass.ics; echo; read -n 1 -p "Press any key to close..."' 
+bindsym --no-repeat $mod+Shift+p fullscreen disable; exec $term -T "$popup-update-pixymon" -e bash -c "swaynag -t warning -y overlay -m 'You pressed the update pixymon shortcut. Do you really want to update pixymon?' -B 'Yes, update pixymon' 'cd ~/pixy2; git pull --ff-only; cd scripts; ./build_pixymon_src.sh; cp ~/pixy2/src/host/linux/pixy.rules ~/nixos; echo; read -n 1 -p 'Press any key to close...''"
+bindsym --no-repeat $mod+Shift+t fullscreen disable; exec $term -T "$popup-settime" -e bash -c '~/.config/sway/scripts/settime.sh; echo; read -n 1 -p "Press any key to close..."'
+bindsym --no-repeat $mod+Shift+d fullscreen disable; exec $term -T "$popup-update-calendar" -e bash -c 'cp -f ~/.local/share/calcurse/todo ~/Documents/Calendar; cp -rf ~/.local/share/calcurse/notes ~/Documents/Calendar; echo "todo, notes merge complete"; rm -rf ~/.local/share/calcurse/personal.ics; cd ~/.local/share/calcurse; calcurse -x > personal.ics; echo "personal.ics merge complete"; read -n 1 -p "Press any key to close..."'
+bindsym --no-repeat $mod+Shift+w fullscreen disable; exec $term -T "$popup-update-calendar" -e bash -c 'rm -rf ~/.local/share/calcurse/compass.ics ~/.local/share/calcurse/compass; curl -L -o ~/.local/share/calcurse/compass.ics "https://mhs-vic.compass.education/download/sharedCalendar.aspx?uid=19030&key=de953c62-f1e9-475d-b0c2-83fd3c09ff62&c.ics"; echo; calcurse -D ~/.local/share/calcurse/compass -i ~/.local/share/calcurse/compass.ics; echo; read -n 1 -p "Press any key to close..."' 
 
 #keybinds app
-bindsym --no-repeat $mod+Control+Return fullscreen disable; exec $term -T "$popup-tuis" -e clipse
-bindsym --no-repeat $mod+Shift+Return fullscreen disable; exec $term -T "$popup-tuis" -e yazi
-bindsym --no-repeat $mod+Mod5+Return fullscreen disable; exec $term -T "$popup-tuis" -e calcurse
-bindsym --no-repeat $mod+Mod1+Return fullscreen disable; exec $term -T "$popup-tuis" -e calcurse -D ~/.local/share/calcurse/compass 
-bindsym --no-repeat $mod+Tab fullscreen disable; exec glide
-bindsym --no-repeat $mod+Shift+Tab fullscreen disable; exec bash -c 'waydroid session stop; waydroid session start; waydroid' 
-bindsym --no-repeat $mod+Control+Tab fullscreen disable; exec VirtualBox
+bindsym --no-repeat $mod+F2 fullscreen disable; exec $term -T "$popup-tuis" -e clipse
+bindsym --no-repeat $mod+F1 fullscreen disable; exec $term -T "$popup-tuis" -e yazi
+bindsym --no-repeat $mod+F3 fullscreen disable; exec $term -T "$popup-tuis" -e calcurse
+bindsym --no-repeat $mod+F4 fullscreen disable; exec $term -T "$popup-tuis" -e calcurse -D ~/.local/share/calcurse/compass 
+bindsym --no-repeat $mod+Mod1+g fullscreen disable; exec glide
+bindsym --no-repeat $mod+Mod1+w fullscreen disable; exec bash -c '~/.config/sway/scripts/waydroid-launch.sh' 
+bindsym --no-repeat $mod+Mod1+v fullscreen disable; exec VirtualBox
+bindsym --no-repeat $mod+Mod1+t fullscreen disable; exec solaar
 
 bindsym --no-repeat $mod+Mod1+a fullscreen disable; exec anki
 bindsym --no-repeat $mod+Mod1+m fullscreen disable; exec moonlight
@@ -148,12 +149,10 @@ bindsym --no-repeat $mod+Mod5+s fullscreen disable; exec bash -c 'syncthing; syn
 bindsym --no-repeat $mod+Mod5+p fullscreen disable; exec ~/papercut/pc-client-linux.sh
 
 #wifi
-bindsym --no-repeat $mod+XF86Display fullscreen disable; exec $term -T "$popup-wifi-device-select1" -e bash -c 'nmcli dev disconnect wlp0s20f0u4; echo; nmcli dev disconnect wlp0s20f0u1; echo; nmcli dev connect wlp0s20f3; nmcli dev disconnect enp0s20f0u1; echo; nmcli dev disconnect enp0s20f0u2; echo; nmcli dev disconnect enp0s13f0u1; echo; nmcli dev disconnect enp0s13f0u2; echo; read -n 1 -p "Press any key to close..."'
-bindsym --no-repeat $mod+XF86Tools fullscreen disable; exec $term -T "$popup-wifi-device-select2" -e bash -c 'nmcli dev connect wlp0s20f0u4; echo; nmcli dev connect wlp0s20f0u1; echo; nmcli dev disconnect wlp0s20f3; echo; nmcli dev connect enp0s20f0u1; echo; nmcli dev connect enp0s20f0u2; echo; nmcli dev connect enp0s13f0u1; echo; nmcli dev connect enp0s13f0u2; echo; read -n 1 -p "Press any key to close..."'
-bindsym --no-repeat XF86Display fullscreen disable; exec $term -T "$popup-wifi-check" -e bash -c 'nmcli device status; echo; nmcli device wifi list; echo; read -n 1 -p "Press any key to close..."'
-bindsym --no-repeat XF86Tools fullscreen disable; exec $term -T "$popup-wifi-select" -e bash -c 'nmcli dev wifi connect --ask; read -n 1 -p "Press any key to close..."'
+bindsym --no-repeat F3 fullscreen disable; exec $term -T "$popup-wifi-device-select1" -e bash -c 'nmcli dev disconnect wlp0s20f0u4; echo; nmcli dev disconnect wlp0s20f0u1; echo; nmcli dev connect wlp0s20f3; nmcli dev disconnect enp0s20f0u1; echo; nmcli dev disconnect enp0s20f0u2; echo; nmcli dev disconnect enp0s13f0u1; echo; nmcli dev disconnect enp0s13f0u2; echo; read -n 1 -p "Press any key to close..."'
+bindsym --no-repeat F4 fullscreen disable; exec $term -T "$popup-wifi-device-select2" -e bash -c 'nmcli dev connect wlp0s20f0u4; echo; nmcli dev connect wlp0s20f0u1; echo; nmcli dev disconnect wlp0s20f3; echo; nmcli dev connect enp0s20f0u1; echo; nmcli dev connect enp0s20f0u2; echo; nmcli dev connect enp0s13f0u1; echo; nmcli dev connect enp0s13f0u2; echo; read -n 1 -p "Press any key to close..."'
+bindsym --no-repeat F1 fullscreen disable; exec $term -T "$popup-wifi-check" -e bash -c 'nmcli device status; echo; nmcli device wifi list; echo; read -n 1 -p "Press any key to close..."'
 bindsym --no-repeat F2 fullscreen disable; exec $term -T "$popup-wifi-select" -e bash -c 'nmcli dev wifi connect --ask; read -n 1 -p "Press any key to close..."'
-bindsym --no-repeat $mod+F2 fullscreen disable; exec $term -T "$popup-wifi-device-select2"   -e bash -c 'nmcli dev connect wlp0s20f0u4; echo; nmcli dev connect wlp0s20f0u1; echo; nmcli dev disconnect wlp0s20f3; echo; nmcli dev connect enp0s20f0u1; echo; nmcli dev connect enp0s20f0u2; echo; nmcli dev connect enp0s13f0u1; echo; nmcli dev connect enp0s13f0u2; echo; read -n 1 -p "Press any key to close..."'
 
 #fastfetch
 bindsym --locked --no-repeat $mod+Control+w fullscreen disable; exec $term -T "$popup-f-wifi" -e bash -c '~/.config/sway/scripts/fastfetch/f-wifi.sh; read -n 1 -p "Press any key to close..."'
@@ -165,17 +164,17 @@ bindsym --locked --no-repeat $mod+Control+h fullscreen disable; exec $term -T "$
 bindsym --locked --no-repeat $mod+Control+a fullscreen disable; exec $term -T "$popup-f-aesthetics" -e bash -c '~/.config/sway/scripts/fastfetch/f-aesthetics.sh; echo; read -n 1 -p "Press any key to close..."'
 
 #screen-record
-bindsym --no-repeat $mod+Mod5+Print exec bash -c 'mkdir -p ~/Pictures/Screen-recordings; wf-recorder -f ~/Pictures/Screen-recordings/recording-$(date +%Y%m%d-%H%M%S).mkv'
-bindsym --no-repeat $mod+Mod1+Print exec bash -c 'mkdir -p ~/Pictures/Screen-recordings; wf-recorder -a -f ~/Pictures/Screen-recordings/recording-$(date +%Y%m%d-%H%M%S).mkv'
-bindsym --no-repeat $mod+Control+Print exec bash -c 'pkill -f wf-recorder'
+bindsym --no-repeat $mod+F7 exec bash -c 'mkdir -p ~/Pictures/Screen-recordings; wf-recorder -f ~/Pictures/Screen-recordings/recording-$(date +%Y%m%d-%H%M%S).mkv'
+bindsym --no-repeat $mod+F8 exec bash -c 'mkdir -p ~/Pictures/Screen-recordings; wf-recorder -a -f ~/Pictures/Screen-recordings/recording-$(date +%Y%m%d-%H%M%S).mkv'
+bindsym --no-repeat $mod+F9 exec bash -c 'pkill -f wf-recorder'
 
 #screenshot
-bindsym --no-repeat $mod+Print exec bash -c 'mkdir -p ~/Pictures/Screenshots; grim -t png - | tee ~/Pictures/Screenshots/screenshot-$(date +%Y%m%d-%H%M%S).png | wl-copy'
-bindsym --no-repeat $mod+Shift+Print exec bash -c 'mkdir -p ~/Pictures/Screenshots; grim -t png -g "$(slurp)" - | tee ~/Pictures/Screenshots/screenshot-$(date +%Y%m%d-%H%M%S).png | wl-copy'
+bindsym --no-repeat $mod+F5 exec bash -c 'mkdir -p ~/Pictures/Screenshots; grim -t png - | tee ~/Pictures/Screenshots/screenshot-$(date +%Y%m%d-%H%M%S).png | wl-copy'
+bindsym --no-repeat $mod+F6 exec bash -c 'mkdir -p ~/Pictures/Screenshots; grim -t png -g "$(slurp)" - | tee ~/Pictures/Screenshots/screenshot-$(date +%Y%m%d-%H%M%S).png | wl-copy'
 
 #audio device output switch
-bindsym --locked --no-repeat $mod+XF86AudioMute fullscreen disable; exec $term -T "$popup-audio-select1" -e bash -c 'pactl set-card-profile alsa_card.pci-0000_00_1f.3 output:hdmi-stereo; read -n 1 -p "Press any key to close..."'
-bindsym --locked --no-repeat $mod+XF86AudioMicMute exec $term -T "$popup-audio-select1" -e bash -c 'pactl set-card-profile $(pactl list short cards | head -n1 | cut -f2) output:analog-stereo+input:analog-stereo; pactl set-default-source $(pactl list short sources | grep alsa_input | head -n1 | cut -f2); read -n 1 -p "Press any key to close..."'
+bindsym --locked --no-repeat F9 fullscreen disable; exec $term -T "$popup-audio-select1" -e bash -c 'pactl set-card-profile alsa_card.pci-0000_00_1f.3 output:hdmi-stereo; read -n 1 -p "Press any key to close..."'
+bindsym --locked --no-repeat F10 exec $term -T "$popup-audio-select1" -e bash -c 'pactl set-card-profile $(pactl list short cards | head -n1 | cut -f2) output:analog-stereo+input:analog-stereo; pactl set-default-source $(pactl list short sources | grep alsa_input | head -n1 | cut -f2); read -n 1 -p "Press any key to close..."'
 
 #bg
 output * bg /home/joel/.config/sway/mcqueen-blurred.jpeg fill
@@ -198,9 +197,9 @@ client.unfocused         $bg      $bg         $fg    $bg        $bg
 client.urgent            #BF616A  #BF616A     $fg    #BF616A    #BF616A
 client.background        $bg
 
-bindsym --no-repeat $mod+Escape exec bash -c '~/.config/sway/scripts/toggle-rotate.sh; ~/.config/sway/scripts/rotation-restore.sh'
-bindsym --no-repeat $mod+Shift+Escape exec bash -c '~/.config/sway/scripts/toggle-rotate-no-mouse.sh; ~/.config/sway/scripts/rotation-restore.sh'
-bindsym --no-repeat $mod+Control+Escape exec bash -c '~/.config/sway/scripts/toggle-rotate-no-transform.sh; ~/.config/sway/scripts/rotation-restore.sh'
+bindsym --no-repeat $mod+Tab exec bash -c '~/.config/sway/scripts/toggle-rotate.sh; ~/.config/sway/scripts/rotation-restore.sh'
+bindsym --no-repeat $mod+Escape exec bash -c '~/.config/sway/scripts/toggle-rotate-no-mouse.sh; ~/.config/sway/scripts/rotation-restore.sh'
+# bindsym --no-repeat $mod+Mod5+Escape exec bash -c '~/.config/sway/scripts/toggle-rotate-no-transform.sh; ~/.config/sway/scripts/rotation-restore.sh'
 
 ### Key bindings
 #
@@ -217,16 +216,16 @@ bindsym --no-repeat $mod+Control+Escape exec bash -c '~/.config/sway/scripts/tog
 
     # mouse button for dragging.
     floating_modifier $mod normal
-    bindsym --no-repeat $mod+Grave exec ~/.config/sway/scripts/toggle-floating-mod.sh
+    bindsym --no-repeat $mod+Print exec ~/.config/sway/scripts/toggle-floating-mod.sh
 
     # Reload the configuration file
 
 bindsym $mod+Shift+c exec ~/.config/sway/scripts/rotation-restore.sh
 
     # system off options
-    bindsym --no-repeat --locked $mod+Shift+e exec bash -c "swaynag -t warning -y overlay -m 'You pressed the exit shortcut. Do you really want to exit sway?' -B 'Yes, exit sway' 'rm -rf ~/.local/state/battery-interval-swaynag.log && swaymsg exit'"
-bindsym --no-repeat --locked $mod+Ctrl+Shift+Escape exec bash -c 'rm -rf ~/.local/state/battery-interval-swaynag.log && swaylock -F -fi /home/joel/.config/sway/mcqueen.jpeg && systemctl suspend'
-bindsym --no-repeat --locked $mod+Shift+r exec bash -c "swaynag -t warning -y overlay -m 'You pressed the reboot shortcut. Do you really want to reboot your device?' -B 'Yes, reboot my device' 'rm -rf ~/.local/state/battery-interval-swaynag.log && reboot'"
+    bindsym --no-repeat --locked $mod+F11 exec bash -c "swaynag -t warning -y overlay -m 'You pressed the exit shortcut. Do you really want to exit sway?' -B 'Yes, exit sway' 'rm -rf ~/.local/state/battery-interval-swaynag.log && swaymsg exit'"
+bindsym --no-repeat --locked $mod+F10 exec bash -c 'rm -rf ~/.local/state/battery-interval-swaynag.log && swaylock -F -fi /home/joel/.config/sway/mcqueen.jpeg && systemctl suspend'
+bindsym --no-repeat --locked $mod+F12 exec bash -c "swaynag -t warning -y overlay -m 'You pressed the reboot shortcut. Do you really want to reboot your device?' -B 'Yes, reboot my device' 'rm -rf ~/.local/state/battery-interval-swaynag.log && reboot'"
 
 #
 # Moving around:
@@ -344,7 +343,7 @@ bindsym --no-repeat $mod+r mode "resize"
      bindsym --locked XF86MonBrightnessDown exec brightnessctl set 5%-
      bindsym --locked XF86MonBrightnessUp exec brightnessctl set 5%+
 
-     bindsym --locked $mod+XF86AudioLowerVolume exec pactl set-sink-volume @DEFAULT_SINK@ 5%
-     bindsym --locked $mod+XF86AudioRaiseVolume exec pactl set-sink-volume @DEFAULT_SINK@ 100%
-     bindsym --locked $mod+XF86MonBrightnessDown exec brightnessctl set 5%
-     bindsym --locked $mod+XF86MonBrightnessUp exec brightnessctl set 100%    
+     bindsym --locked F5 exec pactl set-sink-volume @DEFAULT_SINK@ 5%
+     bindsym --locked F6 exec pactl set-sink-volume @DEFAULT_SINK@ 100%
+     bindsym --locked F7 exec brightnessctl set 5%
+     bindsym --locked F8 exec brightnessctl set 100%    
