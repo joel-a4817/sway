@@ -172,8 +172,8 @@ bindsym --no-repeat $mod+F5 exec bash -c 'mkdir -p ~/Pictures/Screenshots; grim 
 bindsym --no-repeat $mod+F6 exec bash -c 'mkdir -p ~/Pictures/Screenshots; grim -t png -g "$(slurp)" - | tee ~/Pictures/Screenshots/screenshot-$(date +%Y%m%d-%H%M%S).png | wl-copy'
 
 #audio device output switch
-bindsym --locked --no-repeat F9 fullscreen disable; exec $term -T "$popup-audio-select1" -e bash -c 'pactl set-card-profile alsa_card.pci-0000_00_1f.3 output:hdmi-stereo; read -n 1 -p "Press any key to close..."'
-bindsym --locked --no-repeat F10 exec $term -T "$popup-audio-select1" -e bash -c 'CARD=alsa_card.pci-0000_00_1f.3; PROFILE=$(pactl list cards | grep -A30 "$CARD" | grep -E "output:" | grep -vi hdmi | head -n1 | cut -d" " -f1); [ -n "$PROFILE" ] && pactl set-card-profile "$CARD" "$PROFILE"; read -n 1 -p "Press any key to close..."'
+bindsym --locked --no-repeat F9 exec $term -T "$popup-audio-select1" -e bash -c 'pactl set-card-profile "$(pactl list cards short | awk "NR==1{print \$2}")" output:hdmi-stereo; read -n 1 -p "Press any key to close..."'
+bindsym --locked --no-repeat F10 exec $term -T "$popup-audio-select2" -e bash -c 'pactl set-card-profile "$(pactl list cards short | awk "NR==1{print \$2}")" output:analog-stereo+input:analog-stereo; read -n 1 -p "Press any key to close..."'
 
 #bg
 output * bg /home/joel/.config/sway/mcqueen-blurred.jpeg fill
