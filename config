@@ -172,8 +172,8 @@ bindsym --no-repeat $mod+F5 exec bash -c 'mkdir -p ~/Pictures/Screenshots; grim 
 bindsym --no-repeat $mod+F6 exec bash -c 'mkdir -p ~/Pictures/Screenshots; grim -t png -g "$(slurp)" - | tee ~/Pictures/Screenshots/screenshot-$(date +%Y%m%d-%H%M%S).png | wl-copy'
 
 #audio device output switch
-bindsym --locked --no-repeat F9 exec $term -T "$popup-audio-select1" -e bash -c 'CARD=$(pactl list cards | awk "/Name:/{n=\$2}/output:hdmi-stereo/{print n;exit}"); pactl set-card-profile "$CARD" output:hdmi-stereo; read -n 1 -p "Press any key to close..."'
-bindsym --locked --no-repeat F10 exec $term -T "$popup-audio-select2" -e bash -c 'CARD=$(pactl list cards | awk "/Name:/{n=\$2}/output:analog-stereo\\+input:analog-stereo/{print n;exit}"); pactl set-card-profile "$CARD" output:analog-stereo+input:analog-stereo; read -n 1 -p "Press any key to close..."'
+bindsym --locked --no-repeat F9 exec $term -T "$popup-audio-select1" -e bash -c 'CARD=$(pactl list cards short | awk "NR==1{print \$2}"); PROFILE=$(pactl list cards | grep "output:.*hdmi.*available: yes" | head -n1 | awk "{print \$1}" | sed "s/:$//"); echo "$PROFILE"; pactl set-card-profile "$CARD" "$PROFILE"; read -n 1 -p "Press any key to close..."'
+bindsym --locked --no-repeat F10 exec $term -T "$popup-audio-select2" -e bash -c 'CARD=$(pactl list cards short | awk "NR==1{print \$2}"); PROFILE=$(pactl list cards | grep "output:.*analog.*available: yes" | head -n1 | awk "{print \$1}" | sed "s/:$//"); echo "$PROFILE"; pactl set-card-profile "$CARD" "$PROFILE"; read -n 1 -p "Press any key to close..."'
 #bg
 output * bg /home/joel/.config/sway/mcqueen-blurred.jpeg fill
 
