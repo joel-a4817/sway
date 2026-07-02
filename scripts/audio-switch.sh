@@ -2,60 +2,23 @@
 
 set -euo pipefail
 
-MODE="${1:-}"
+CARD="$(pactl list cards short | awk 'NR==1{print $2}')"
 
-find_profile() {
-    local pattern="$1"
-
-    pactl list cards | awk -v pat="$pattern" '
-    /^Card #/ {
-        card=""
-    }
-
-    /^[[:space:]]*Name:/ {
-        card=$2
-    }
-
-    /Profiles:/ {
-        profiles=1
-        next
-    }
-
-    /Active Profile:/ {
-        profiles=0
-    }
-
-    profiles && $0 ~ pat && $0 ~ /available: yes/ {
-        profile=$1
-        sub(/:$/, "", profile)
-        print card "|" profile
-        exit
-    }
-    '
-}
-
-case "$MODE" in
+case "${1:-}" in
     hdmi)
-        RESULT="$(find_profile "hdmi")"
+        PROFILE="$(pactl list cards | sed -n '/Profiles:/,/Active Profile:/p' | grep 'available: yes' | grep 'hdmi' | head -n1 | awk '{print $1}' | sed 's/:$//')"
         ;;
     analog)
-        RESULT="$(find_profile "analog")"
+        PROFILE="$(pactl list cards | sed -n '/Profiles:/,/Active Profile:/p' | grep 'available: yes' | grep '^.*output:analog' | head -n1 | awk '{print $1}' | sed 's/:$//')"
         ;;
     *)
-        echo "Usage: $0 {hdmi|analog}"
+        echo "Usage: $0 hdmi|analog"
         exit 1
         ;;
 esac
 
-[ -n "$RESULT" ] || {
-    echo "No matching profile found"
-    exit 1
-}
-
-CARD="${RESULT%%|*}"
-PROFILE="${RESULT##*|}"
-
-echo "Card: $CARD"
-echo "Profile: $PROFILE"
+echo "CARD=$CARD"
+echo "PROFILE=$PROFILE"
 
 pactl set-card-profile "$CARD" "$PROFILE"
+
