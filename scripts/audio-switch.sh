@@ -2,59 +2,60 @@
 
 set -euo pipefail
 
-CARD="$(pactl list cards short | awk 'NR==1{print $2}')"
+MODE="${1:-}"
 
-case "$1" in
+find_profile() {
+    local pattern="$1"
+
+    pactl list cards | awk -v pat="$pattern" '
+    /^Card #/ {
+        card=""
+    }
+
+    /^[[:space:]]*Name:/ {
+        card=$2
+    }
+
+    /Profiles:/ {
+        profiles=1
+        next
+    }
+
+    /Active Profile:/ {
+        profiles=0
+    }
+
+    profiles && $0 ~ pat && $0 ~ /available: yes/ {
+        profile=$1
+        sub(/:$/, "", profile)
+        print card "|" profile
+        exit
+    }
+    '
+}
+
+case "$MODE" in
     hdmi)
-        PROFILE="$(
-            pactl list cards |
-            awk '
-                /Profiles:/ {p=1; next}
-                /Active Profile:/ {p=0}
-                p && /output:.*hdmi/ && /available: yes/ {
-                    print $1
-                    exit
-                }
-            ' |
-            sed 's/:$//'
-        )"
+        RESULT="$(find_profile "hdmi")"
         ;;
-
     analog)
-        PROFILE="$(
-            pactl list cards |
-            awk '
-                /Profiles:/ {p=1; next}
-                /Active Profile:/ {p=0}
-
-                p &&
-                /output:/ &&
-                !/hdmi/ &&
-                /available: yes/ {
-
-                    name=$1
-                    gsub(/:$/, "", name)
-
-                    if (match($0, /priority: [0-9]+/)) {
-                        pr = substr($0, RSTART+10, RLENGTH-10)
-
-                        if (pr > best) {
-                            best = pr
-                            profile = name
-                        }
-                    }
-                }
-
-                END { print profile }
-            '
-        )"
+        RESULT="$(find_profile "analog")"
+        ;;
+    *)
+        echo "Usage: $0 {hdmi|analog}"
+        exit 1
         ;;
 esac
 
-[ -n "$PROFILE" ] || {
+[ -n "$RESULT" ] || {
     echo "No matching profile found"
     exit 1
 }
 
-echo "Switching to: $PROFILE"
+CARD="${RESULT%%|*}"
+PROFILE="${RESULT##*|}"
+
+echo "Card: $CARD"
+echo "Profile: $PROFILE"
+
 pactl set-card-profile "$CARD" "$PROFILE"
