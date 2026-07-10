@@ -124,7 +124,7 @@ bindsym --no-repeat $mod+F1 fullscreen disable; exec $term -T "$popup-tuis" -e y
 bindsym --no-repeat $mod+F3 fullscreen disable; exec $term -T "$popup-tuis" -e calcurse
 bindsym --no-repeat $mod+F4 fullscreen disable; exec $term -T "$popup-tuis" -e calcurse -D ~/.local/share/calcurse/compass 
 bindsym --no-repeat $mod+Mod1+g fullscreen disable; exec glide
-bindsym --no-repeat $mod+Mod1+w fullscreen disable; exec bash -c '~/.config/sway/scripts/waydroid-launch.sh' 
+bindsym --no-repeat $mod+Mod1+w fullscreen disable; exec ~/.config/sway/scripts/waydroid-launch.sh 
 bindsym --no-repeat $mod+Mod1+v fullscreen disable; exec VirtualBox
 bindsym --no-repeat $mod+Mod1+t fullscreen disable; exec solaar
 
