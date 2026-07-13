@@ -62,7 +62,7 @@ for_window [app_id="anki"] opacity 0.85
 for_window [class="NotesHub"] opacity 0.85
 for_window [app_id="signal"] opacity 0.85
 for_window [app_id="$termid"] opacity 0.85
-for_window [app_id="libreoffice"] opacity 0.85
+for_window [app_id="coda-qt"] opacity 0.85
 for_window [class="discord"] opacity 0.85
 
 bindsym F11 exec ~/.config/sway/scripts/toggle-opacity.sh
@@ -133,7 +133,7 @@ bindsym --no-repeat $mod+Mod1+m fullscreen disable; exec moonlight
 bindsym --no-repeat $mod+Mod1+c fullscreen disable; exec kamoso
 bindsym --no-repeat $mod+Mod1+z fullscreen disable; exec zathura
 bindsym --no-repeat $mod+Mod1+d fullscreen disable; exec discord
-bindsym --no-repeat $mod+Mod1+l fullscreen disable; exec libreoffice
+bindsym --no-repeat $mod+Mod1+l fullscreen disable; exec coda-qt
 bindsym --no-repeat $mod+Mod1+s fullscreen disable; exec signal-desktop
 bindsym --no-repeat $mod+Mod1+p fullscreen disable; exec prismlauncher
 bindsym --no-repeat $mod+Mod1+k fullscreen disable; exec kicad
