@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SVG_ROOT="$HOME/noteshub/SVGs"
-PDF_ROOT="$HOME/noteshub/Documents"
+SVG_ROOT="$HOME/Documents/svg"
+PDF_ROOT="$HOME/Downloads/png"
 
 convert_svg_to_pdf() {
     local svg="$1"
