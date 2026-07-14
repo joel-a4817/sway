@@ -73,6 +73,20 @@ EOF
     rm -f "$html"
 }
 
+convert_pdf_to_png() {
+    local pdf="$1"
+
+    local png_base="${pdf%.pdf}"
+
+    rm -f "${png_base}.png"
+
+    pdftoppm \
+        -png \
+        -singlefile \
+        "$pdf" \
+        "$png_base"
+}
+
 find "$SVG_ROOT" -type f -name '*.svg' | while read -r svg; do
 
     rel="${svg#$SVG_ROOT/}"
@@ -86,13 +100,16 @@ find "$SVG_ROOT" -type f -name '*.svg' | while read -r svg; do
     echo "Converting:"
     echo "  $svg"
     echo "  ->"
-    echo "  $target_pdf"
+    echo "  ${target_pdf%.pdf}.png"
 
     convert_svg_to_pdf "$svg" "$tmp_pdf"
 
     mv "$tmp_pdf" "$target_pdf"
 
-    echo "Updated:"
-    echo "  $target_pdf"
+    convert_pdf_to_png "$target_pdf"
+    rm "$target_pdf"
+
+    echo "Updated"
+
 done
 
