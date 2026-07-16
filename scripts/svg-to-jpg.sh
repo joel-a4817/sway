@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SVG_ROOT="$HOME/Documents/svg"
-PDF_ROOT="$HOME/Downloads/jpg"
+PDF_ROOT="$HOME/Downloads/jpeg"
 
 convert_svg_to_pdf() {
     local svg="$1"
@@ -73,18 +73,18 @@ EOF
     rm -f "$html"
 }
 
-convert_pdf_to_jpg() {
+convert_pdf_to_jpeg() {
     local pdf="$1"
 
-    local jpg_base="${pdf%.pdf}"
+    local jpeg_base="${pdf%.pdf}"
 
-    rm -f "${jpg_base}.jpg"
+    rm -f "${jpeg_base}.jpg"
 
     pdftoppm \
-        -jpg \
+        -jpeg \
         -singlefile \
         "$pdf" \
-        "$jpg_base"
+        "$jpeg_base"
 }
 
 find "$SVG_ROOT" -type f -name '*.svg' | while read -r svg; do
@@ -100,13 +100,13 @@ find "$SVG_ROOT" -type f -name '*.svg' | while read -r svg; do
     echo "Converting:"
     echo "  $svg"
     echo "  ->"
-    echo "  ${target_pdf%.pdf}.jpg"
+    echo "  ${target_pdf%.pdf}.jpeg"
 
     convert_svg_to_pdf "$svg" "$tmp_pdf"
 
     mv "$tmp_pdf" "$target_pdf"
 
-    convert_pdf_to_jpg "$target_pdf"
+    convert_pdf_to_jpeg "$target_pdf"
     rm "$target_pdf"
 
     echo "Updated"
