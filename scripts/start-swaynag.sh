@@ -2,12 +2,12 @@
 
 # Kill any existing swaynag
 pkill swaynag 2>/dev/null || true
-pkill wvkbd-mobintl 2>/dev/null ||true
+pkill wvkbd-deskintl 2>/dev/null ||true
 
 # Small delay to ensure the old layer surface is gone
 sleep 0.05
 
-wvkbd-mobintl --hidden --alpha 216 -L 360 -H 640
+wvkbd-deskintl --hidden --alpha 216 -L 360 -H 640
 
 exec swaynag \
   --edge bottom \
