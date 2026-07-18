@@ -14,11 +14,12 @@ exec swaynag \
   --layer overlay \
   --output eDP-1 \
   --message "" \
-  --button-no-terminal "⌨" "pkill -RTMIN wvkbd" \
+  --button-no-terminal " ⌨ " "pkill -RTMIN wvkbd" \
   --background 000000AA \
   --button-background 222222CC \
   --text FFFFFF \
   --button-border-size 2 \
   --button-gap 48 \
-  --border FF8800CC
+  --border FF8800CC \
+  --font "JetBrainsMono Nerd Font Mono 16"
 
