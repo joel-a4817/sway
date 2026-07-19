@@ -347,7 +347,7 @@ bindsym --no-repeat $mod+r mode "resize"
      bindsym --locked XF86MonBrightnessDown exec brightnessctl set 5%-
      bindsym --locked XF86MonBrightnessUp exec brightnessctl set 5%+
 
-     bindsym --locked F5 exec pactl set-sink-volume @DEFAULT_SINK@ 0%
-     bindsym --locked F6 exec pactl set-sink-volume @DEFAULT_SINK@ 100%
-     bindsym --locked F7 exec brightnessctl set 0%
-     bindsym --locked F8 exec brightnessctl set 100%    
+     bindsym --locked F5 exec pactl set-sink-volume @DEFAULT_SINK@ -5%
+     bindsym --locked F6 exec pactl set-sink-volume @DEFAULT_SINK@ +5%
+     bindsym --locked F7 exec brightnessctl set 5%-
+     bindsym --locked F8 exec brightnessctl set 5%+    
