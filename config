@@ -106,6 +106,14 @@ input "1386:20983:Wacom_Pen_and_multitouch_sensor_Finger" {
   events disabled
 }
 
+input "1:1:AT_Translated_Set_2_keyboard" {
+    events disabled
+}
+
+input "6058:20564:ThinkPad_Extra_Buttons" {
+    events disabled
+}
+
 # User keybinds
 
 # keybinds update
