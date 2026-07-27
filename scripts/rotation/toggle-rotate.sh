@@ -3,11 +3,11 @@ set -euo pipefail
 
 OUT="eDP-1"
 
-ROTATOR="/home/joel/.config/sway/scripts/rotate-touchpad.py"
+ROTATOR="/home/joel/.config/sway/scripts/rotation/rotate-touchpad.py"
 TPDEV="/dev/input/touchpad-internal"
 LOG="/tmp/rotate-touchpad.log"
 
-MOUSE_ROTATOR="/home/joel/.config/sway/scripts/rotate-mouse.py"
+MOUSE_ROTATOR="/home/joel/.config/sway/scripts/rotation/rotate-mouse.py"
 MOUSE_DEV="/dev/input/mouse-internal"
 MOUSE_LOG="/tmp/rotate-mouse.log"
 
