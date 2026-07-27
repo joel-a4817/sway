@@ -144,8 +144,8 @@ bindsym --no-repeat $mod+Mod1+b fullscreen disable; exec bambu-studio
 bindsym --no-repeat $mod+Mod1+n fullscreen disable; exec bash -c 'appimage-run /home/joel/Downloads/Apps/noteshub.AppImage & until swaymsg -t get_tree | grep -q "NotesHub"; do sleep 0.05; done; swaymsg [class="NotesHub"] floating enable; sleep 0.3; swaymsg [class="NotesHub"] floating disable; wait'
 bindsym --no-repeat $mod+Mod1+f fullscreen disable; exec bash -c 'appimage-run /home/joel/Downloads/Apps/FreeCAD.AppImage'
 
-bindsym --no-repeat $mod+Mod5+m fullscreen disable; exec $term -e bash -c '~/Downloads/OSX-KVM/OpenCore-Boot.sh'
-bindsym --no-repeat $mod+Mod5+w fullscreen disable; exec $term -e bash -c 'virsh -c qemu:///system start win10'
+bindsym --no-repeat $mod+Mod5+m fullscreen disable; exec $term -e bash -c 'cd ~/Downloads/Apps/OSX-KVM; ./OpenCore-Boot.sh'
+bindsym --no-repeat $mod+Mod5+w fullscreen disable; exec $term -e bash -c 'virsh -c qemu:///system start win10; virt-manager --connect qemu:///system --show-domain-console win10'
 bindsym --no-repeat $mod+Mod5+l fullscreen disable; exec $term -e bash -c 'prismlauncher --launch "1.21.9(1)"'
 bindsym --no-repeat $mod+Mod5+h fullscreen disable; exec $term -e bash -c 'prismlauncher --launch "1.21.4"'
 bindsym --no-repeat $mod+Mod5+b fullscreen disable; exec $term -e bash -c 'prismlauncher --launch "Enhanced Bedwars 1.8.9"'
