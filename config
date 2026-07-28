@@ -153,10 +153,9 @@ bindsym --no-repeat $mod+Mod5+s exec bash -c 'syncthing; syncthing browser'
 bindsym --no-repeat $mod+Mod5+p fullscreen disable; exec ~/papercut/pc-client-linux.sh
 
 #wifi
-bindsym --no-repeat F1 exec $term -T "$popup-status-wifi" -e bash -c 'nmcli dev status; echo; warp-cli status; echo; read -n 1 -p "Press any key to close..."'
+bindsym --no-repeat F1 exec $term -T "$popup-status-wifi" -e bash -c 'nmcli dev status; echo; read -n 1 -p "Press any key to close..."'
 bindsym --no-repeat F2 exec $term -T "$popup-wifi-select" -e bash -c '~/.config/sway/scripts/network/wifi-connect.sh'
-bindsym --no-repeat F3 exec $term -T "$popup-wifi-toggle-warp" bash -c '~/.config/sway/scripts/network/warp-toggle.sh'
-bindsym --no-repeat F4 exec $term -T "$popup-wifi-toggle" -e bash -c '~/.config/sway/scripts/network/wifi-toggle.sh; read -n 1 -p "Press any key to close..."'
+bindsym --no-repeat F3 exec $term -T "$popup-wifi-toggle" -e bash -c '~/.config/sway/scripts/network/wifi-toggle.sh; read -n 1 -p "Press any key to close..."'
 
 #fastfetch
 bindsym --locked --no-repeat $mod+Control+w fullscreen disable; exec $term -T "$popup-f-wifi" -e bash -c '~/.config/sway/scripts/fastfetch/f-wifi.sh; read -n 1 -p "Press any key to close..."'
