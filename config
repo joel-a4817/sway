@@ -50,9 +50,8 @@ for_window [app_id="$termid" title="^$popup-f-info"] floating enable, resize set
 for_window [app_id="$termid" title="^$popup-f-main"] floating enable, resize set 1800 400, move position center
 for_window [app_id="$termid" title="^$popup-f-hardware"] floating enable, resize set 1150 700, move position center
 
+for_window [app_id="$termid" title="^$popup-wifi-select"] floating enable, resize set 800 800, move position center
 for_window [app_id="$termid" title="^$popup-wifi-toggle"] floating enable, resize set 500 500, move position center
-for_window [app_id="$termid" title="^$popup-wifi-select"] floating enable, resize set 500 1000, move position center
-for_window [app_id="$termid" title="^$popup-wifi-status"] floating enable, resize set 1200 300, move position center
 for_window [app_id="$termid" title="^$popup-audio-select"] floating enable, resize set 1200 100,  move position center
 
 for_window [app_id="yazi-nvim"] floating enable, move position center, resize set 1000 700, opacity 0.85
@@ -145,9 +144,8 @@ bindsym --no-repeat $mod+Mod5+s exec bash -c 'syncthing; syncthing browser'
 bindsym --no-repeat $mod+Mod5+p fullscreen disable; exec ~/papercut/pc-client-linux.sh
 
 #wifi
-bindsym --no-repeat F1 exec $term -T "$popup-wifi-status" -e bash -c 'nmcli dev status; echo; read -n 1 -p "Press any key to close..."'
-bindsym --no-repeat F2 exec $term -T "$popup-wifi-select" -e bash -c '~/.config/sway/scripts/network/wifi-connect.sh'
-bindsym --no-repeat F3 exec $term -T "$popup-wifi-toggle" -e bash -c '~/.config/sway/scripts/network/wifi-toggle.sh; read -n 1 -p "Press any key to close..."'
+bindsym --no-repeat F1 exec $term -T "$popup-wifi-select" -e bash -c '~/.config/sway/scripts/network/wifi-select.sh'
+bindsym --no-repeat F2 exec $term -T "$popup-wifi-toggle" -e bash -c '~/.config/sway/scripts/network/wifi-toggle.sh; read -n 1 -p "Press any key to close..."'
 
 #fastfetch
 bindsym --locked --no-repeat $mod+Control+w fullscreen disable; exec $term -T "$popup-f-wifi" -e bash -c '~/.config/sway/scripts/fastfetch/f-wifi.sh; read -n 1 -p "Press any key to close..."'
@@ -168,8 +166,8 @@ bindsym --no-repeat $mod+F5 exec bash -c 'mkdir -p ~/Media/Pictures/Screenshots;
 bindsym --no-repeat $mod+F6 exec bash -c 'mkdir -p ~/Media/Pictures/Screenshots; grim -t png -g "$(slurp)" - | tee ~/Media/Pictures/Screenshots/screenshot-$(date +%Y%m%d-%H%M%S).png | wl-copy'
 
 #audio device output switch
-bindsym --locked --no-repeat F9 exec $term -T "$popup-audio-select1" -e bash -c '~/.config/sway/scripts/audio-switch.sh hdmi; echo; read -n 1 -p "Press any key to close..."'
-bindsym --locked --no-repeat F10 exec $term -T "$popup-audio-select2" -e bash -c '~/.config/sway/scripts/audio-switch.sh analog; echo; read -n 1 -p "Press any key to close..."'
+bindsym --locked --no-repeat F5 exec $term -T "$popup-audio-select" -e bash -c '~/.config/sway/scripts/audio-switch.sh hdmi; echo; read -n 1 -p "Press any key to close..."'
+
 #bg
 
 output * bg /home/joel/.config/sway/mcqueen-blurred.jpeg fill
@@ -192,9 +190,9 @@ client.unfocused         $bg      $bg         $fg    $bg        $bg
 client.urgent            #BF616A  #BF616A     $fg    #BF616A    #BF616A
 client.background        $bg
 
-bindsym --no-repeat $mod+Tab exec bash -c '~/.config/sway/scripts/rotation/toggle-rotate.sh; ~/.config/sway/scripts/rotation/rotation-restore.sh'
-bindsym --no-repeat $mod+Escape exec bash -c '~/.config/sway/scripts/rotation/toggle-rotate-no-mouse.sh; ~/.config/sway/scripts/rotation/rotation-restore.sh'
-bindsym --no-repeat $mod+Print exec bash -c '~/.config/sway/scripts/rotation/toggle-rotate-no-transform.sh; ~/.config/sway/scripts/rotation/rotation-restore.sh'
+bindsym --no-repeat F8 exec bash -c '~/.config/sway/scripts/rotation/toggle-rotate.sh; ~/.config/sway/scripts/rotation/rotation-restore.sh'
+bindsym --no-repeat F9 exec bash -c '~/.config/sway/scripts/rotation/toggle-rotate-no-mouse.sh; ~/.config/sway/scripts/rotation/rotation-restore.sh'
+bindsym --no-repeat F10 exec bash -c '~/.config/sway/scripts/rotation/toggle-rotate-no-transform.sh; ~/.config/sway/scripts/rotation/rotation-restore.sh'
 
 ### Key bindings
 #
@@ -338,7 +336,7 @@ bindsym --no-repeat $mod+r mode "resize"
      bindsym --locked XF86MonBrightnessDown exec brightnessctl set 5%-
      bindsym --locked XF86MonBrightnessUp exec brightnessctl set 5%+
 
-     bindsym --locked F5 exec pactl set-sink-volume @DEFAULT_SINK@ -5%
-     bindsym --locked F6 exec pactl set-sink-volume @DEFAULT_SINK@ +5%
-     bindsym --locked F7 exec brightnessctl set 5%-
-     bindsym --locked F8 exec brightnessctl set 5%+    
+     bindsym --locked F6 exec pactl set-sink-volume @DEFAULT_SINK@ -5%
+     bindsym --locked F7 exec pactl set-sink-volume @DEFAULT_SINK@ +5%
+     bindsym --locked F3 exec brightnessctl set 5%-
+     bindsym --locked F4 exec brightnessctl set 5%+    

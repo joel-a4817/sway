@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 
-clear
-
 mapfile -t networks < <(
     nmcli -t -f SSID device wifi list --rescan yes \
     | awk -F: 'length($1) > 0 && !seen[$1]++'
@@ -12,8 +10,21 @@ echo
 
 echo "[0] Keep current connection"
 
-for i in "${!networks[@]}"; do
-    printf '[%d] %s\n' "$((i+1))" "${networks[$i]}"
+count=${#networks[@]}
+rows=$(((count + 1) / 2))
+
+for ((i=0; i<rows; i++)); do
+    left_idx=$i
+    right_idx=$((i + rows))
+
+    left="[$((left_idx + 1))] ${networks[$left_idx]}"
+
+    if (( right_idx < count )); then
+        right="[$((right_idx + 1))] ${networks[$right_idx]}"
+        printf '%-30s %s\n' "$left" "$right"
+    else
+        printf '%s\n' "$left"
+    fi
 done
 
 echo

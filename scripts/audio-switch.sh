@@ -14,80 +14,92 @@ move_streams() {
     done
 }
 
-case "$MODE" in
-    hdmi)
-        # First try existing HDMI sink
-        HDMI_SINK="$(pactl list sinks short | awk 'tolower($0) ~ /hdmi/ {print $2; exit}')"
+#!/usr/bin/env bash
 
-        if [ -n "${HDMI_SINK:-}" ]; then
-            move_streams "$HDMI_SINK"
-            exit 0
-        fi
+set -euo pipefail
 
-        # No HDMI sink exists -> activate HDMI profile
-        CARD="$(pactl list cards short | awk 'NR==1{print $2}')"
+move_streams() {
+    local sink="$1"
 
-        PROFILE="$(
-            pactl list cards |
-            sed -n '/Profiles:/,/Active Profile:/p' |
-            grep 'available: yes' |
-            grep -i hdmi |
-            head -n1 |
-            awk '{print $1}' |
-            sed 's/:$//'
-        )"
+    pactl set-default-sink "$sink"
 
-        [ -n "${PROFILE:-}" ] || exit 1
+    pactl list sink-inputs short | awk '{print $1}' | while read -r id; do
+        pactl move-sink-input "$id" "$sink"
+    done
+}
 
-        pactl set-card-profile "$CARD" "$PROFILE"
+find_hdmi_sink() {
+    pactl list sinks short | awk 'tolower($0) ~ /hdmi/ {print $2; exit}'
+}
 
-        sleep 1
+find_analog_sink() {
+    pactl list sinks short | awk 'tolower($0) !~ /hdmi/ {print $2; exit}'
+}
 
-        HDMI_SINK="$(pactl list sinks short | awk 'tolower($0) ~ /hdmi/ {print $2; exit}')"
+enable_hdmi() {
+    local card profile
 
-        [ -n "${HDMI_SINK:-}" ] && move_streams "$HDMI_SINK"
-        ;;
+    card="$(pactl list cards short | awk 'NR==1{print $2}')"
 
-    analog)
-        # Prefer speaker/headphone sink if it already exists
-        ANALOG_SINK="$(
-            pactl list sinks short |
-            awk '
-                tolower($0) !~ /hdmi/ {print $2; exit}
-            '
-        )"
+    profile="$(
+        pactl list cards |
+        sed -n '/Profiles:/,/Active Profile:/p' |
+        grep 'available: yes' |
+        grep -i hdmi |
+        head -n1 |
+        awk '{print $1}' |
+        sed 's/:$//'
+    )"
 
-        if [ -n "${ANALOG_SINK:-}" ]; then
-            move_streams "$ANALOG_SINK"
-            exit 0
-        fi
+    [ -n "${profile:-}" ] || exit 1
 
-        # No analog sink exists -> activate analog profile
-        CARD="$(pactl list cards short | awk 'NR==1{print $2}')"
+    pactl set-card-profile "$card" "$profile"
+    sleep 1
+}
 
-        PROFILE="$(
-            pactl list cards |
-            sed -n '/Profiles:/,/Active Profile:/p' |
-            grep 'available: yes' |
-            grep '^.*output:analog' |
-            head -n1 |
-            awk '{print $1}' |
-            sed 's/:$//'
-        )"
+enable_analog() {
+    local card profile
 
-        [ -n "${PROFILE:-}" ] || exit 1
+    card="$(pactl list cards short | awk 'NR==1{print $2}')"
 
-        pactl set-card-profile "$CARD" "$PROFILE"
+    profile="$(
+        pactl list cards |
+        sed -n '/Profiles:/,/Active Profile:/p' |
+        grep 'available: yes' |
+        grep '^.*output:analog' |
+        head -n1 |
+        awk '{print $1}' |
+        sed 's/:$//'
+    )"
 
-        sleep 1
+    [ -n "${profile:-}" ] || exit 1
 
-        ANALOG_SINK="$(
-            pactl list sinks short |
-            awk '
-                tolower($0) !~ /hdmi/ {print $2; exit}
-            '
-        )"
+    pactl set-card-profile "$card" "$profile"
+    sleep 1
+}
 
-        [ -n "${ANALOG_SINK:-}" ] && move_streams "$ANALOG_SINK"
-        ;;
-esac
+CURRENT="$(pactl get-default-sink)"
+
+if echo "$CURRENT" | grep -qi hdmi; then
+    # Currently on HDMI -> switch to analog
+
+    ANALOG_SINK="$(find_analog_sink)"
+
+    if [ -z "${ANALOG_SINK:-}" ]; then
+        enable_analog
+        ANALOG_SINK="$(find_analog_sink)"
+    fi
+
+    [ -n "${ANALOG_SINK:-}" ] && move_streams "$ANALOG_SINK"
+else
+    # Currently on analog -> switch to HDMI
+
+    HDMI_SINK="$(find_hdmi_sink)"
+
+    if [ -z "${HDMI_SINK:-}" ]; then
+        enable_hdmi
+        HDMI_SINK="$(find_hdmi_sink)"
+    fi
+
+    [ -n "${HDMI_SINK:-}" ] && move_streams "$HDMI_SINK"
+fi
