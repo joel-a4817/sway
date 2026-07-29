@@ -50,8 +50,9 @@ for_window [app_id="$termid" title="^$popup-f-info"] floating enable, resize set
 for_window [app_id="$termid" title="^$popup-f-main"] floating enable, resize set 1800 400, move position center
 for_window [app_id="$termid" title="^$popup-f-hardware"] floating enable, resize set 1150 700, move position center
 
-for_window [app_id="$termid" title="^$popup-wifi-"] floating enable, resize set 500 500, move position center
-for_window [app_id="$termid" title="^$popup-status-wifi"] floating enable, resize set 1200 300, move position center
+for_window [app_id="$termid" title="^$popup-wifi-toggle"] floating enable, resize set 500 500, move position center
+for_window [app_id="$termid" title="^$popup-wifi-select"] floating enable, resize set 500 1000, move position center
+for_window [app_id="$termid" title="^$popup-wifi-status"] floating enable, resize set 1200 300, move position center
 for_window [app_id="$termid" title="^$popup-audio-select"] floating enable, resize set 1200 100,  move position center
 
 for_window [app_id="yazi-nvim"] floating enable, move position center, resize set 1000 700, opacity 0.85
@@ -144,7 +145,7 @@ bindsym --no-repeat $mod+Mod5+s exec bash -c 'syncthing; syncthing browser'
 bindsym --no-repeat $mod+Mod5+p fullscreen disable; exec ~/papercut/pc-client-linux.sh
 
 #wifi
-bindsym --no-repeat F1 exec $term -T "$popup-status-wifi" -e bash -c 'nmcli dev status; echo; read -n 1 -p "Press any key to close..."'
+bindsym --no-repeat F1 exec $term -T "$popup-wifi-status" -e bash -c 'nmcli dev status; echo; read -n 1 -p "Press any key to close..."'
 bindsym --no-repeat F2 exec $term -T "$popup-wifi-select" -e bash -c '~/.config/sway/scripts/network/wifi-connect.sh'
 bindsym --no-repeat F3 exec $term -T "$popup-wifi-toggle" -e bash -c '~/.config/sway/scripts/network/wifi-toggle.sh; read -n 1 -p "Press any key to close..."'
 
