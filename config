@@ -66,7 +66,7 @@ for_window [title="^Collabora Office"] opacity 0.85
 for_window [title="Collabora Office*"] opacity 0.85
 for_window [class="discord"] opacity 0.85
 
-bindsym F11 exec ~/.config/sway/scripts/windows/toggle-opacity.sh
+bindsym F8 exec ~/.config/sway/scripts/windows/toggle-opacity.sh
 
 ### Input configuration
    input type:touchpad {
@@ -189,9 +189,9 @@ client.unfocused         $bg      $bg         $fg    $bg        $bg
 client.urgent            #BF616A  #BF616A     $fg    #BF616A    #BF616A
 client.background        $bg
 
-bindsym --no-repeat F8 exec bash -c '~/.config/sway/scripts/rotation/toggle-rotate.sh; ~/.config/sway/scripts/rotation/rotation-restore.sh'
-bindsym --no-repeat F9 exec bash -c '~/.config/sway/scripts/rotation/toggle-rotate-no-mouse.sh; ~/.config/sway/scripts/rotation/rotation-restore.sh'
-bindsym --no-repeat F10 exec bash -c '~/.config/sway/scripts/rotation/toggle-rotate-no-transform.sh; ~/.config/sway/scripts/rotation/rotation-restore.sh'
+bindsym --no-repeat F10 exec bash -c '~/.config/sway/scripts/rotation/toggle-rotate.sh; ~/.config/sway/scripts/rotation/rotation-restore.sh'
+bindsym --no-repeat F11 exec bash -c '~/.config/sway/scripts/rotation/toggle-rotate-no-mouse.sh; ~/.config/sway/scripts/rotation/rotation-restore.sh'
+bindsym --no-repeat F12 exec bash -c '~/.config/sway/scripts/rotation/toggle-rotate-no-transform.sh; ~/.config/sway/scripts/rotation/rotation-restore.sh'
 
 ### Key bindings
 #
@@ -208,7 +208,7 @@ bindsym --no-repeat F10 exec bash -c '~/.config/sway/scripts/rotation/toggle-rot
 
     # mouse button for dragging.
     floating_modifier $mod normal
-    bindsym --no-repeat F12 exec ~/.config/sway/scripts/windows/toggle-drag-resize.sh
+    bindsym --no-repeat F9 exec ~/.config/sway/scripts/windows/toggle-drag-resize.sh
 
     # Reload the configuration file
 
