@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-OUT="eDP-1"
+OUT="$(swaymsg -t get_outputs -r | jq -r '.[] | select(.focused) | .name')"
 
 ROTATOR="/home/joel/.config/sway/scripts/rotation/rotate-touchpad.py"
 TPDEV="/dev/input/touchpad-internal"

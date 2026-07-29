@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-OUT="eDP-1"
+OUT="$(swaymsg -t get_outputs -r | jq -r '.[] | select(.focused) | .name')"
 
 need() { command -v "$1" >/dev/null 2>&1 || exit 1; }
 need swaymsg
