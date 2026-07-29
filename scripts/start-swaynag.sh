@@ -5,14 +5,19 @@ pkill wvkbd-deskintl 2>/dev/null || true
 
 OUT="$(swaymsg -t get_outputs -r | jq -r '.[] | select(.focused) | .name')"
 
-# Get focused output dimensions
 read WIDTH HEIGHT < <(
     swaymsg -t get_outputs -r |
-    jq -r '.[] | select(.focused) | "\(.current_mode.width) \(.current_mode.height)"'
+    jq -r '.[] | select(.focused) |
+        "\(.current_mode.width) \(.current_mode.height)"'
 )
 
-# Half-sized keyboard
-L=$(( HEIGHT / 2 ))
+# Approximate swaynag height
+SWAYNAG_H=30
+
+# Keyboard + swaynag = half the screen height
+L=$(( HEIGHT / 2 - SWAYNAG_H ))
+
+# Keyboard width = half the screen width
 H=$(( WIDTH / 2 ))
 
 sleep 0.05
@@ -34,6 +39,7 @@ exec swaynag \
     --button-background 222222CC \
     --text FFFFFF \
     --button-border-size 2 \
-    --button-gap 48 \
+    --button-gap 90 \
     --border FF8800CC \
     --font "JetBrainsMono Nerd Font Mono 16"
+``
