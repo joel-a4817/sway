@@ -59,7 +59,6 @@ for_window [app_id="PrismLauncher"] floating enable, move position center
 for_window [app_id="localsend_app"] opacity 0.85
 for_window [app_id="chromium"] opacity 0.85
 for_window [app_id="anki"] opacity 0.85
-for_window [class="NotesHub"] opacity 0.85
 for_window [app_id="signal"] opacity 0.85
 for_window [app_id="$termid"] opacity 0.85
 for_window [class="coda-qt"] opacity 0.85
@@ -89,12 +88,12 @@ bindsym F11 exec ~/.config/sway/scripts/windows/toggle-opacity.sh
        pointer_accel 0
    }
 
-  input type:touch {
-    tap enabled
-    drag enabled
-    drag_lock enabled
-    map_to_output eDP-1
-  }
+    input type:touch {
+      tap enabled
+      drag enabled
+      drag_lock enabled
+      map_to_output eDP-1
+    }
 
 # Disable broken touch screen, pen
 input "1386:20983:Wacom_Pen_and_multitouch_sensor_Pen" {
@@ -112,7 +111,6 @@ bindsym --no-repeat $mod+Shift+u fullscreen disable; exec $term -T "$popup-updat
 bindsym --no-repeat $mod+Shift+m fullscreen disable; exec $term -T "$popup-update-rebuild" -e bash -c 'nix flake update --flake ~/nixos && sudo nixos-rebuild switch --impure --flake ~/nixos#rt4817 --cores 1 --max-jobs 1; echo; read -n 1 -p "Press any key to close..."'
 bindsym --no-repeat $mod+Shift+o fullscreen disable; exec $term -T "$popup-update-optimise" -e bash -c 'sudo nix-collect-garbage; echo; sudo nix store optimise; echo; read -n 1 -p "Press any key to close..."'
 bindsym --no-repeat $mod+Shift+e fullscreen disable; exec $term -T "$popup-update-clean" -e bash -c "swaynag -t warning -y overlay -m 'You pressed the clean shortcut. Do you really want to delete all other nix configurations, cache and reboot?' -B 'Yes, delete all other nix configurations and reboot' 'sudo nix-collect-garbage -d; echo; sudo nix store optimise; rm -rf ~/.local/state/battery-interval-swaynag.log; reboot'"
-bindsym --no-repeat $mod+Shift+n fullscreen disable; exec $term -T "$popup-update-svg-to-jpg" -e bash -c '~/.config/sway/scripts/svg-to-jpg.sh; echo; read -n 1 -p "Press any key to close..."'
 
 # always run rebuild after pixymon update
 bindsym --no-repeat $mod+Shift+p fullscreen disable; exec $term -T "$popup-update-pixymon" -e bash -c "swaynag -t warning -y overlay -m 'You pressed the update pixymon shortcut. Do you really want to update pixymon?' -B 'Yes, update pixymon' 'cd ~/pixy2; git pull --ff-only; cd scripts; ./build_pixymon_src.sh; cp ~/pixy2/src/host/linux/pixy.rules ~/nixos; echo; read -n 1 -p 'Press any key to close...''"
@@ -140,7 +138,6 @@ bindsym --no-repeat $mod+Mod1+s fullscreen disable; exec signal-desktop
 bindsym --no-repeat $mod+Mod1+m fullscreen disable; exec prismlauncher
 bindsym --no-repeat $mod+Mod1+k fullscreen disable; exec kicad
 bindsym --no-repeat $mod+Mod1+b fullscreen disable; exec bambu-studio
-bindsym --no-repeat $mod+Mod1+n fullscreen disable; exec bash -c 'appimage-run /home/joel/Downloads/Apps/NotesHub.AppImage & until swaymsg -t get_tree | grep -q "NotesHub"; do sleep 0.05; done; swaymsg [class="NotesHub"] floating enable; sleep 0.3; swaymsg [class="NotesHub"] floating disable; wait'
 bindsym --no-repeat $mod+Mod1+f fullscreen disable; exec bash -c 'appimage-run /home/joel/Downloads/Apps/FreeCAD.AppImage'
 
 bindsym --no-repeat $mod+Mod5+m fullscreen disable; exec $term -e bash -c 'cd ~/OSX-KVM; ./OpenCore-Boot.sh'
