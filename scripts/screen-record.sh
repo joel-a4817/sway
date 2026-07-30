@@ -14,16 +14,16 @@ if pgrep -x wf-recorder >/dev/null; then
         -o "$OUT" \
         -y overlay \
         -m "Recording in progress on $OUT" \
-        -b "Stop Recording" "pkill -x wf-recorder"
+        -z "Stop Recording" "pkill -x wf-recorder"
 else
     swaynag \
         -t warning \
         -o "$OUT" \
         -y overlay \
         -m "Start recording on $OUT" \
-        -b "With Audio" \
+        -z "With Audio" \
             "wf-recorder -a --audio-backend=pipewire -o \"$OUT\" -f \"$FILE\"" \
-        -b "Without Audio" \
+        -z "Without Audio" \
             "wf-recorder -o \"$OUT\" -f \"$FILE\""
 fi
 
