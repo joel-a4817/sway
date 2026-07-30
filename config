@@ -23,9 +23,6 @@ seat * xcursor_theme Bibata-Modern-Amber 32
 
 include /etc/sway/config.d/*
 
-#swaynag with wvkbd 
-exec_always ~/.config/sway/scripts/start-swaynag.sh
-
 # Clipboard https://github.com/savedra1/clipse?tab=readme-ov-file
 exec_always clipse -listen
 exec ~/.config/sway/scripts/battery-warn.sh
@@ -52,9 +49,10 @@ for_window [app_id="$termid" title="^$popup-f-hardware"] floating enable, resize
 
 for_window [app_id="$termid" title="^$popup-wifi-select"] floating enable, resize set 800 800, move position center
 for_window [app_id="$termid" title="^$popup-wifi-toggle"] floating enable, resize set 500 500, move position center
-for_window [app_id="$termid" title="^$popup-audio-select"] floating enable, resize set 1200 100,  move position center
+for_window [app_id="$termid" title="^$popup-audio-select"] floating enable, resize set 1250 250,  move position center
 
 for_window [app_id="yazi-nvim"] floating enable, move position center, resize set 1000 700, opacity 0.85
+
 for_window [app_id="PrismLauncher"] floating enable, move position center
 for_window [app_id="localsend_app"] opacity 0.85
 for_window [app_id="chromium"] opacity 0.85
@@ -66,7 +64,7 @@ for_window [title="^Collabora Office"] opacity 0.85
 for_window [title="Collabora Office*"] opacity 0.85
 for_window [class="discord"] opacity 0.85
 
-bindsym F8 exec ~/.config/sway/scripts/windows/toggle-opacity.sh
+bindsym $mod+F7 exec ~/.config/sway/scripts/windows/toggle-opacity.sh
 
 ### Input configuration
    input type:touchpad {
@@ -92,7 +90,6 @@ bindsym F8 exec ~/.config/sway/scripts/windows/toggle-opacity.sh
       tap enabled
       drag enabled
       drag_lock enabled
-      map_to_output eDP-1
     }
 
 # Disable broken touch screen, pen
@@ -143,8 +140,8 @@ bindsym --no-repeat $mod+Mod5+s exec bash -c 'syncthing; syncthing browser'
 bindsym --no-repeat $mod+Mod5+p fullscreen disable; exec ~/papercut/pc-client-linux.sh
 
 #wifi
-bindsym --no-repeat F1 exec $term -T "$popup-wifi-select" -e bash -c '~/.config/sway/scripts/network/wifi-select.sh'
-bindsym --no-repeat F2 exec $term -T "$popup-wifi-toggle" -e bash -c '~/.config/sway/scripts/network/wifi-toggle.sh; read -n 1 -p "Press any key to close..."'
+bindsym --no-repeat $mod+F5 exec $term -T "$popup-wifi-select" -e bash -c '~/.config/sway/scripts/network/wifi-select.sh'
+bindsym --no-repeat $mod+F6 exec $term -T "$popup-wifi-toggle" -e bash -c '~/.config/sway/scripts/network/wifi-toggle.sh; read -n 1 -p "Press any key to close..."'
 
 #fastfetch
 bindsym --locked --no-repeat $mod+Control+w fullscreen disable; exec $term -T "$popup-f-wifi" -e bash -c '~/.config/sway/scripts/fastfetch/f-wifi.sh; read -n 1 -p "Press any key to close..."'
@@ -156,16 +153,12 @@ bindsym --locked --no-repeat $mod+Control+h fullscreen disable; exec $term -T "$
 bindsym --locked --no-repeat $mod+Control+a fullscreen disable; exec $term -T "$popup-f-aesthetics" -e bash -c '~/.config/sway/scripts/fastfetch/f-aesthetics.sh; echo; read -n 1 -p "Press any key to close..."'
 
 #screen-record
-bindsym --no-repeat $mod+F7 exec bash -c 'mkdir -p ~/Media/Videos/Screen-recordings; wf-recorder -a --audio-backend=pipewire -o eDP-1 -f ~/Media/Videos/Screen-recordings/recording-$(date +%Y%m%d-%H%M%S).mkv'
-bindsym --no-repeat $mod+F8 exec bash -c 'mkdir -p ~/Media/Videos/Screen-recordings; wf-recorder -a -o eDP-1 -f ~/Media/Videos/Screen-recordings/recording-$(date +%Y%m%d-%H%M%S).mkv'
-bindsym --no-repeat $mod+F9 exec bash -c 'pkill -f wf-recorder'
-
+bindsym --no-repeat $mod+Print exec bash -c '~/.config/sway/scripts/screen-record.sh'
 #screenshot
-bindsym --no-repeat $mod+F5 exec bash -c 'mkdir -p ~/Media/Pictures/Screenshots; grim -t png - | tee ~/Media/Pictures/Screenshots/screenshot-$(date +%Y%m%d-%H%M%S).png | wl-copy'
-bindsym --no-repeat $mod+F6 exec bash -c 'mkdir -p ~/Media/Pictures/Screenshots; grim -t png -g "$(slurp)" - | tee ~/Media/Pictures/Screenshots/screenshot-$(date +%Y%m%d-%H%M%S).png | wl-copy'
+bindsym --no-repeat Print exec bash -c '~/.config/sway/scripts/screenshot.sh'
 
 #audio device output switch
-bindsym --locked --no-repeat F5 exec $term -T "$popup-audio-select" -e bash -c '~/.config/sway/scripts/audio-switch.sh hdmi; echo; read -n 1 -p "Press any key to close..."'
+bindsym --locked --no-repeat $mod+F11 exec $term -T "$popup-audio-select" -e bash -c '~/.config/sway/scripts/audio-switch.sh; echo; read -n 1 -p "Press any key to close..."'
 
 #bg
 
@@ -189,9 +182,8 @@ client.unfocused         $bg      $bg         $fg    $bg        $bg
 client.urgent            #BF616A  #BF616A     $fg    #BF616A    #BF616A
 client.background        $bg
 
-bindsym --no-repeat F10 exec bash -c '~/.config/sway/scripts/rotation/toggle-rotate.sh; ~/.config/sway/scripts/rotation/rotation-restore.sh'
-bindsym --no-repeat F11 exec bash -c '~/.config/sway/scripts/rotation/toggle-rotate-no-mouse.sh; ~/.config/sway/scripts/rotation/rotation-restore.sh'
-bindsym --no-repeat F12 exec bash -c '~/.config/sway/scripts/rotation/toggle-rotate-no-transform.sh; ~/.config/sway/scripts/rotation/rotation-restore.sh'
+bindsym --no-repeat $mod+F9 exec bash -c '~/.config/sway/scripts/rotation/toggle-rotate.sh; ~/.config/sway/scripts/rotation/rotation-restore.sh'
+bindsym --no-repeat $mod+F10 exec bash -c '~/.config/sway/scripts/rotation/toggle-rotate-no-transform.sh; ~/.config/sway/scripts/rotation/rotation-restore.sh'
 
 ### Key bindings
 #
@@ -208,16 +200,14 @@ bindsym --no-repeat F12 exec bash -c '~/.config/sway/scripts/rotation/toggle-rot
 
     # mouse button for dragging.
     floating_modifier $mod normal
-    bindsym --no-repeat F9 exec ~/.config/sway/scripts/windows/toggle-drag-resize.sh
+    bindsym --no-repeat $mod+F8 exec ~/.config/sway/scripts/windows/toggle-drag-resize.sh
 
     # Reload the configuration file
 
 bindsym $mod+Shift+c exec ~/.config/sway/scripts/rotation/rotation-restore.sh
 
     # system off options
-    bindsym --no-repeat --locked $mod+F11 exec bash -c "swaynag -t warning -y overlay -m 'You pressed the exit shortcut. Do you really want to exit sway?' -B 'Yes, exit sway' 'rm -rf ~/.local/state/battery-interval-swaynag.log && swaymsg exit'"
-bindsym --no-repeat --locked $mod+F10 exec bash -c 'rm -rf ~/.local/state/battery-interval-swaynag.log && swaylock -F -fi /home/joel/.config/sway/mcqueen.jpeg && systemctl suspend'
-bindsym --no-repeat --locked $mod+F12 exec bash -c "swaynag -t warning -y overlay -m 'You pressed the reboot shortcut. Do you really want to reboot your device?' -B 'Yes, reboot my device' 'rm -rf ~/.local/state/battery-interval-swaynag.log && reboot'"
+    bindsym --no-repeat --locked $mod+F12 exec bash -c "~/.config/sway/scripts/device-off.sh"
 
 #
 # Moving around:
@@ -334,8 +324,3 @@ bindsym --no-repeat $mod+r mode "resize"
     # Special keys to adjust brightness via brightnessctl
      bindsym --locked XF86MonBrightnessDown exec brightnessctl set 5%-
      bindsym --locked XF86MonBrightnessUp exec brightnessctl set 5%+
-
-     bindsym --locked F6 exec pactl set-sink-volume @DEFAULT_SINK@ -5%
-     bindsym --locked F7 exec pactl set-sink-volume @DEFAULT_SINK@ +5%
-     bindsym --locked F3 exec brightnessctl set 5%-
-     bindsym --locked F4 exec brightnessctl set 5%+    
