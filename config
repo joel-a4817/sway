@@ -105,14 +105,14 @@ input "1386:20983:Wacom_Pen_and_multitouch_sensor_Finger" {
 # User keybinds
 
 # keybinds update
-bindsym --no-repeat $mod+Shift+u fullscreen disable; exec $term -T "$popup-update-rebuild" -e bash -c 'nix flake update --flake ~/nixos && sudo nixos-rebuild switch --impure --flake ~/nixos#rt4817; echo; read -n 1 -p "Press any key to close..."'
-bindsym --no-repeat $mod+Shift+m fullscreen disable; exec $term -T "$popup-update-rebuild" -e bash -c 'nix flake update --flake ~/nixos && sudo nixos-rebuild switch --impure --flake ~/nixos#rt4817 --cores 1 --max-jobs 1; echo; read -n 1 -p "Press any key to close..."'
+bindsym --no-repeat $mod+Shift+u fullscreen disable; exec $term -T "$popup-update-rebuild" -e bash -c 'nix flake update --flake ~/nixos && sudo nixos-rebuild switch --impure --flake ~/nixos#rt4817; echo; read -n 1 -rsp "Press any key to close..."'
+bindsym --no-repeat $mod+Shift+m fullscreen disable; exec $term -T "$popup-update-rebuild" -e bash -c 'nix flake update --flake ~/nixos && sudo nixos-rebuild switch --impure --flake ~/nixos#rt4817 --cores 1 --max-jobs 1; echo; read -n 1 -rsp "Press any key to close..."'
 bindsym --no-repeat $mod+Shift+e fullscreen disable; exec $term -T "$popup-update-clean" -e bash -c "swaynag -t warning -y overlay -m 'Nixos Cleaner' -z 'Delete all other nix configurations and reboot' 'sudo nix-collect-garbage -d; echo; sudo nix store optimise; rm -rf ~/.local/state/battery-interval-swaynag.log; reboot'"
-bindsym --no-repeat $mod+Shift+p fullscreen disable; exec $term -T "$popup-update-pixymon" -e bash -c "swaynag -t warning -y overlay -m 'Pixymon Updater' -z 'Update pixymon' 'cd ~/pixy2; git pull --ff-only; cd scripts; ./build_pixymon_src.sh; cp ~/pixy2/src/host/linux/pixy.rules ~/nixos; echo; read -n 1 -p 'Press any key to close...''" # always run rebuild after pixymon update
-bindsym --no-repeat $mod+Shift+t fullscreen disable; exec $term -T "$popup-settime" -e bash -c '~/.config/sway/scripts/settime.sh; echo; read -n 1 -p "Press any key to close..."'
-bindsym --no-repeat $mod+Shift+s fullscreen disable; exec $term -T "$popup-update-calendar" -e bash -c 'rm -rf ~/.local/share/calcurse/compass.ics ~/.local/share/calcurse/compass; curl -L -o ~/.local/share/calcurse/compass.ics "https://mhs-vic.compass.education/download/sharedCalendar.aspx?uid=19030&key=de953c62-f1e9-475d-b0c2-83fd3c09ff62&c.ics"; echo; calcurse -D ~/.local/share/calcurse/compass -i ~/.local/share/calcurse/compass.ics; echo; read -n 1 -p "Press any key to close..."'
-bindsym --no-repeat $mod+Shift+y fullscreen disable; exec $term -T "$popup-update-yt-playlist" -e bash -c 'yt-dlp --yes-playlist -x --audio-format mp3 --audio-quality 0 --force-overwrites -P "~/Media/Music" "https://youtube.com/playlist?list=PLPxzU5kNqyqU&si=LJw9jQ6tvBfz5qAe"; echo; read -n 1 -p "Press any key to close..."'
-bindsym --no-repeat $mod+Shift+d fullscreen disable; exec $term -T "$popup-update-dvd" -e bash -c 'dvd+rw-format -blank /dev/sr0 && mkisofs -J -R -o /tmp/music.iso ~/Media/Music && growisofs -dvd-compat -Z /dev/sr0=/tmp/music.iso && rm /tmp/music.iso; echo; read -n 1 -p "Press any key to close..."'
+bindsym --no-repeat $mod+Shift+p fullscreen disable; exec $term -T "$popup-update-pixymon" -e bash -c "swaynag -t warning -y overlay -m 'Pixymon Updater' -z 'Update pixymon' 'cd ~/pixy2; git pull --ff-only; cd scripts; ./build_pixymon_src.sh; cp ~/pixy2/src/host/linux/pixy.rules ~/nixos; echo; read -n 1 -rsp 'Press any key to close...''" # always run rebuild after pixymon update
+bindsym --no-repeat $mod+Shift+t fullscreen disable; exec $term -T "$popup-settime" -e bash -c '~/.config/sway/scripts/settime.sh; echo; read -n 1 -rsp "Press any key to close..."'
+bindsym --no-repeat $mod+Shift+s fullscreen disable; exec $term -T "$popup-update-calendar" -e bash -c 'rm -rf ~/.local/share/calcurse/compass.ics ~/.local/share/calcurse/compass; curl -L -o ~/.local/share/calcurse/compass.ics "https://mhs-vic.compass.education/download/sharedCalendar.aspx?uid=19030&key=de953c62-f1e9-475d-b0c2-83fd3c09ff62&c.ics"; echo; calcurse -D ~/.local/share/calcurse/compass -i ~/.local/share/calcurse/compass.ics; echo; read -n 1 -rsp "Press any key to close..."'
+bindsym --no-repeat $mod+Shift+y fullscreen disable; exec $term -T "$popup-update-yt-playlist" -e bash -c 'yt-dlp --yes-playlist -x --audio-format mp3 --audio-quality 0 --force-overwrites -P "~/Media/Music" "https://youtube.com/playlist?list=PLPxzU5kNqyqU&si=LJw9jQ6tvBfz5qAe"; echo; read -n 1 -rsp "Press any key to close..."'
+bindsym --no-repeat $mod+Shift+d fullscreen disable; exec $term -T "$popup-update-dvd" -e bash -c 'dvd+rw-format -blank /dev/sr0 && mkisofs -J -R -o /tmp/music.iso ~/Media/Music && growisofs -dvd-compat -Z /dev/sr0=/tmp/music.iso && rm /tmp/music.iso; echo; read -n 1 -rsp "Press any key to close..."'
 
 #keybinds app
 bindsym --no-repeat $mod+F2 fullscreen disable; exec $term -T "$popup-tuis" -e clipse
@@ -143,21 +143,21 @@ bindsym --no-repeat $mod+Mod5+p fullscreen disable; exec ~/papercut/pc-client-li
 #wifi
 bindsym --no-repeat $mod+F10 exec $term -T "$popup-wifi-select" -e bash -c '~/.config/sway/scripts/network/wifi-select.sh'
 bindsym --no-repeat $mod+F11 exec $term -T "$popup-wifi-toggle" -e bash -c '~/.config/sway/scripts/network/wifi-toggle.sh'
-bindsym --no-repeat $mod+F9 exec $term -T "$popup-wifi-status" -e bash -c 'nmcli dev status; echo; nmcli dev wifi list; echo; read -n 1 -p "Press any key to close..."'
+bindsym --no-repeat $mod+F9 exec $term -T "$popup-wifi-status" -e bash -c 'nmcli dev status; echo; nmcli dev wifi list; echo; read -n 1 -rsp "Press any key to close..."'
 
 #fastfetch
-bindsym --locked --no-repeat $mod+Control+w fullscreen disable; exec $term -T "$popup-f-wifi" -e bash -c '~/.config/sway/scripts/fastfetch/f-wifi.sh; read -n 1 -p "Press any key to close..."'
-bindsym --locked --no-repeat $mod+Control+m fullscreen disable; exec $term -T "$popup-f-main" -e bash -c '~/.config/sway/scripts/fastfetch/f-main.sh; echo; read -n 1 -p "Press any key to close..."'
-bindsym --locked --no-repeat $mod+Control+i fullscreen disable; exec $term -T "$popup-f-info" -e bash -c '~/.config/sway/scripts/fastfetch/f-info.sh; echo; read -n 1 -p "Press any key to close..."'
-bindsym --locked --no-repeat $mod+Control+s fullscreen disable; exec $term -T "$popup-f-system" -e bash -c '~/.config/sway/scripts/fastfetch/f-system.sh; echo; read -n 1 -p "Press any key to close..."'
-bindsym --locked --no-repeat $mod+Control+d fullscreen disable; exec $term -T "$popup-f-devices" -e bash -c '~/.config/sway/scripts/fastfetch/f-devices.sh; echo; read -n 1 -p "Press any key to close..."'
-bindsym --locked --no-repeat $mod+Control+h fullscreen disable; exec $term -T "$popup-f-hardware" -e bash -c '~/.config/sway/scripts/fastfetch/f-hardware.sh; echo; read -n 1 -p "Press any key to close..."'
-bindsym --locked --no-repeat $mod+Control+a fullscreen disable; exec $term -T "$popup-f-aesthetics" -e bash -c '~/.config/sway/scripts/fastfetch/f-aesthetics.sh; echo; read -n 1 -p "Press any key to close..."'
+bindsym --locked --no-repeat $mod+Control+w fullscreen disable; exec $term -T "$popup-f-wifi" -e bash -c '~/.config/sway/scripts/fastfetch/f-wifi.sh; read -n 1 -rsp "Press any key to close..."'
+bindsym --locked --no-repeat $mod+Control+m fullscreen disable; exec $term -T "$popup-f-main" -e bash -c '~/.config/sway/scripts/fastfetch/f-main.sh; echo; read -n 1 -rsp "Press any key to close..."'
+bindsym --locked --no-repeat $mod+Control+i fullscreen disable; exec $term -T "$popup-f-info" -e bash -c '~/.config/sway/scripts/fastfetch/f-info.sh; echo; read -n 1 -rsp "Press any key to close..."'
+bindsym --locked --no-repeat $mod+Control+s fullscreen disable; exec $term -T "$popup-f-system" -e bash -c '~/.config/sway/scripts/fastfetch/f-system.sh; echo; read -n 1 -rsp "Press any key to close..."'
+bindsym --locked --no-repeat $mod+Control+d fullscreen disable; exec $term -T "$popup-f-devices" -e bash -c '~/.config/sway/scripts/fastfetch/f-devices.sh; echo; read -n 1 -rsp "Press any key to close..."'
+bindsym --locked --no-repeat $mod+Control+h fullscreen disable; exec $term -T "$popup-f-hardware" -e bash -c '~/.config/sway/scripts/fastfetch/f-hardware.sh; echo; read -n 1 -rsp "Press any key to close..."'
+bindsym --locked --no-repeat $mod+Control+a fullscreen disable; exec $term -T "$popup-f-aesthetics" -e bash -c '~/.config/sway/scripts/fastfetch/f-aesthetics.sh; echo; read -n 1 -rsp "Press any key to close..."'
 
 #screen-record
-bindsym --no-repeat $mod+Print exec bash -c '~/.config/sway/scripts/screen-record.sh'
+bindsym --no-repeat $mod+Print exec bash -c '~/.config/sway/scripts/screen-capture/screen-record.sh'
 #screenshot
-bindsym --no-repeat Print exec bash -c '~/.config/sway/scripts/screenshot.sh'
+bindsym --no-repeat Print exec bash -c '~/.config/sway/scripts/screen-capture/screenshot.sh'
 
 #audio device output switch
 bindsym --locked --no-repeat $mod+F6 exec $term -T "$popup-audio-select" -e bash -c '~/.config/sway/scripts/audio-switch.sh'
