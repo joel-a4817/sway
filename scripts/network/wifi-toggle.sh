@@ -8,10 +8,6 @@ ACTION_LOG="/tmp/network-toggle-action.$$"
 rm -f "$RESULT_FILE" "$ACTION_LOG"
 touch "$ACTION_LOG"
 
-echo "Current status:"
-nmcli dev status
-echo
-
 export RESULT_FILE ACTION_LOG
 
 swaynag \
@@ -148,9 +144,6 @@ if [[ -s "$ACTION_LOG" ]]; then
 fi
 
 rm -f "$RESULT_FILE" "$ACTION_LOG"
-
-echo "Updated status:"
-nmcli dev status
 
 echo
 read -n 1 -rsp "Press any key to close..."

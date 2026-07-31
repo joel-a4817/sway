@@ -48,7 +48,8 @@ for_window [app_id="$term" title="^$popup-f-main"] floating enable, resize set 1
 for_window [app_id="$term" title="^$popup-f-hardware"] floating enable, resize set 1150 700, move position center
 
 for_window [app_id="$term" title="^$popup-wifi-select"] floating enable, resize set 800 800, move position center
-for_window [app_id="$term" title="^$popup-wifi-toggle"] floating enable, resize set 1200 800, move position center
+for_window [app_id="$term" title="^$popup-wifi-toggle"] floating enable, resize set 1200 300, move position center
+for_window [app_id="$term" title="^$popup-wifi-status"] floating enable, resize set 1500 1000, move position center
 for_window [app_id="$term" title="^$popup-audio-select"] floating enable, resize set 1250 400,  move position center
 
 for_window [app_id="yazi-nvim"] floating enable, move position center, resize set 1000 700, opacity 0.85
@@ -64,7 +65,7 @@ for_window [title="^Collabora Office"] opacity 0.85
 for_window [title="Collabora Office*"] opacity 0.85
 for_window [class="discord"] opacity 0.85
 
-bindsym $mod+F7 exec ~/.config/sway/scripts/windows/toggle-opacity.sh
+bindsym $mod+F5 exec ~/.config/sway/scripts/windows/toggle-opacity.sh
 
 ### Input configuration
    input type:touchpad {
@@ -140,8 +141,9 @@ bindsym --no-repeat $mod+Mod5+s exec bash -c 'syncthing; syncthing browser'
 bindsym --no-repeat $mod+Mod5+p fullscreen disable; exec ~/papercut/pc-client-linux.sh
 
 #wifi
-bindsym --no-repeat $mod+F5 exec $term -T "$popup-wifi-select" -e bash -c '~/.config/sway/scripts/network/wifi-select.sh'
-bindsym --no-repeat $mod+F6 exec $term -T "$popup-wifi-toggle" -e bash -c '~/.config/sway/scripts/network/wifi-toggle.sh'
+bindsym --no-repeat $mod+F10 exec $term -T "$popup-wifi-select" -e bash -c '~/.config/sway/scripts/network/wifi-select.sh'
+bindsym --no-repeat $mod+F11 exec $term -T "$popup-wifi-toggle" -e bash -c '~/.config/sway/scripts/network/wifi-toggle.sh'
+bindsym --no-repeat $mod+F9 exec $term -T "$popup-wifi-status" -e bash -c 'nmcli dev status; echo; nmcli dev wifi list; echo; read -n 1 -p "Press any key to close..."'
 
 #fastfetch
 bindsym --locked --no-repeat $mod+Control+w fullscreen disable; exec $term -T "$popup-f-wifi" -e bash -c '~/.config/sway/scripts/fastfetch/f-wifi.sh; read -n 1 -p "Press any key to close..."'
@@ -158,7 +160,7 @@ bindsym --no-repeat $mod+Print exec bash -c '~/.config/sway/scripts/screen-recor
 bindsym --no-repeat Print exec bash -c '~/.config/sway/scripts/screenshot.sh'
 
 #audio device output switch
-bindsym --locked --no-repeat $mod+F11 exec $term -T "$popup-audio-select" -e bash -c '~/.config/sway/scripts/audio-switch.sh'
+bindsym --locked --no-repeat $mod+F6 exec $term -T "$popup-audio-select" -e bash -c '~/.config/sway/scripts/audio-switch.sh'
 
 #bg
 
@@ -182,8 +184,8 @@ client.unfocused         $bg      $bg         $fg    $bg        $bg
 client.urgent            #BF616A  #BF616A     $fg    #BF616A    #BF616A
 client.background        $bg
 
-bindsym --no-repeat $mod+F9 exec bash -c '~/.config/sway/scripts/rotation/toggle-rotate.sh; ~/.config/sway/scripts/rotation/rotation-restore.sh'
-bindsym --no-repeat $mod+F10 exec bash -c '~/.config/sway/scripts/rotation/toggle-rotate-no-transform.sh; ~/.config/sway/scripts/rotation/rotation-restore.sh'
+bindsym --no-repeat $mod+F7 exec bash -c '~/.config/sway/scripts/rotation/toggle-rotate.sh; ~/.config/sway/scripts/rotation/rotation-restore.sh'
+bindsym --no-repeat $mod+F8 exec bash -c '~/.config/sway/scripts/rotation/toggle-rotate-no-transform.sh; ~/.config/sway/scripts/rotation/rotation-restore.sh'
 
 ### Key bindings
 #
@@ -200,7 +202,6 @@ bindsym --no-repeat $mod+F10 exec bash -c '~/.config/sway/scripts/rotation/toggl
 
     # mouse button for dragging.
     floating_modifier $mod normal
-    bindsym --no-repeat $mod+F8 exec ~/.config/sway/scripts/windows/toggle-drag-resize.sh
 
     # Reload the configuration file
 
@@ -277,7 +278,7 @@ bindsym $mod+Shift+c exec ~/.config/sway/scripts/rotation/rotation-restore.sh
     bindsym $mod+f fullscreen toggle  
 
     # Toggle the current focus between tiling and floating mode
-    bindsym $mod+Shift+space exec ~/.config/sway/scripts/windows/smart-floating-toggle.sh
+    bindsym --no-repeat $mod+Shift+space exec ~/.config/sway/scripts/windows/smart-floating-toggle.sh
     # Swap focus between the tiling area and the floating area
     bindsym $mod+space focus mode_toggle
 
