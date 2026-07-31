@@ -147,4 +147,3 @@ rm -f "$RESULT_FILE" "$ACTION_LOG"
 
 echo
 read -n 1 -rsp "Press any key to close..."
-echo

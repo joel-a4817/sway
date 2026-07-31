@@ -1,12 +1,44 @@
 #!/usr/bin/env bash
 
-swaynag -t warning -y overlay \
+set -euo pipefail
+
+RESULT_FILE="/tmp/nixos-rebuild-complete.$$"
+rm -f "$RESULT_FILE"
+
+export RESULT_FILE
+
+swaynag \
+    -t warning \
+    -y overlay \
     -m "NixOS Rebuild" \
     -z "Update flake and rebuild" \
-    "$term -e bash -c 'nix flake update --flake ~/nixos; sudo nixos-rebuild switch --impure --flake ~/nixos#rt4817; echo; read -n1 -rsp \"Press any key to close...\"'" \
+'
+nix flake update --flake ~/nixos
+sudo nixos-rebuild switch --impure --flake ~/nixos#rt4817
+touch "$RESULT_FILE"
+' \
     -z "Update flake and rebuild (low system load)" \
-    "$term -e bash -c 'nix flake update --flake ~/nixos; sudo nixos-rebuild switch --impure --flake ~/nixos#rt4817 --cores 1 --max-jobs 1; echo; read -n1 -rsp \"Press any key to close...\"'" \
+'
+nix flake update --flake ~/nixos
+sudo nixos-rebuild switch --impure --flake ~/nixos#rt4817 --cores 1 --max-jobs 1
+touch "$RESULT_FILE"
+' \
     -z "Rebuild current configuration" \
-    "$term -e bash -c 'sudo nixos-rebuild switch --impure --flake ~/nixos#rt4817; echo; read -n1 -rsp \"Press any key to close...\"'" \
+'
+sudo nixos-rebuild switch --impure --flake ~/nixos#rt4817
+touch "$RESULT_FILE"
+' \
     -z "Rebuild current configuration (low system load)" \
-    "$term -e bash -c 'sudo nixos-rebuild switch --impure --flake ~/nixos#rt4817 --cores 1 --max-jobs 1; echo; read -n1 -rsp \"Press any key to close...\"'"
+'
+sudo nixos-rebuild switch --impure --flake ~/nixos#rt4817 --cores 1 --max-jobs 1
+touch "$RESULT_FILE"
+' &
+
+while [[ ! -f "$RESULT_FILE" ]]; do
+    sleep 0.1
+done
+
+rm -f "$RESULT_FILE"
+
+echo
+read -n 1 -rsp "Press any key to close..."

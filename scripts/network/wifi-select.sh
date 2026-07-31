@@ -52,4 +52,3 @@ nmcli device wifi connect "$ssid" --ask
 
 echo
 read -n 1 -s -r -p "Press any key to close..."
-echo

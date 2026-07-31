@@ -130,4 +130,3 @@ pactl get-default-sink
 
 echo
 read -n 1 -rsp "Press any key to close..."
-echo
