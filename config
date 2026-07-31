@@ -48,7 +48,7 @@ for_window [app_id="$termid" title="^$popup-f-main"] floating enable, resize set
 for_window [app_id="$termid" title="^$popup-f-hardware"] floating enable, resize set 1150 700, move position center
 
 for_window [app_id="$termid" title="^$popup-wifi-select"] floating enable, resize set 800 800, move position center
-for_window [app_id="$termid" title="^$popup-wifi-toggle"] floating enable, resize set 500 500, move position center
+for_window [app_id="$termid" title="^$popup-wifi-toggle"] floating enable, resize set 1200 800, move position center
 for_window [app_id="$termid" title="^$popup-audio-select"] floating enable, resize set 1250 250,  move position center
 
 for_window [app_id="yazi-nvim"] floating enable, move position center, resize set 1000 700, opacity 0.85
@@ -141,7 +141,7 @@ bindsym --no-repeat $mod+Mod5+p fullscreen disable; exec ~/papercut/pc-client-li
 
 #wifi
 bindsym --no-repeat $mod+F5 exec $term -T "$popup-wifi-select" -e bash -c '~/.config/sway/scripts/network/wifi-select.sh'
-bindsym --no-repeat $mod+F6 exec $term -T "$popup-wifi-toggle" -e bash -c '~/.config/sway/scripts/network/wifi-toggle.sh; read -n 1 -p "Press any key to close..."'
+bindsym --no-repeat $mod+F6 exec $term -T "$popup-wifi-toggle" -e bash -c '~/.config/sway/scripts/network/wifi-toggle.sh'
 
 #fastfetch
 bindsym --locked --no-repeat $mod+Control+w fullscreen disable; exec $term -T "$popup-f-wifi" -e bash -c '~/.config/sway/scripts/fastfetch/f-wifi.sh; read -n 1 -p "Press any key to close..."'

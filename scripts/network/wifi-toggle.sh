@@ -1,22 +1,33 @@
 #!/usr/bin/env bash
 
-set +e
+set -euo pipefail
 
-STATE_FILE="/tmp/network-toggle.state"
+RESULT_FILE="/tmp/network-toggle-complete.$$"
+rm -f "$RESULT_FILE"
 
+echo "Current status:"
+nmcli dev status
+echo
+
+export RESULT_FILE
+
+swaynag \
+    -t warning \
+    -y overlay \
+    -m "Network Selector" \
+    -z "Built-in Wi‑Fi" \
+'
 builtin_wifi=""
 usb_wifi=()
 ethernet=()
 
 for iface in /sys/class/net/*; do
     iface=$(basename "$iface")
-
-    type=$(nmcli -t -f DEVICE,TYPE device | awk -F: -v d="$iface" '$1==d{print $2}')
+    type=$(nmcli -t -f DEVICE,TYPE device | awk -F: -v d="$iface" '"'"'$1==d{print $2}'"'"')
 
     case "$type" in
         wifi)
             path=$(readlink -f "/sys/class/net/$iface")
-
             if [[ "$path" == *"/usb"* ]]; then
                 usb_wifi+=("$iface")
             else
@@ -29,38 +40,103 @@ for iface in /sys/class/net/*; do
     esac
 done
 
-if [[ ! -f "$STATE_FILE" ]] || [[ "$(cat "$STATE_FILE")" == "builtin" ]]; then
+[[ -n "$builtin_wifi" ]] && nmcli dev connect "$builtin_wifi" >/dev/null 2>&1
 
-    echo "usb" > "$STATE_FILE"
+for i in "${usb_wifi[@]}"; do
+    nmcli dev disconnect "$i" >/dev/null 2>&1 || true
+done
 
-    echo "Enabling built-in Wi‑Fi"
-    [[ -n "$builtin_wifi" ]] && nmcli dev connect "$builtin_wifi"
+for i in "${ethernet[@]}"; do
+    nmcli dev disconnect "$i" >/dev/null 2>&1 || true
+done
 
-    echo "Disabling USB Wi‑Fi"
-    for i in "${usb_wifi[@]}"; do
-        nmcli dev disconnect "$i"
-    done
+touch "$RESULT_FILE"
+' \
+    -z "USB Wi‑Fi" \
+'
+builtin_wifi=""
+usb_wifi=()
+ethernet=()
 
-    echo "Disabling Ethernet"
-    for i in "${ethernet[@]}"; do
-        nmcli dev disconnect "$i"
-    done
+for iface in /sys/class/net/*; do
+    iface=$(basename "$iface")
+    type=$(nmcli -t -f DEVICE,TYPE device | awk -F: -v d="$iface" '"'"'$1==d{print $2}'"'"')
 
-else
+    case "$type" in
+        wifi)
+            path=$(readlink -f "/sys/class/net/$iface")
+            if [[ "$path" == *"/usb"* ]]; then
+                usb_wifi+=("$iface")
+            else
+                builtin_wifi="$iface"
+            fi
+            ;;
+        ethernet)
+            ethernet+=("$iface")
+            ;;
+    esac
+done
 
-    echo "builtin" > "$STATE_FILE"
+[[ -n "$builtin_wifi" ]] && nmcli dev disconnect "$builtin_wifi" >/dev/null 2>&1 || true
 
-    echo "Disabling built-in Wi‑Fi"
-    [[ -n "$builtin_wifi" ]] && nmcli dev disconnect "$builtin_wifi"
+for i in "${usb_wifi[@]}"; do
+    nmcli dev connect "$i" >/dev/null 2>&1
+done
 
-    echo "Enabling USB Wi‑Fi"
-    for i in "${usb_wifi[@]}"; do
-        nmcli dev connect "$i"
-    done
+for i in "${ethernet[@]}"; do
+    nmcli dev disconnect "$i" >/dev/null 2>&1 || true
+done
 
-    echo "Enabling Ethernet"
-    for i in "${ethernet[@]}"; do
-        nmcli dev connect "$i"
-    done
+touch "$RESULT_FILE"
+' \
+    -z "Ethernet" \
+'
+builtin_wifi=""
+usb_wifi=()
+ethernet=()
 
-fi
+for iface in /sys/class/net/*; do
+    iface=$(basename "$iface")
+    type=$(nmcli -t -f DEVICE,TYPE device | awk -F: -v d="$iface" '"'"'$1==d{print $2}'"'"')
+
+    case "$type" in
+        wifi)
+            path=$(readlink -f "/sys/class/net/$iface")
+            if [[ "$path" == *"/usb"* ]]; then
+                usb_wifi+=("$iface")
+            else
+                builtin_wifi="$iface"
+            fi
+            ;;
+        ethernet)
+            ethernet+=("$iface")
+            ;;
+    esac
+done
+
+[[ -n "$builtin_wifi" ]] && nmcli dev disconnect "$builtin_wifi" >/dev/null 2>&1 || true
+
+for i in "${usb_wifi[@]}"; do
+    nmcli dev disconnect "$i" >/dev/null 2>&1 || true
+done
+
+for i in "${ethernet[@]}"; do
+    nmcli dev connect "$i" >/dev/null 2>&1
+done
+
+touch "$RESULT_FILE"
+' &
+
+while [[ ! -f "$RESULT_FILE" ]]; do
+    sleep 0.1
+done
+
+rm -f "$RESULT_FILE"
+
+echo
+echo "Updated status:"
+nmcli dev status
+
+echo
+read -n 1 -rsp "Press any key to close..."
+echo
