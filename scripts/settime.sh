@@ -16,16 +16,20 @@ toggle_gnome_location() {
 }
 
 get_timezone() {
-  if command -v curl >/dev/null 2>&1; then
     local tz
-    tz="$(curl -s --max-time 5 https://ipapi.co/timezone || true)"
-    if [[ -n "${tz}" && "${tz}" =~ .*/.* ]]; then
-      echo "${tz}"
-      return 0
+
+    tz="$(curl -fsS --max-time 5 https://ipinfo.io/timezone)" || {
+        echo "ERROR: Could not determine timezone" >&2
+        return 1
+    }
+
+    if timedatectl list-timezones | grep -Fxq "$tz"; then
+        echo "$tz"
+        return 0
     fi
-  fi
-  echo "ERROR: Couldn’t resolve timezone from IP." >&2
-  return 1
+
+    echo "ERROR: Invalid timezone returned: '$tz'" >&2
+    return 1
 }
 
 set_timezone() {
