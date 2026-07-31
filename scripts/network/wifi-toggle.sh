@@ -3,13 +3,16 @@
 set -euo pipefail
 
 RESULT_FILE="/tmp/network-toggle-complete.$$"
-rm -f "$RESULT_FILE"
+ACTION_LOG="/tmp/network-toggle-action.$$"
+
+rm -f "$RESULT_FILE" "$ACTION_LOG"
+touch "$ACTION_LOG"
 
 echo "Current status:"
 nmcli dev status
 echo
 
-export RESULT_FILE
+export RESULT_FILE ACTION_LOG
 
 swaynag \
     -t warning \
@@ -28,6 +31,7 @@ for iface in /sys/class/net/*; do
     case "$type" in
         wifi)
             path=$(readlink -f "/sys/class/net/$iface")
+
             if [[ "$path" == *"/usb"* ]]; then
                 usb_wifi+=("$iface")
             else
@@ -40,14 +44,15 @@ for iface in /sys/class/net/*; do
     esac
 done
 
-[[ -n "$builtin_wifi" ]] && nmcli dev connect "$builtin_wifi" >/dev/null 2>&1
+[[ -n "$builtin_wifi" ]] && \
+    nmcli dev connect "$builtin_wifi" >>"$ACTION_LOG" 2>&1
 
 for i in "${usb_wifi[@]}"; do
-    nmcli dev disconnect "$i" >/dev/null 2>&1 || true
+    nmcli dev disconnect "$i" >>"$ACTION_LOG" 2>&1 || true
 done
 
 for i in "${ethernet[@]}"; do
-    nmcli dev disconnect "$i" >/dev/null 2>&1 || true
+    nmcli dev disconnect "$i" >>"$ACTION_LOG" 2>&1 || true
 done
 
 touch "$RESULT_FILE"
@@ -65,6 +70,7 @@ for iface in /sys/class/net/*; do
     case "$type" in
         wifi)
             path=$(readlink -f "/sys/class/net/$iface")
+
             if [[ "$path" == *"/usb"* ]]; then
                 usb_wifi+=("$iface")
             else
@@ -77,14 +83,15 @@ for iface in /sys/class/net/*; do
     esac
 done
 
-[[ -n "$builtin_wifi" ]] && nmcli dev disconnect "$builtin_wifi" >/dev/null 2>&1 || true
+[[ -n "$builtin_wifi" ]] && \
+    nmcli dev disconnect "$builtin_wifi" >>"$ACTION_LOG" 2>&1 || true
 
 for i in "${usb_wifi[@]}"; do
-    nmcli dev connect "$i" >/dev/null 2>&1
+    nmcli dev connect "$i" >>"$ACTION_LOG" 2>&1
 done
 
 for i in "${ethernet[@]}"; do
-    nmcli dev disconnect "$i" >/dev/null 2>&1 || true
+    nmcli dev disconnect "$i" >>"$ACTION_LOG" 2>&1 || true
 done
 
 touch "$RESULT_FILE"
@@ -102,6 +109,7 @@ for iface in /sys/class/net/*; do
     case "$type" in
         wifi)
             path=$(readlink -f "/sys/class/net/$iface")
+
             if [[ "$path" == *"/usb"* ]]; then
                 usb_wifi+=("$iface")
             else
@@ -114,14 +122,15 @@ for iface in /sys/class/net/*; do
     esac
 done
 
-[[ -n "$builtin_wifi" ]] && nmcli dev disconnect "$builtin_wifi" >/dev/null 2>&1 || true
+[[ -n "$builtin_wifi" ]] && \
+    nmcli dev disconnect "$builtin_wifi" >>"$ACTION_LOG" 2>&1 || true
 
 for i in "${usb_wifi[@]}"; do
-    nmcli dev disconnect "$i" >/dev/null 2>&1 || true
+    nmcli dev disconnect "$i" >>"$ACTION_LOG" 2>&1 || true
 done
 
 for i in "${ethernet[@]}"; do
-    nmcli dev connect "$i" >/dev/null 2>&1
+    nmcli dev connect "$i" >>"$ACTION_LOG" 2>&1
 done
 
 touch "$RESULT_FILE"
@@ -131,9 +140,15 @@ while [[ ! -f "$RESULT_FILE" ]]; do
     sleep 0.1
 done
 
-rm -f "$RESULT_FILE"
-
 echo
+
+if [[ -s "$ACTION_LOG" ]]; then
+    cat "$ACTION_LOG"
+    echo
+fi
+
+rm -f "$RESULT_FILE" "$ACTION_LOG"
+
 echo "Updated status:"
 nmcli dev status
 
