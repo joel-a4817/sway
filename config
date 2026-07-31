@@ -49,7 +49,7 @@ for_window [app_id="$term" title="^$popup-f-hardware"] floating enable, resize s
 
 for_window [app_id="$term" title="^$popup-wifi-select"] floating enable, resize set 800 800, move position center
 for_window [app_id="$term" title="^$popup-wifi-toggle"] floating enable, resize set 1200 800, move position center
-for_window [app_id="$term" title="^$popup-audio-select"] floating enable, resize set 1250 250,  move position center
+for_window [app_id="$term" title="^$popup-audio-select"] floating enable, resize set 1250 400,  move position center
 
 for_window [app_id="yazi-nvim"] floating enable, move position center, resize set 1000 700, opacity 0.85
 
@@ -158,7 +158,7 @@ bindsym --no-repeat $mod+Print exec bash -c '~/.config/sway/scripts/screen-recor
 bindsym --no-repeat Print exec bash -c '~/.config/sway/scripts/screenshot.sh'
 
 #audio device output switch
-bindsym --locked --no-repeat $mod+F11 exec $term -T "$popup-audio-select" -e bash -c '~/.config/sway/scripts/audio-switch.sh; echo; read -n 1 -p "Press any key to close..."'
+bindsym --locked --no-repeat $mod+F11 exec $term -T "$popup-audio-select" -e bash -c '~/.config/sway/scripts/audio-switch.sh'
 
 #bg
 
