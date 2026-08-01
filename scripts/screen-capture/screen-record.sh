@@ -19,8 +19,9 @@ else
         -o $OUT \
         -y overlay \
         -m "Start recording on $OUT" \
-        -z "Without Audio" \
-        "wf-recorder -a --audio-backend=pipewire -o $OUT -f ~/Media/Videos/Screen-recordings/recording-\$(date +%Y%m%d-%H%M%S).mkv" \
         -z "With Audio" \
-        "wf-recorder -a -o $OUT -f ~/Media/Videos/Screen-recordings/recording-\$(date +%Y%m%d-%H%M%S).mkv"
+        "wf-recorder -a -o $OUT -f ~/Media/Videos/Screen-recordings/recording-\$(date +%Y%m%d-%H%M%S).mkv" \
+        -z "Without Audio" \
+            "wf-recorder -a --audio-backend=pipewire -o $OUT -f ~/Media/Videos/Screen-recordings/recording-\$(date +%Y%m%d-%H%M%S).mkv"
+
 fi

@@ -14,7 +14,7 @@ swaynag \
     -t warning \
     -y overlay \
     -m "Network Selector" \
-    -z "Built-in Wi‑Fi" \
+    -z "Ethernet" \
 '
 builtin_wifi=""
 usb_wifi=()
@@ -41,14 +41,14 @@ for iface in /sys/class/net/*; do
 done
 
 [[ -n "$builtin_wifi" ]] && \
-    nmcli dev connect "$builtin_wifi" >>"$ACTION_LOG" 2>&1
+    nmcli dev disconnect "$builtin_wifi" >>"$ACTION_LOG" 2>&1 || true
 
 for i in "${usb_wifi[@]}"; do
     nmcli dev disconnect "$i" >>"$ACTION_LOG" 2>&1 || true
 done
 
 for i in "${ethernet[@]}"; do
-    nmcli dev disconnect "$i" >>"$ACTION_LOG" 2>&1 || true
+    nmcli dev connect "$i" >>"$ACTION_LOG" 2>&1
 done
 
 touch "$RESULT_FILE"
@@ -92,7 +92,7 @@ done
 
 touch "$RESULT_FILE"
 ' \
-    -z "Ethernet" \
+    -z "Built-in Wi‑Fi" \
 '
 builtin_wifi=""
 usb_wifi=()
@@ -119,14 +119,14 @@ for iface in /sys/class/net/*; do
 done
 
 [[ -n "$builtin_wifi" ]] && \
-    nmcli dev disconnect "$builtin_wifi" >>"$ACTION_LOG" 2>&1 || true
+    nmcli dev connect "$builtin_wifi" >>"$ACTION_LOG" 2>&1
 
 for i in "${usb_wifi[@]}"; do
     nmcli dev disconnect "$i" >>"$ACTION_LOG" 2>&1 || true
 done
 
 for i in "${ethernet[@]}"; do
-    nmcli dev connect "$i" >>"$ACTION_LOG" 2>&1
+    nmcli dev disconnect "$i" >>"$ACTION_LOG" 2>&1 || true
 done
 
 touch "$RESULT_FILE"
