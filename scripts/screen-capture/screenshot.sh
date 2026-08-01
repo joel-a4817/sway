@@ -9,13 +9,13 @@ mkdir -p "$HOME/Media/Pictures/Screenshots"
 swaynag \
     -t warning \
     -y overlay \
-    -o $OUT \
+    -o "$OUT" \
     -m "Screenshot" \
     -z "Copy Fullscreen" \
         "grim -o $OUT -t png - | wl-copy" \
     -z "Save & Copy Fullscreen" \
-        "grim -o $OUT -t png - | tee ~/Media/Pictures/Screenshots/screenshot-\$(date +%Y%m%d-%H%M%S).png - | wl-copy" \
+        "grim -o $OUT -t png - | tee ~/Media/Pictures/Screenshots/screenshot-\$(date +%Y%m%d-%H%M%S).png | wl-copy" \
     -z "Copy Selection" \
-        "grim -o $OUT -t png -g \$(slurp) - | wl-copy" \
+        "grim -t png -g \"\$(slurp)\" - | wl-copy" \
     -z "Save & Copy Selection" \
-        "grim -o $OUT -t png -g \$(slurp) - | tee ~/Media/Pictures/Screenshots/screenshot-\$(date +%Y%m%d-%H%M%S).png - | wl-copy"
+        "grim -t png -g \"\$(slurp)\" - | tee ~/Media/Pictures/Screenshots/screenshot-\$(date +%Y%m%d-%H%M%S).png | wl-copy"
