@@ -6,7 +6,7 @@ OUT="$(swaymsg -t get_outputs -r | jq -r '.[] | select(.focused) | .name')"
 
 mkdir -p ~/Media/Videos/Screen-recordings
 
-FILE="$HOME/Media/Videos/Screen-recordings/recording-$(date +%Y%m%d-%H%M%S).mkv"
+FILE="~/Media/Videos/Screen-recordings/recording-$(date +%Y%m%d-%H%M%S).mkv"
 
 if pgrep -x wf-recorder >/dev/null; then
     swaynag \
@@ -21,9 +21,9 @@ else
         -o "$OUT" \
         -y overlay \
         -m "Start recording on $OUT" \
-        -z "With Audio" \
-            "wf-recorder -a --audio-backend=pipewire -o \"$OUT\" -f \"$FILE\"" \
         -z "Without Audio" \
-            "wf-recorder -o \"$OUT\" -f \"$FILE\""
+            "wf-recorder -a --audio-backend=pipewire -o \"$OUT\" -f \"$FILE\"" \
+        -z "With Audio" \
+            "wf-recorder -a -o \"$OUT\" -f \"$FILE\""
 fi
 
