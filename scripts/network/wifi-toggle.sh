@@ -14,6 +14,14 @@ swaynag \
     -t warning \
     -y overlay \
     -m "Network Selector" \
+    -z "All Network Off" \
+'
+for iface in $(nmcli -t -f DEVICE device | sed "/^$/d"); do
+    nmcli dev disconnect "$iface" >>"$ACTION_LOG" 2>&1 || true
+done
+
+touch "$RESULT_FILE"
+' \
     -z "Ethernet" \
 '
 builtin_wifi=""
@@ -136,11 +144,9 @@ while [[ ! -f "$RESULT_FILE" ]]; do
     sleep 0.1
 done
 
-echo
 
 if [[ -s "$ACTION_LOG" ]]; then
     cat "$ACTION_LOG"
-    echo
 fi
 
 rm -f "$RESULT_FILE" "$ACTION_LOG"
