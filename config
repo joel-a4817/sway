@@ -36,7 +36,7 @@ set $popup popup
 # Specific popups (self-contained: floating + resize + center)
 
 for_window [app_id="$term" title="^$popup-update"] floating enable, resize set 1200 600, move position center
-for_window [app_id="$term" title="^$popup-mount"] floating enable, resize set 1000 200, move position center
+for_window [app_id="$term" title="^$popup-mount"] floating enable, resize set 1000 250, move position center
 for_window [app_id="$term" title="^$popup-settime$"] floating enable, resize set 550 150,  move position center
 for_window [app_id="$term" title="^$popup-tuis"] floating enable, resize set 1000 700, move position center
 
