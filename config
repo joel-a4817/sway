@@ -36,6 +36,7 @@ set $popup popup
 # Specific popups (self-contained: floating + resize + center)
 
 for_window [app_id="$term" title="^$popup-update"] floating enable, resize set 1200 600, move position center
+for_window [app_id="$term" title="^$popup-mount"] floating enable, resize set 1000 200, move position center
 for_window [app_id="$term" title="^$popup-settime$"] floating enable, resize set 550 150,  move position center
 for_window [app_id="$term" title="^$popup-tuis"] floating enable, resize set 1000 700, move position center
 
@@ -105,20 +106,16 @@ input "1386:20983:Wacom_Pen_and_multitouch_sensor_Finger" {
 # User keybinds
 
 # keybinds update
-bindsym --no-repeat $mod+shift+m fullscreen disable; exec $term -T "$popup-update-mount" -e bash -c '~/.config/sway/scripts/mount-toggle.sh; read -n 1 -rsp "Press any key to close..."'
 bindsym --no-repeat $mod+shift+u fullscreen disable; exec $term -T "$popup-update-rebuild" -e bash -c '~/.config/sway/scripts/updaters/nixos-rebuild.sh'
 bindsym --no-repeat $mod+Shift+e fullscreen disable; exec $term -T "$popup-update-clean" -e bash -c '~/.config/sway/scripts/updaters/nixos-clean.sh'
 bindsym --no-repeat $mod+Shift+p fullscreen disable; exec $term -T "$popup-update-pixymon" -e bash -c '~/.config/sway/scripts/updaters/update-pixymon.sh'
 bindsym --no-repeat $mod+Shift+y fullscreen disable; exec $term -T "$popup-update-yt-playlist" -e bash -c '~/.config/sway/scripts/updaters/update-yt-playlist.sh'
 bindsym --no-repeat $mod+Shift+d fullscreen disable; exec $term -T "$popup-update-dvd" -e bash -c '~/.config/sway/scripts/updaters/rewrite-dvd-playlist.sh'
 bindsym --no-repeat $mod+Shift+t fullscreen disable; exec $term -T "$popup-settime" -e bash -c '~/.config/sway/scripts/settime.sh; echo; read -n 1 -rsp "Press any key to close..."'
-bindsym --no-repeat $mod+Shift+s fullscreen disable; exec $term -T "$popup-update-calendar" -e bash -c 'rm -rf ~/.local/share/calcurse/compass.ics ~/.local/share/calcurse/compass; curl -L -o ~/.local/share/calcurse/compass.ics "https://mhs-vic.compass.education/download/sharedCalendar.aspx?uid=19030&key=de953c62-f1e9-475d-b0c2-83fd3c09ff62&c.ics"; echo; calcurse -D ~/.local/share/calcurse/compass -i ~/.local/share/calcurse/compass.ics; echo; read -n 1 -rsp "Press any key to close..."'
 
 #keybinds app
 bindsym --no-repeat $mod+F2 fullscreen disable; exec $term -T "$popup-tuis" -e clipse
 bindsym --no-repeat $mod+F1 fullscreen disable; exec $term -T "$popup-tuis" -e yazi
-bindsym --no-repeat $mod+F3 fullscreen disable; exec $term -T "$popup-tuis" -e calcurse
-bindsym --no-repeat $mod+F4 fullscreen disable; exec $term -T "$popup-tuis" -e calcurse -D ~/.local/share/calcurse/compass 
 
 bindsym --no-repeat $mod+Mod1+g fullscreen disable; exec chromium
 bindsym --no-repeat $mod+Mod1+z fullscreen disable; exec solaar
@@ -141,9 +138,9 @@ bindsym --no-repeat $mod+Mod5+s exec bash -c 'syncthing; syncthing browser'
 bindsym --no-repeat $mod+Mod5+p fullscreen disable; exec ~/papercut/pc-client-linux.sh
 
 #wifi
-bindsym --no-repeat $mod+F10 exec $term -T "$popup-wifi-select" -e bash -c '~/.config/sway/scripts/network/wifi-select.sh'
-bindsym --no-repeat $mod+F11 exec $term -T "$popup-wifi-toggle" -e bash -c '~/.config/sway/scripts/network/wifi-toggle.sh'
-bindsym --no-repeat $mod+F9 exec $term -T "$popup-wifi-status" -e bash -c 'nmcli dev status; echo; nmcli dev wifi list; echo; read -n 1 -rsp "Press any key to close..."'
+bindsym --no-repeat $mod+F9 exec $term -T "$popup-wifi-select" -e bash -c '~/.config/sway/scripts/network/wifi-select.sh'
+bindsym --no-repeat $mod+F10 exec $term -T "$popup-wifi-toggle" -e bash -c '~/.config/sway/scripts/network/wifi-toggle.sh'
+bindsym --no-repeat $mod+F8 exec $term -T "$popup-wifi-status" -e bash -c 'nmcli dev status; echo; nmcli dev wifi list; echo; read -n 1 -rsp "Press any key to close..."'
 
 #fastfetch
 bindsym --locked --no-repeat $mod+Control+w fullscreen disable; exec $term -T "$popup-f-wifi" -e bash -c '~/.config/sway/scripts/fastfetch/f-wifi.sh; read -n 1 -rsp "Press any key to close..."'
@@ -155,12 +152,15 @@ bindsym --locked --no-repeat $mod+Control+h fullscreen disable; exec $term -T "$
 bindsym --locked --no-repeat $mod+Control+a fullscreen disable; exec $term -T "$popup-f-aesthetics" -e bash -c '~/.config/sway/scripts/fastfetch/f-aesthetics.sh; echo; read -n 1 -rsp "Press any key to close..."'
 
 #screen-record
-bindsym --no-repeat $mod+Print exec bash -c '~/.config/sway/scripts/screen-capture/screen-record.sh'
+bindsym --no-repeat $mod+F12 exec bash -c '~/.config/sway/scripts/screen-capture/screen-record.sh'
 #screenshot
-bindsym --no-repeat Print exec bash -c '~/.config/sway/scripts/screen-capture/screenshot.sh'
+bindsym --no-repeat $mod+Print exec bash -c '~/.config/sway/scripts/screen-capture/screenshot.sh'
 
 #audio device output switch
 bindsym --locked --no-repeat $mod+F6 exec $term -T "$popup-audio-select" -e bash -c '~/.config/sway/scripts/audio-switch.sh'
+
+#mount dev
+bindsym --no-repeat $mod+F7 fullscreen disable; exec $term -T "$popup-mount" -e bash -c '~/.config/sway/scripts/mount-toggle.sh; read -n 1 -rsp "Press any key to close..."'
 
 #bg
 
@@ -184,8 +184,8 @@ client.unfocused         $bg      $bg         $fg    $bg        $bg
 client.urgent            #BF616A  #BF616A     $fg    #BF616A    #BF616A
 client.background        $bg
 
-bindsym --no-repeat $mod+F7 exec bash -c '~/.config/sway/scripts/rotation/toggle-rotate.sh; ~/.config/sway/scripts/rotation/rotation-restore.sh'
-bindsym --no-repeat $mod+F8 exec bash -c '~/.config/sway/scripts/rotation/toggle-rotate-no-transform.sh; ~/.config/sway/scripts/rotation/rotation-restore.sh'
+bindsym --no-repeat $mod+F3 exec bash -c '~/.config/sway/scripts/rotation/toggle-rotate.sh; ~/.config/sway/scripts/rotation/rotation-restore.sh'
+bindsym --no-repeat $mod+F4 exec bash -c '~/.config/sway/scripts/rotation/toggle-rotate-no-transform.sh; ~/.config/sway/scripts/rotation/rotation-restore.sh'
 
 ### Key bindings
 #
@@ -208,7 +208,7 @@ bindsym --no-repeat $mod+F8 exec bash -c '~/.config/sway/scripts/rotation/toggle
 bindsym $mod+Shift+c exec ~/.config/sway/scripts/rotation/rotation-restore.sh
 
     # system off options
-    bindsym --no-repeat --locked $mod+F12 exec bash -c "~/.config/sway/scripts/device-off.sh"
+    bindsym --no-repeat --locked $mod+F11 exec bash -c "~/.config/sway/scripts/device-off.sh"
 
 #
 # Moving around:
