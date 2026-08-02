@@ -159,7 +159,7 @@ bindsym --no-repeat $mod+F5 exec bash -c '~/.config/sway/scripts/screen-capture.
 bindsym --locked --no-repeat $mod+F7 exec $term -T "$popup-audio-select" -e bash -c '~/.config/sway/scripts/audio-switch.sh'
 
 #mount dev
-bindsym --no-repeat $mod+F8 fullscreen disable; exec $term -T "$popup-mount" -e bash -c '~/.config/sway/scripts/mount-toggle.sh; read -n 1 -rsp "Press any key to close..."'
+bindsym --no-repeat $mod+F8 fullscreen disable; exec $term -T "$popup-mount" -e bash -c '/home/joel/.config/sway/scripts/mount/mount-swaynag.sh'
 
 #bg
 
