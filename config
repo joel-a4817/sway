@@ -105,8 +105,8 @@ input "1386:20983:Wacom_Pen_and_multitouch_sensor_Finger" {
 # User keybinds
 
 # keybinds update
-
-bindsym --no-repeat $mod+Shift+u fullscreen disable; exec $term -T "$popup-update-rebuild" -e bash -c '~/.config/sway/scripts/updaters/nixos-rebuild.sh'
+bindsym --no-repeat $mod+shift+m fullscreen disable; exec $term -T "$popup-update-mount" -e bash -c '~/.config/sway/scripts/mount-toggle.sh; read -n 1 -rsp "Press any key to close..."'
+bindsym --no-repeat $mod+shift+u fullscreen disable; exec $term -T "$popup-update-rebuild" -e bash -c '~/.config/sway/scripts/updaters/nixos-rebuild.sh'
 bindsym --no-repeat $mod+Shift+e fullscreen disable; exec $term -T "$popup-update-clean" -e bash -c '~/.config/sway/scripts/updaters/nixos-clean.sh'
 bindsym --no-repeat $mod+Shift+p fullscreen disable; exec $term -T "$popup-update-pixymon" -e bash -c '~/.config/sway/scripts/updaters/update-pixymon.sh'
 bindsym --no-repeat $mod+Shift+y fullscreen disable; exec $term -T "$popup-update-yt-playlist" -e bash -c '~/.config/sway/scripts/updaters/update-yt-playlist.sh'
