@@ -57,7 +57,7 @@ for_window [app_id="yazi-nvim"] floating enable, move position center, resize se
 
 for_window [app_id="PrismLauncher"] floating enable, move position center
 for_window [app_id="localsend_app"] opacity 0.85
-for_window [app_id="chromium"] opacity 0.85
+for_window [app_id="glide"] opacity 0.85
 for_window [app_id="anki"] opacity 0.85
 for_window [app_id="signal"] opacity 0.85
 for_window [app_id="$term"] opacity 0.85
@@ -117,7 +117,7 @@ bindsym --no-repeat $mod+Shift+t fullscreen disable; exec $term -T "$popup-setti
 bindsym --no-repeat $mod+F2 fullscreen disable; exec $term -T "$popup-tuis" -e clipse
 bindsym --no-repeat $mod+F1 fullscreen disable; exec $term -T "$popup-tuis" -e yazi
 
-bindsym --no-repeat $mod+Mod1+g fullscreen disable; exec chromium
+bindsym --no-repeat $mod+Mod1+g fullscreen disable; exec glide
 bindsym --no-repeat $mod+Mod1+z fullscreen disable; exec solaar
 bindsym --no-repeat $mod+Mod1+x fullscreen disable; exec kamoso
 bindsym --no-repeat $mod+Mod1+w fullscreen disable; exec karere
