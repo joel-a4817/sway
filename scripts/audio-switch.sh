@@ -8,109 +8,103 @@ ACTION_LOG="/tmp/audio-toggle-action.$$"
 rm -f "$RESULT_FILE" "$ACTION_LOG"
 touch "$ACTION_LOG"
 
-find_hdmi_sink() {
-    pactl list sinks short | awk 'tolower($0) ~ /hdmi/ {print $2; exit}'
-}
-
-find_analog_sink() {
-    pactl list sinks short | awk 'tolower($0) !~ /hdmi/ {print $2; exit}'
-}
-
-hdmi_available() {
-    [[ -n "$(find_hdmi_sink)" ]]
-}
-
-analog_available() {
-    [[ -n "$(find_analog_sink)" ]]
-}
-
-HDMI_LABEL="HDMI Audio"
-ANALOG_LABEL="Analog Audio"
-
-hdmi_available || HDMI_LABEL="HDMI Audio (Unavailable)"
-analog_available || ANALOG_LABEL="Analog Audio (Unavailable)"
-
-echo "Current default sink:"
-pactl get-default-sink
-
 export RESULT_FILE ACTION_LOG
 
-swaynag \
-    -t warning \
-    -y overlay \
-    -m "Audio Output Selector" \
-    -z "$HDMI_LABEL" \
-'
-move_streams() {
-    local sink="$1"
+# Build a list of sinks:
+# sink_name|description
+mapfile -t SINKS < <(
+    pactl list sinks |
+    awk '
+        /^Sink #/ {
+            if (name != "" && desc != "")
+                print name "|" desc
+            name=""
+            desc=""
+        }
 
-    pactl set-default-sink "$sink" >>"$ACTION_LOG" 2>&1
+        /^[[:space:]]*Name:/ {
+            name=$2
+        }
 
-    pactl list sink-inputs short |
-        awk "{print \$1}" |
-        while read -r id; do
-            pactl move-sink-input "$id" "$sink" >>"$ACTION_LOG" 2>&1
-        done
-}
+        /^[[:space:]]*Description:/ {
+            sub(/^[[:space:]]*Description:[[:space:]]*/, "")
+            desc=$0
+        }
 
-find_hdmi_sink() {
-    pactl list sinks short |
-        awk '"'"'tolower($0) ~ /hdmi/ {print $2; exit}'"'"'
-}
+        END {
+            if (name != "" && desc != "")
+                print name "|" desc
+        }
+    '
+)
 
-HDMI_SINK="$(find_hdmi_sink)"
-
-if [[ -z "${HDMI_SINK:-}" ]]; then
-    echo "ERROR: HDMI output is not available." >>"$ACTION_LOG"
-    touch "$RESULT_FILE"
+if ((${#SINKS[@]} == 0)); then
+    echo "No audio sinks found."
     exit 1
 fi
 
-echo "Switching to HDMI..." >>"$ACTION_LOG"
+ARGS=(
+    -t warning
+    -y overlay
+    -m "Audio Output Selector"
+)
 
-move_streams "$HDMI_SINK"
+for entry in "${SINKS[@]}"; do
+    sink="${entry%%|*}"
+    desc="${entry#*|}"
 
-echo "SUCCESS: Switched to HDMI" >>"$ACTION_LOG"
-echo "Sink: $HDMI_SINK" >>"$ACTION_LOG"
+    case "$desc" in
+        *HDMI*)
+            label="HDMI"
+            ;;
+        *Speaker*)
+            label="Speaker"
+            ;;
+        *Headphone*)
+            label="Headphones"
+            ;;
+        *Bluetooth*)
+            label="Bluetooth"
+            ;;
+        *USB*)
+            label="USB Audio"
+            ;;
+        *)
+            label="$desc"
+            [[ ${#label} -gt 12 ]] && label="${label:0:12}..."
+            ;;
+    esac
 
-touch "$RESULT_FILE"
-' \
-    -z "$ANALOG_LABEL" \
-'
+    ARGS+=(
+        -z "$label"
+        "
 move_streams() {
-    local sink="$1"
+    local sink=\"\$1\"
 
-    pactl set-default-sink "$sink" >>"$ACTION_LOG" 2>&1
+    pactl set-default-sink \"\$sink\" >>\"\$ACTION_LOG\" 2>&1
 
     pactl list sink-inputs short |
-        awk "{print \$1}" |
+        awk '{print \$1}' |
         while read -r id; do
-            pactl move-sink-input "$id" "$sink" >>"$ACTION_LOG" 2>&1
+            pactl move-sink-input \"\$id\" \"\$sink\" >>\"\$ACTION_LOG\" 2>&1
         done
 }
 
-find_analog_sink() {
-    pactl list sinks short |
-        awk '"'"'tolower($0) !~ /hdmi/ {print $2; exit}'"'"'
-}
+SINK=\"$sink\"
 
-ANALOG_SINK="$(find_analog_sink)"
+echo \"Switching to: \$SINK\" >>\"\$ACTION_LOG\"
 
-if [[ -z "${ANALOG_SINK:-}" ]]; then
-    echo "ERROR: Analog output is not available." >>"$ACTION_LOG"
-    touch "$RESULT_FILE"
-    exit 1
-fi
+move_streams \"\$SINK\"
 
-echo "Switching to Analog..." >>"$ACTION_LOG"
+echo \"SUCCESS\" >>\"\$ACTION_LOG\"
+echo \"Sink: \$SINK\" >>\"\$ACTION_LOG\"
 
-move_streams "$ANALOG_SINK"
+touch \"\$RESULT_FILE\"
+"
+    )
+done
 
-echo "SUCCESS: Switched to Analog" >>"$ACTION_LOG"
-echo "Sink: $ANALOG_SINK" >>"$ACTION_LOG"
-
-touch "$RESULT_FILE"
-' &
+swaynag "${ARGS[@]}" &
 
 while [[ ! -f "$RESULT_FILE" ]]; do
     sleep 0.1
