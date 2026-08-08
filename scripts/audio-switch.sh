@@ -52,6 +52,44 @@ done < <(
     '
 )
 
+declare -A PROFILE_AVAIL
+
+while IFS='|' read -r profile avail; do
+    PROFILE_AVAIL["$profile"]="$avail"
+done < <(
+    pactl list cards | awk '
+    /output:/ {
+
+        profile=$1
+        sub(/:$/, "", profile)
+
+        avail="yes"
+
+        if ($0 ~ /available: no/)
+            avail="no"
+
+        print profile "|" avail
+    }
+    '
+)
+
+speaker_label="Speaker"
+hdmi1_label="HDMI1"
+hdmi2_label="HDMI2"
+hdmi3_label="HDMI3"
+
+[[ "${PROFILE_AVAIL[output:analog-stereo]:-yes}" == "no" ]] &&
+    speaker_label="$speaker_label (unavailable)"
+
+[[ "${PROFILE_AVAIL[output:hdmi-stereo]:-yes}" == "no" ]] &&
+    hdmi1_label="$hdmi1_label (unavailable)"
+
+[[ "${PROFILE_AVAIL[output:hdmi-stereo-extra1]:-yes}" == "no" ]] &&
+    hdmi2_label="$hdmi2_label (unavailable)"
+
+[[ "${PROFILE_AVAIL[output:hdmi-stereo-extra2]:-yes}" == "no" ]] &&
+    hdmi3_label="$hdmi3_label (unavailable)"
+
 ARGS=(
     -t warning
     -y overlay
@@ -69,7 +107,7 @@ if pactl list cards | grep -q 'output:hdmi-stereo:'; then
     ###########################################################################
 
     ARGS+=(
-        -z "Speaker"
+      -z "$speaker_label"
         "
 pactl set-card-profile \"$CARD\" output:analog-stereo >>\"\$ACTION_LOG\" 2>&1
 
@@ -92,7 +130,7 @@ touch \"\$RESULT_FILE\"
     )
 
     ARGS+=(
-        -z "HDMI1"
+      -z "$hdmi1_label"
         "
 pactl set-card-profile \"$CARD\" output:hdmi-stereo >>\"\$ACTION_LOG\" 2>&1
 
@@ -115,7 +153,7 @@ touch \"\$RESULT_FILE\"
     )
 
     ARGS+=(
-        -z "HDMI2"
+      -z "$hdmi2_label"
         "
 pactl set-card-profile \"$CARD\" output:hdmi-stereo-extra1 >>\"\$ACTION_LOG\" 2>&1
 
@@ -138,7 +176,7 @@ touch \"\$RESULT_FILE\"
     )
 
     ARGS+=(
-        -z "HDMI3"
+      -z "$hdmi3_label"
         "
 pactl set-card-profile \"$CARD\" output:hdmi-stereo-extra2 >>\"\$ACTION_LOG\" 2>&1
 
