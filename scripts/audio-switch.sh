@@ -12,6 +12,46 @@ export RESULT_FILE ACTION_LOG
 
 CARD="$(pactl list cards short | awk 'NR==1 {print $2}')"
 
+declare -A AVAIL
+
+while IFS='|' read -r port avail; do
+    AVAIL["$port"]="$avail"
+done < <(
+    pactl list cards | awk '
+    /\[Out\]/ {
+
+        name=$0
+        sub(/^[[:space:]]*\[Out\][[:space:]]*/, "", name)
+        sub(/:.*/, "", name)
+
+        avail="unknown"
+
+        if ($0 ~ /not available/)
+            avail="no"
+        else if ($0 ~ /available/)
+            avail="yes"
+
+        print name "|" avail
+    }
+
+    /^[[:space:]]*hdmi-output-/ ||
+    /^[[:space:]]*analog-output-/ {
+
+        port=$1
+        sub(/:$/, "", port)
+
+        avail="unknown"
+
+        if ($0 ~ /not available/)
+            avail="no"
+        else if ($0 ~ /available/)
+            avail="yes"
+
+        print port "|" avail
+    }
+    '
+)
+
 ARGS=(
     -t warning
     -y overlay
@@ -157,28 +197,36 @@ else
 
         sink="${entry%%|*}"
         desc="${entry#*|}"
-
         case "$desc" in
             *HDMI*3*)
                 label="HDMI3"
+                key="HDMI3"
                 ;;
             *HDMI*2*)
                 label="HDMI2"
+                key="HDMI2"
                 ;;
             *HDMI*1*)
                 label="HDMI1"
+                key="HDMI1"
                 ;;
             *Speaker*)
                 label="Speaker"
+                key="Speaker"
                 ;;
             *Headphone*)
                 label="Headphones"
+                key="Headphones"
                 ;;
             *)
                 label="$desc"
+                key=""
                 ;;
         esac
 
+        if [[ -n "$key" && "${AVAIL[$key]:-yes}" == "no" ]]; then
+            label="$label (unavailable)"
+        fi
         ARGS+=(
             -z "$label"
             "
