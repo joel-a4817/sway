@@ -53,18 +53,6 @@ while IFS='|' read -r profile description available; do
         *Speaker*)
             label="Speaker"
             ;;
-        *HDMI*)
-            label="HDMI"
-            ;;
-        *Analog*)
-            label="Analog"
-            ;;
-        *Bluetooth*)
-            label="Bluetooth"
-            ;;
-        *USB*)
-            label="USB Audio"
-            ;;
         *pro-audio*)
             label="Pro Audio"
             ;;
@@ -164,7 +152,6 @@ for entry in "${SINKS[@]}"; do
 done
 
 echo "[0] Keep current sink ($CURRENT_DESC)"
-echo
 
 for i in "${!SINKS[@]}"; do
     desc="${SINKS[$i]#*|}"
@@ -203,8 +190,6 @@ fi
 
 ###############################################################################
 
-echo
-
 if [[ -s "$ACTION_LOG" ]]; then
     cat "$ACTION_LOG"
     echo
@@ -212,7 +197,6 @@ fi
 
 rm -f "$RESULT_FILE" "$ACTION_LOG"
 
-echo "Current profile:"
 pactl list cards | grep "Active Profile"
 
 echo
