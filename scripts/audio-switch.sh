@@ -12,276 +12,97 @@ export RESULT_FILE ACTION_LOG
 
 CARD="$(pactl list cards short | awk 'NR==1 {print $2}')"
 
-declare -A AVAIL
-
-while IFS='|' read -r port avail; do
-    AVAIL["$port"]="$avail"
-done < <(
-    pactl list cards | awk '
-    /\[Out\]/ {
-
-        name=$0
-        sub(/^[[:space:]]*\[Out\][[:space:]]*/, "", name)
-        sub(/:.*/, "", name)
-
-        avail="unknown"
-
-        if ($0 ~ /not available/)
-            avail="no"
-        else if ($0 ~ /available/)
-            avail="yes"
-
-        print name "|" avail
-    }
-
-    /^[[:space:]]*hdmi-output-/ ||
-    /^[[:space:]]*analog-output-/ {
-
-        port=$1
-        sub(/:$/, "", port)
-
-        avail="unknown"
-
-        if ($0 ~ /not available/)
-            avail="no"
-        else if ($0 ~ /available/)
-            avail="yes"
-
-        print port "|" avail
-    }
-    '
-)
-
-declare -A PROFILE_AVAIL
-
-while IFS='|' read -r profile avail; do
-    PROFILE_AVAIL["$profile"]="$avail"
-done < <(
-    pactl list cards | awk '
-    /output:/ {
-
-        profile=$1
-        sub(/:$/, "", profile)
-
-        avail="yes"
-
-        if ($0 ~ /available: no/)
-            avail="no"
-
-        print profile "|" avail
-    }
-    '
-)
-
-speaker_label="Speaker"
-hdmi1_label="HDMI1"
-hdmi2_label="HDMI2"
-hdmi3_label="HDMI3"
-
-[[ "${PROFILE_AVAIL[output:analog-stereo]:-yes}" == "no" ]] &&
-    speaker_label="$speaker_label (unavailable)"
-
-[[ "${PROFILE_AVAIL[output:hdmi-stereo]:-yes}" == "no" ]] &&
-    hdmi1_label="$hdmi1_label (unavailable)"
-
-[[ "${PROFILE_AVAIL[output:hdmi-stereo-extra1]:-yes}" == "no" ]] &&
-    hdmi2_label="$hdmi2_label (unavailable)"
-
-[[ "${PROFILE_AVAIL[output:hdmi-stereo-extra2]:-yes}" == "no" ]] &&
-    hdmi3_label="$hdmi3_label (unavailable)"
-
 ARGS=(
     -t warning
     -y overlay
-    -m "Audio Output Selector"
+    -m "Audio Profile Selector"
 )
 
 ###############################################################################
-# DETECT MACHINE TYPE
+# PROFILE BUTTON
 ###############################################################################
 
-if pactl list cards | grep -q 'output:hdmi-stereo:'; then
+add_profile_button() {
 
-    ###########################################################################
-    # OLD MACHINE (PROFILE BASED)
-    ###########################################################################
-
-    ARGS+=(
-      -z "$speaker_label"
-        "
-pactl set-card-profile \"$CARD\" output:analog-stereo >>\"\$ACTION_LOG\" 2>&1
-
-sleep 1
-
-sink=\$(pactl list short sinks | awk 'NR==1 {print \$2}')
-
-if [[ -n \$sink ]]; then
-    pactl set-default-sink \"\$sink\" >>\"\$ACTION_LOG\" 2>&1
-
-    pactl list sink-inputs short |
-        awk '{print \$1}' |
-        while read -r id; do
-            pactl move-sink-input \"\$id\" \"\$sink\" >>\"\$ACTION_LOG\" 2>&1
-        done
-fi
-
-touch \"\$RESULT_FILE\"
-"
-    )
+    local label="$1"
+    local profile="$2"
 
     ARGS+=(
-      -z "$hdmi1_label"
+        -z "$label"
         "
-pactl set-card-profile \"$CARD\" output:hdmi-stereo >>\"\$ACTION_LOG\" 2>&1
-
-sleep 1
-
-sink=\$(pactl list short sinks | awk 'NR==1 {print \$2}')
-
-if [[ -n \$sink ]]; then
-    pactl set-default-sink \"\$sink\" >>\"\$ACTION_LOG\" 2>&1
-
-    pactl list sink-inputs short |
-        awk '{print \$1}' |
-        while read -r id; do
-            pactl move-sink-input \"\$id\" \"\$sink\" >>\"\$ACTION_LOG\" 2>&1
-        done
-fi
-
+pactl set-card-profile \"$CARD\" \"$profile\" >>\"\$ACTION_LOG\" 2>&1
 touch \"\$RESULT_FILE\"
 "
     )
+}
 
-    ARGS+=(
-      -z "$hdmi2_label"
-        "
-pactl set-card-profile \"$CARD\" output:hdmi-stereo-extra1 >>\"\$ACTION_LOG\" 2>&1
+###############################################################################
+# DISCOVER PROFILES
+###############################################################################
 
-sleep 1
+while IFS='|' read -r profile description available; do
 
-sink=\$(pactl list short sinks | awk 'NR==1 {print \$2}')
+    [[ "$profile" == "off" ]] && continue
 
-if [[ -n \$sink ]]; then
-    pactl set-default-sink \"\$sink\" >>\"\$ACTION_LOG\" 2>&1
+    label="$description"
 
-    pactl list sink-inputs short |
-        awk '{print \$1}' |
-        while read -r id; do
-            pactl move-sink-input \"\$id\" \"\$sink\" >>\"\$ACTION_LOG\" 2>&1
-        done
-fi
+    case "$description" in
+        *Headphone*)
+            label="Headphones"
+            ;;
+        *Speaker*)
+            label="Speaker"
+            ;;
+        *HDMI*)
+            label="HDMI"
+            ;;
+        *Analog*)
+            label="Analog"
+            ;;
+        *Bluetooth*)
+            label="Bluetooth"
+            ;;
+        *USB*)
+            label="USB Audio"
+            ;;
+        *pro-audio*)
+            label="Pro Audio"
+            ;;
+    esac
 
-touch \"\$RESULT_FILE\"
-"
-    )
+    [[ "$available" == "no" ]] &&
+        label="$label (unavailable)"
 
-    ARGS+=(
-      -z "$hdmi3_label"
-        "
-pactl set-card-profile \"$CARD\" output:hdmi-stereo-extra2 >>\"\$ACTION_LOG\" 2>&1
+    add_profile_button "$label" "$profile"
 
-sleep 1
+done < <(
+    pactl list cards | awk '
 
-sink=\$(pactl list short sinks | awk 'NR==1 {print \$2}')
+    /^[[:space:]]*[A-Za-z0-9].*[[:space:]]\(sinks:/ {
 
-if [[ -n \$sink ]]; then
-    pactl set-default-sink \"\$sink\" >>\"\$ACTION_LOG\" 2>&1
+        line=$0
 
-    pactl list sink-inputs short |
-        awk '{print \$1}' |
-        while read -r id; do
-            pactl move-sink-input \"\$id\" \"\$sink\" >>\"\$ACTION_LOG\" 2>&1
-        done
-fi
+        sub(/^[[:space:]]*/, "", line)
 
-touch \"\$RESULT_FILE\"
-"
-    )
+        profile=line
+        sub(/:.*/, "", profile)
 
-else
+        desc=line
+        sub(/^[^:]*:[[:space:]]*/, "", desc)
+        sub(/[[:space:]]+\(sinks:.*/, "", desc)
 
-    ###########################################################################
-    # HP MACHINE (SINK BASED)
-    ###########################################################################
+        avail="yes"
 
-    mapfile -t SINKS < <(
-        pactl list sinks |
-        awk '
-            /^Sink #/ {
-                if (name != "" && desc != "")
-                    print name "|" desc
+        if (line ~ /available:[[:space:]]*no/)
+            avail="no"
 
-                name=""
-                desc=""
-            }
+        print profile "|" desc "|" avail
+    }
+    '
+)
 
-            /^[[:space:]]*Name:/ {
-                name=$2
-            }
-
-            /^[[:space:]]*Description:/ {
-                sub(/^[[:space:]]*Description:[[:space:]]*/, "")
-                desc=$0
-            }
-
-            END {
-                if (name != "" && desc != "")
-                    print name "|" desc
-            }
-        '
-    )
-
-    for entry in "${SINKS[@]}"; do
-
-        sink="${entry%%|*}"
-        desc="${entry#*|}"
-        case "$desc" in
-            *HDMI*3*)
-                label="HDMI3"
-                key="HDMI3"
-                ;;
-            *HDMI*2*)
-                label="HDMI2"
-                key="HDMI2"
-                ;;
-            *HDMI*1*)
-                label="HDMI1"
-                key="HDMI1"
-                ;;
-            *Speaker*)
-                label="Speaker"
-                key="Speaker"
-                ;;
-            *Headphone*)
-                label="Headphones"
-                key="Headphones"
-                ;;
-            *)
-                label="$desc"
-                key=""
-                ;;
-        esac
-
-        if [[ -n "$key" && "${AVAIL[$key]:-yes}" == "no" ]]; then
-            label="$label (unavailable)"
-        fi
-        ARGS+=(
-            -z "$label"
-            "
-pactl set-default-sink \"$sink\" >>\"\$ACTION_LOG\" 2>&1
-
-pactl list sink-inputs short |
-    awk '{print \$1}' |
-    while read -r id; do
-        pactl move-sink-input \"\$id\" \"$sink\" >>\"\$ACTION_LOG\" 2>&1
-    done
-
-touch \"\$RESULT_FILE\"
-"
-        )
-    done
-fi
-
+###############################################################################
+# SELECT PROFILE
 ###############################################################################
 
 swaynag "${ARGS[@]}" &
@@ -289,6 +110,98 @@ swaynag "${ARGS[@]}" &
 while [[ ! -f "$RESULT_FILE" ]]; do
     sleep 0.1
 done
+
+###############################################################################
+# BUILD SINK MENU
+###############################################################################
+
+sleep 1
+
+CURRENT_SINK="$(pactl get-default-sink 2>/dev/null || true)"
+
+mapfile -t SINKS < <(
+    pactl list sinks |
+    awk '
+        /^Sink #/ {
+            if (name != "" && desc != "")
+                print name "|" desc
+
+            name=""
+            desc=""
+        }
+
+        /^[[:space:]]*Name:/ {
+            name=$2
+        }
+
+        /^[[:space:]]*Description:/ {
+            sub(/^[[:space:]]*Description:[[:space:]]*/, "")
+            desc=$0
+        }
+
+        END {
+            if (name != "" && desc != "")
+                print name "|" desc
+        }
+    '
+)
+
+echo
+echo "Available Audio Sinks"
+echo
+
+CURRENT_DESC="Current Sink"
+
+for entry in "${SINKS[@]}"; do
+
+    sink="${entry%%|*}"
+    desc="${entry#*|}"
+
+    if [[ "$sink" == "$CURRENT_SINK" ]]; then
+        CURRENT_DESC="$desc"
+        break
+    fi
+done
+
+echo "[0] Keep current sink ($CURRENT_DESC)"
+echo
+
+for i in "${!SINKS[@]}"; do
+    desc="${SINKS[$i]#*|}"
+    echo "[$((i + 1))] $desc"
+done
+
+echo
+read -rp "Select sink: " choice
+
+if [[ "$choice" == "0" ]]; then
+
+    echo
+    echo "Keeping current sink."
+
+else
+
+    index=$((choice - 1))
+
+    if (( index < 0 || index >= ${#SINKS[@]} )); then
+
+        echo
+        echo "Invalid selection."
+        exit 1
+    fi
+
+    sink="${SINKS[$index]%%|*}"
+
+    pactl set-default-sink "$sink" >>"$ACTION_LOG" 2>&1
+
+    pactl list sink-inputs short |
+        awk '{print $1}' |
+        while read -r id; do
+            pactl move-sink-input "$id" "$sink" >>"$ACTION_LOG" 2>&1
+        done
+fi
+
+###############################################################################
 
 echo
 
@@ -299,7 +212,11 @@ fi
 
 rm -f "$RESULT_FILE" "$ACTION_LOG"
 
-echo "Updated sink:"
+echo "Current profile:"
+pactl list cards | grep "Active Profile"
+
+echo
+echo "Current sink:"
 pactl get-default-sink 2>/dev/null || true
 
 echo
