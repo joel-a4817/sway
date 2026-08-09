@@ -48,7 +48,7 @@ for_window [app_id="$term" title="^$popup-f-info"] floating enable, resize set 1
 for_window [app_id="$term" title="^$popup-f-main"] floating enable, resize set 1800 400, move position center
 for_window [app_id="$term" title="^$popup-f-hardware"] floating enable, resize set 1150 700, move position center
 
-for_window [app_id="$term" title="^$popup-wifi-select"] floating enable, resize set 800 800, move position center
+for_window [app_id="$term" title="^$popup-wifi-select"] floating enable, resize set 1000 1000, move position center
 for_window [app_id="$term" title="^$popup-wifi-toggle"] floating enable, resize set 1200 300, move position center
 for_window [app_id="$term" title="^$popup-wifi-status"] floating enable, resize set 1500 1000, move position center
 for_window [app_id="$term" title="^$popup-audio-select"] floating enable, resize set 1400 600,  move position center
