@@ -44,22 +44,43 @@ while IFS='|' read -r profile description available; do
 
     [[ "$profile" == "off" ]] && continue
 
-    label="$description"
+    if [[ "$description" == *"Pro Audio"* ]]; then
 
-    case "$description" in
-        *Headphone*)
-            label="Headphones"
-            ;;
-        *Speaker*)
-            label="Speaker"
-            ;;
-        *pro-audio*)
-            label="Pro Audio"
-            ;;
-    esac
+    label="Pro Audio"
 
-    [[ "$available" == "no" ]] &&
-        label="$label (unavailable)"
+elif [[ "$profile" == "input:analog-stereo" ]]; then
+
+    label="Mic Only"
+
+elif [[ "$description" == *"Analog Stereo Duplex"* ]]; then
+
+    label="Analog + Mic"
+
+elif [[ "$description" == *"Analog Stereo Output"* ]]; then
+
+    label="Analog"
+
+elif [[ "$description" == *"HDMI"* ]]; then
+
+    hdmi="1"
+    [[ "$description" == *"HDMI 2"* ]] && hdmi="2"
+    [[ "$description" == *"HDMI 3"* ]] && hdmi="3"
+
+    label="HDMI${hdmi}"
+
+    if [[ "$description" == *"7.1"* ]]; then
+        label+=" 7.1"
+    elif [[ "$description" == *"5.1"* ]]; then
+        label+=" 5.1"
+    fi
+
+    if [[ "$description" == *"Input"* ]]; then
+        label+=" + Mic"
+    fi
+
+fi
+
+    [[ "$available" == "no" ]] && continue
 
     add_profile_button "$label" "$profile"
 
@@ -72,8 +93,8 @@ done < <(
 
         sub(/^[[:space:]]*/, "", line)
 
-        profile=line
-        sub(/:.*/, "", profile)
+        split(line, parts, ": ")
+        profile = parts[1]
 
         desc=line
         sub(/^[^:]*:[[:space:]]*/, "", desc)
@@ -108,30 +129,10 @@ sleep 1
 CURRENT_SINK="$(pactl get-default-sink 2>/dev/null || true)"
 
 mapfile -t SINKS < <(
-    pactl list sinks |
-    awk '
-        /^Sink #/ {
-            if (name != "" && desc != "")
-                print name "|" desc
-
-            name=""
-            desc=""
-        }
-
-        /^[[:space:]]*Name:/ {
-            name=$2
-        }
-
-        /^[[:space:]]*Description:/ {
-            sub(/^[[:space:]]*Description:[[:space:]]*/, "")
-            desc=$0
-        }
-
-        END {
-            if (name != "" && desc != "")
-                print name "|" desc
-        }
-    '
+    pactl list short sinks |
+    awk '{
+        print $2 "|" $2
+    }'
 )
 
 echo
