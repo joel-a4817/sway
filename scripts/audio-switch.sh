@@ -43,24 +43,11 @@ touch \"\$RESULT_FILE\"
 while IFS='|' read -r profile description available; do
 
     [[ "$profile" == "off" ]] && continue
+      label=""
 
-      label="$description"
-
-      if [[ "$description" == *"Pro Audio"* ]]; then
-          label="Pro Audio"
-      fi
-
-      if [[ "$profile" == "input:analog-stereo" ]]; then
-          label="Mic Only"
-      fi
-
-      if [[ "$description" == *"Analog Stereo Duplex"* ]]; then
-          label="Analog + Mic"
-      fi
-
-      if [[ "$description" == *"Analog Stereo Output"* ]]; then
-          label="Analog"
-      fi
+      ###############################################################################
+      # OUTPUT TYPE (highest priority)
+      ###############################################################################
 
       if [[ "$description" == *"HDMI"* ]]; then
 
@@ -70,13 +57,63 @@ while IFS='|' read -r profile description available; do
 
           label="HDMI${hdmi}"
 
-          [[ "$description" == *"7.1"* ]] && label+=" 7.1"
-          [[ "$description" == *"5.1"* ]] && label+=" 5.1"
+      elif [[ "$description" == *"Analog"* ]]; then
 
-          if [[ "$description" == *"Input"* ]]; then
-              label+=" + Mic"
-          fi
+          label="Analog"
+
+      elif [[ "$description" == *"Headphone"* ]]; then
+
+          label="Headphones"
+
+      elif [[ "$description" == *"Speaker"* ]]; then
+
+          label="Speaker"
+
+      elif [[ "$description" == *"Bluetooth"* ]]; then
+
+          label="Bluetooth"
+
+      elif [[ "$description" == *"USB"* ]]; then
+
+          label="USB"
+
+      else
+
+          label="$description"
+
       fi
+
+      ###############################################################################
+      # CHANNEL LAYOUT
+      ###############################################################################
+
+      [[ "$description" == *"7.1"* ]] && label+=" 7.1"
+      [[ "$description" == *"5.1"* ]] && label+=" 5.1"
+
+      ###############################################################################
+      # INPUT CAPABILITY
+      ###############################################################################
+
+      if [[ "$description" == *"Duplex"* ]]; then
+
+          label+=" + Mic"
+
+      elif [[ "$description" == *"Input"* ]] &&
+           [[ "$description" != *"Output"* ]]; then
+
+          label="Mic Only"
+
+      elif [[ "$description" == *"Input"* ]]; then
+
+          label+=" + Mic"
+
+      fi
+
+      ###############################################################################
+      # SPECIAL CASES
+      ###############################################################################
+
+      [[ "$description" == *"Pro Audio"* ]] && label="Pro Audio"
 
     [[ "$available" == "no" ]] && continue
 
