@@ -44,41 +44,39 @@ while IFS='|' read -r profile description available; do
 
     [[ "$profile" == "off" ]] && continue
 
-    if [[ "$description" == *"Pro Audio"* ]]; then
+      label="$description"
 
-    label="Pro Audio"
+      if [[ "$description" == *"Pro Audio"* ]]; then
+          label="Pro Audio"
+      fi
 
-elif [[ "$profile" == "input:analog-stereo" ]]; then
+      if [[ "$profile" == "input:analog-stereo" ]]; then
+          label="Mic Only"
+      fi
 
-    label="Mic Only"
+      if [[ "$description" == *"Analog Stereo Duplex"* ]]; then
+          label="Analog + Mic"
+      fi
 
-elif [[ "$description" == *"Analog Stereo Duplex"* ]]; then
+      if [[ "$description" == *"Analog Stereo Output"* ]]; then
+          label="Analog"
+      fi
 
-    label="Analog + Mic"
+      if [[ "$description" == *"HDMI"* ]]; then
 
-elif [[ "$description" == *"Analog Stereo Output"* ]]; then
+          hdmi="1"
+          [[ "$description" == *"HDMI 2"* ]] && hdmi="2"
+          [[ "$description" == *"HDMI 3"* ]] && hdmi="3"
 
-    label="Analog"
+          label="HDMI${hdmi}"
 
-elif [[ "$description" == *"HDMI"* ]]; then
+          [[ "$description" == *"7.1"* ]] && label+=" 7.1"
+          [[ "$description" == *"5.1"* ]] && label+=" 5.1"
 
-    hdmi="1"
-    [[ "$description" == *"HDMI 2"* ]] && hdmi="2"
-    [[ "$description" == *"HDMI 3"* ]] && hdmi="3"
-
-    label="HDMI${hdmi}"
-
-    if [[ "$description" == *"7.1"* ]]; then
-        label+=" 7.1"
-    elif [[ "$description" == *"5.1"* ]]; then
-        label+=" 5.1"
-    fi
-
-    if [[ "$description" == *"Input"* ]]; then
-        label+=" + Mic"
-    fi
-
-fi
+          if [[ "$description" == *"Input"* ]]; then
+              label+=" + Mic"
+          fi
+      fi
 
     [[ "$available" == "no" ]] && continue
 
