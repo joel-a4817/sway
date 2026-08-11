@@ -134,7 +134,6 @@ bindsym --no-repeat $mod+Mod1+f fullscreen disable; exec bash -c 'appimage-run /
 bindsym --no-repeat $mod+Mod5+l fullscreen disable; exec $term -e bash -c 'prismlauncher --launch "1.21.9(1)"'
 bindsym --no-repeat $mod+Mod5+h fullscreen disable; exec $term -e bash -c 'prismlauncher --launch "1.21.4"'
 bindsym --no-repeat $mod+Mod5+b fullscreen disable; exec $term -e bash -c 'prismlauncher --launch "Enhanced Bedwars 1.8.9"'
-bindsym --no-repeat $mod+Mod5+s exec bash -c 'syncthing; syncthing browser'
 bindsym --no-repeat $mod+Mod5+p fullscreen disable; exec ~/papercut/pc-client-linux.sh
 
 #wifi
