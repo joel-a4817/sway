@@ -137,9 +137,9 @@ bindsym --no-repeat $mod+Mod5+b fullscreen disable; exec $term -e bash -c 'prism
 bindsym --no-repeat $mod+Mod5+p fullscreen disable; exec ~/papercut/pc-client-linux.sh
 
 #wifi
-bindsym --no-repeat $mod+F10 exec $term -T "$popup-wifi-select" -e bash -c '~/.config/sway/scripts/network/wifi-select.sh'
-bindsym --no-repeat $mod+F11 exec $term -T "$popup-wifi-toggle" -e bash -c '~/.config/sway/scripts/network/wifi-toggle.sh'
-bindsym --no-repeat $mod+F9 exec $term -T "$popup-wifi-status" -e bash -c 'nmcli dev status; echo; nmcli dev wifi list; echo; read -n 1 -rsp "Press any key to close..."'
+bindsym --no-repeat $mod+F10 fullscreen disable; exec $term -T "$popup-wifi-select" -e bash -c '~/.config/sway/scripts/network/wifi-select.sh'
+bindsym --no-repeat $mod+F11 fullscreen disable; exec $term -T "$popup-wifi-toggle" -e bash -c '~/.config/sway/scripts/network/wifi-toggle.sh'
+bindsym --no-repeat $mod+F9 fullscreen disable; exec $term -T "$popup-wifi-status" -e bash -c 'nmcli dev status; echo; nmcli dev wifi list; echo; read -n 1 -rsp "Press any key to close..."'
 
 #fastfetch
 bindsym --locked --no-repeat $mod+Control+w fullscreen disable; exec $term -T "$popup-f-wifi" -e bash -c '~/.config/sway/scripts/fastfetch/f-wifi.sh; read -n 1 -rsp "Press any key to close..."'
@@ -155,7 +155,7 @@ bindsym --no-repeat $mod+F5 exec bash -c '~/.config/sway/scripts/screen-capture.
 #screenshot
 
 #audio device output switch
-bindsym --locked --no-repeat $mod+F7 exec $term -T "$popup-audio-select" -e bash -c '~/.config/sway/scripts/audio-switch.sh'
+bindsym --locked --no-repeat $mod+F7 fullscreen disable; exec $term -T "$popup-audio-select" -e bash -c '~/.config/sway/scripts/audio-switch.sh'
 
 #mount dev
 bindsym --no-repeat $mod+F8 fullscreen disable; exec $term -T "$popup-mount" -e bash -c '/home/joel/.config/sway/scripts/mount/mount-swaynag.sh'
