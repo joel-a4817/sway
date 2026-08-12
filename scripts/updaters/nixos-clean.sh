@@ -9,6 +9,7 @@ swaynag \
     -t warning \
     -y overlay \
     -m "NixOS Maintenance" \
+    -z "run bleachbit" 'xhost si:localuser:root; sudo bleachbit -c --all-but-warning; xhost -si:localuser:root; touch "'"$RESULT_FILE"'"' \
     -z "Clean old generations and optimise store" \
 '
 sudo nix-collect-garbage -d
