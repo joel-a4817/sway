@@ -36,7 +36,7 @@ case "$MODE" in
             --audio-format mp3 \
             --audio-quality 0 \
             --force-overwrites \
-            -P ~/Media/Music \
+            -P ~/Downloads/Music \
             "https://youtube.com/playlist?list=PLPxzU5kNqyqU&si=LJw9jQ6tvBfz5qAe"
         ;;
     single)
@@ -50,7 +50,7 @@ case "$MODE" in
             --audio-format mp3 \
             --audio-quality 0 \
             --force-overwrites \
-            -P ~/Media/Music \
+            -P ~/Downloads/Music \
             "$URL"
         ;;
 esac
