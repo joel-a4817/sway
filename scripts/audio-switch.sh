@@ -140,23 +140,31 @@ mapfile -t SINKS < <(
 
         label="$sink"
 
-        case "$sink" in
+        case "$sink" in 
+            *pro-output-[0-9]*)
+                label="$(grep -o 'pro-output-[0-9]\+' <<< "$sink")"
+                ;;
+            *analog*)
+                label="analog-stereo"
+                ;;
+            *hdmi*)
+                label="HDMI"
+                ;;
+            *HyperX_Cloud_III*)
+                label="Cloud III USB"
+                ;;
             *Headphones*)
                 label="Headphones"
                 ;;
-
             *Speaker*)
                 label="Speaker"
                 ;;
-
             *HDMI1*)
                 label="HDMI 1"
                 ;;
-
             *HDMI2*)
                 label="HDMI 2"
                 ;;
-
             *HDMI3*)
                 label="HDMI 3"
                 ;;
