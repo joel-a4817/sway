@@ -169,20 +169,8 @@ out_sofalizer="$HOME/Downloads/Music/favourites eq/sofalizer"
 out_earpods_fir_sofalizer="$HOME/Downloads/Music/favourites eq/earpods fir + sofalizer"
 out_cloud3_fir_sofalizer="$HOME/Downloads/Music/favourites eq/cloud3 fir + sofalizer"
 
-mkdir -p "$covers_dir"
-
-mkdir -p "$out_bs2b"
-
-mkdir -p "$out_earpods_fir"
-mkdir -p "$out_cloud3_fir"
-
-mkdir -p "$out_earpods_fir_bs2b"
-mkdir -p "$out_cloud3_fir_bs2b"
-
-mkdir -p "$out_sofalizer"
-
-mkdir -p "$out_earpods_fir_sofalizer"
-mkdir -p "$out_cloud3_fir_sofalizer"
+out_earpods_ash="$HOME/Downloads/Music/favourites eq/ash earpods"
+out_cloud3_ash="$HOME/Downloads/Music/favourites eq/ash cloud3"
 
 selected() {
     local wanted="$1"
@@ -209,17 +197,26 @@ process_file() {
         -of default=noprint_wrappers=1:nokey=1 \
         "$input")"
 
+    local ash_rate
+
+    if (( rate > 96000 )); then
+        ash_rate=96000
+    else
+        ash_rate="$rate"
+    fi
+
     local earpods_ir
-    earpods_ir="$HOME/Documents/prefs/audio/output/earpods_stereo/earpods_stereo minimum phase ${rate}Hz.wav"
+    earpods_ir="$HOME/Documents/prefs/audio/output1/earpods_stereo/earpods_stereo minimum phase ${rate}Hz.wav"
 
     local cloud3_ir
-    cloud3_ir="$HOME/Documents/prefs/audio/output/cloud3_stereo/cloud3_stereo minimum phase ${rate}Hz.wav"
+    cloud3_ir="$HOME/Documents/prefs/audio/output1/cloud3_stereo/cloud3_stereo minimum phase ${rate}Hz.wav"
 
     echo
     echo "processing: $file_basename"
 
     # earpods fir only
     if selected 1; then
+        mkdir -p "$out_earpods_fir"
 
         ffmpeg "${ffmpeg_opts[@]}" -y \
             -i "$input" \
@@ -235,6 +232,7 @@ process_file() {
 
     # cloud3 fir only
     if selected 2; then
+        mkdir -p "$out_cloud3_fir"
 
         ffmpeg "${ffmpeg_opts[@]}" -y \
             -i "$input" \
@@ -250,6 +248,7 @@ process_file() {
 
     # bs2b only (bauer)
     if selected 3; then
+        mkdir -p "$out_bs2b"
 
         ffmpeg "${ffmpeg_opts[@]}" -y \
             -i "$input" \
@@ -264,12 +263,13 @@ process_file() {
 
     # earpods fir + bs2b
     if selected 4; then
+        mkdir -p "$out_earpods_fir_bs2b"
 
         ffmpeg "${ffmpeg_opts[@]}" -y \
             -i "$input" \
             -i "$earpods_ir" \
             -vn \
-            -filter_complex "[0:a]bs2b=fcut=${bs2b_fcut}:feed=${bs2b_feed}[b];[b][1:a]afir=irnorm=-1" \
+            -filter_complex "[0:a][1:a]afir=irnorm=-1[f];[f]bs2b=fcut=${bs2b_fcut}:feed=${bs2b_feed}" \
             -c:a alac \
             "$out_earpods_fir_bs2b/${stem}.m4a"
 
@@ -279,12 +279,13 @@ process_file() {
 
     # cloud3 fir + bs2b
     if selected 5; then
+        mkdir -p "$out_cloud3_fir_bs2b"
 
         ffmpeg "${ffmpeg_opts[@]}" -y \
             -i "$input" \
             -i "$cloud3_ir" \
             -vn \
-            -filter_complex "[0:a]bs2b=fcut=${bs2b_fcut}:feed=${bs2b_feed}[b];[b][1:a]afir=irnorm=-1" \
+            -filter_complex "[0:a][1:a]afir=irnorm=-1[f];[f]bs2b=fcut=${bs2b_fcut}:feed=${bs2b_feed}" \
             -c:a alac \
             "$out_cloud3_fir_bs2b/${stem}.m4a"
 
@@ -295,6 +296,7 @@ process_file() {
     
     # sofalizer only
     if selected 6; then
+        mkdir -p "$out_sofalizer"
 
         get_sofa_gain "$input"
         gain="$sofa_track_gain"
@@ -315,6 +317,7 @@ process_file() {
 
     # earpods fir + sofalizer
     if selected 7; then
+        mkdir -p "$out_earpods_fir_sofalizer"
 
         get_sofa_gain "$input"
         gain="$sofa_track_gain"
@@ -337,7 +340,8 @@ process_file() {
 
     # cloud3 fir + sofalizer
     if selected 8; then
-        
+        mkdir -p "$out_cloud3_fir_sofalizer"
+
         get_sofa_gain "$input"
         gain="$sofa_track_gain"
 
@@ -354,6 +358,40 @@ process_file() {
 
         copy_cover_and_tags "$input" \
             "$out_cloud3_fir_sofalizer/${stem}.m4a"
+
+    fi
+    # earpods ash
+    if selected 9; then
+        mkdir -p "$out_earpods_ash"
+
+        ffmpeg "${ffmpeg_opts[@]}" -y \
+            -i "$input" \
+            -i "$HOME/Documents/prefs/audio/ASH-Toolset earpods/BRIR_True_Stereo.wav" \
+            -i "$HOME/Documents/prefs/audio/ASH-Toolset earpods/Apple_EarPods_Averaged_Measurements.wav" \
+            -vn \
+            -filter_complex "[0:a][2:a]afir=irnorm=-1[c];[c][1:a]afir=irnorm=-1" \
+            -ar "${ash_rate}" \
+            -c:a alac \
+            "$out_earpods_ash/${stem}.m4a"
+
+        copy_cover_and_tags "$input" "$out_earpods_ash/${stem}.m4a"
+
+    fi
+    # cloud3 ash
+    if selected 10; then
+        mkdir -p "$out_cloud3_ash"
+
+        ffmpeg "${ffmpeg_opts[@]}" -y \
+            -i "$input" \
+            -i "$HOME/Documents/prefs/audio/ASH-Toolset cloud3/BRIR_True_Stereo.wav" \
+            -i "$HOME/Documents/prefs/audio/ASH-Toolset cloud3/HyperX_Cloud_III_Rtings.wav" \
+            -vn \
+            -filter_complex "[0:a][2:a]afir=irnorm=-1[c];[c][1:a]afir=irnorm=-1" \
+            -ar "${ash_rate}" \
+            -c:a alac \
+            "$out_cloud3_ash/${stem}.m4a"
+
+        copy_cover_and_tags "$input" "$out_cloud3_ash/${stem}.m4a"
 
     fi
 }
@@ -410,6 +448,8 @@ echo
 file_basename="$(basename "$input")"
 stem="${file_basename%.*}"
 
+mkdir -p "$covers_dir"
+
 ffmpeg "${ffmpeg_opts[@]}" -y \
     -i "$input" \
     -an \
@@ -420,7 +460,7 @@ ffmpeg "${ffmpeg_opts[@]}" -y \
 
 echo
 
-profile_selection="1,2,3,4,5,6,7,8"
+profile_selection="1,2,3,4,5,6,7,8,9,10"
 
 process_file "$input"
 
@@ -429,6 +469,8 @@ process_file "$input"
 elif [[ "$mode" == "covers" ]]; then
 
     echo "extracting covers..."
+
+    mkdir -p "$covers_dir"
 
     find "$src" -type f \
         \( -iname "*.m4a" -o \
@@ -475,8 +517,9 @@ echo "[5] cloud3 fir + bs2b"
 echo "[6] sofalizer"
 echo "[7] earpods fir + sofalizer"
 echo "[8] cloud3 fir + sofalizer"
-echo
-echo "[9] update all folders"
+echo "[9] earpods ash"
+echo "[10] cloud3 ash"
+echo "[11] update all folders"
 echo
 
 read -rp "selection: " profile_selection
@@ -488,12 +531,12 @@ if [[ "$profile_selection" == "0" ]]; then
     exit 0
 fi
 
-if [[ "$profile_selection" == "9" ]]; then
-    profile_selection="1,2,3,4,5,6,7,8"
+if [[ "$profile_selection" == "11" ]]; then
+    profile_selection="1,2,3,4,5,6,7,8,9,10"
 fi
 
 for item in ${profile_selection//,/ }; do
-    if ! [[ "$item" =~ ^[1-8]$ ]]; then
+    if ! [[ "$item" =~ ^(1|2|3|4|5|6|7|8|9|10)$ ]]; then
         echo "invalid selection: $item"
         exit 1
     fi
