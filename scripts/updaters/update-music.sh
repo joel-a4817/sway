@@ -197,14 +197,6 @@ process_file() {
         -of default=noprint_wrappers=1:nokey=1 \
         "$input")"
 
-    local ash_rate
-
-    if (( rate > 96000 )); then
-        ash_rate=96000
-    else
-        ash_rate="$rate"
-    fi
-
     local earpods_ir
     earpods_ir="$HOME/Documents/prefs/audio/output1/earpods_stereo/earpods_stereo minimum phase ${rate}Hz.wav"
 
@@ -370,7 +362,7 @@ process_file() {
             -i "$HOME/Documents/prefs/audio/ASH-Toolset earpods/Apple_EarPods_Averaged_Measurements.wav" \
             -vn \
             -filter_complex "[0:a][2:a]afir=irnorm=-1[c];[c][1:a]afir=irnorm=-1" \
-            -ar "${ash_rate}" \
+            -ar 96000 \
             -c:a alac \
             "$out_earpods_ash/${stem}.m4a"
 
@@ -387,7 +379,7 @@ process_file() {
             -i "$HOME/Documents/prefs/audio/ASH-Toolset cloud3/HyperX_Cloud_III_Rtings.wav" \
             -vn \
             -filter_complex "[0:a][2:a]afir=irnorm=-1[c];[c][1:a]afir=irnorm=-1" \
-            -ar "${ash_rate}" \
+            -ar 96000 \
             -c:a alac \
             "$out_cloud3_ash/${stem}.m4a"
 
