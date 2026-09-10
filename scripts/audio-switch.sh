@@ -40,7 +40,7 @@ touch \"\$RESULT_FILE\"
 # DISCOVER PROFILES
 ###############################################################################
 
-while IFS='|' read -r profile description available; do
+while IFS='|' read -r card profile description available; do
 
     [[ "$profile" == "off" ]] && continue
 
@@ -92,24 +92,53 @@ while IFS='|' read -r profile description available; do
           fi
       fi
 
+      if [[ "$card" == *HyperX_Cloud_III* ]]; then
+          case "$profile" in
+              output:analog-stereo)
+                  label="Cloud III Analog"
+                  ;;
+              output:analog-stereo+input:mono-fallback)
+                  label="Cloud III Analog + Mic"
+                  ;;
+              output:iec958-stereo)
+                  label="Cloud III Digital"
+                  ;;
+              output:iec958-stereo+input:mono-fallback)
+                  label="Cloud III Digital + Mic"
+                  ;;
+              input:mono-fallback)
+                  label="Cloud III Mic"
+                  ;;
+          esac
+      fi
+
     [[ "$available" == "no" ]] && continue
 
     add_profile_button "$label" "$profile"
 
 done < <(
     pactl list cards | awk '
+    /^[[:space:]]*Name:/ {
+        card=$0
+        sub(/^[[:space:]]*Name:[[:space:]]*/, "", card)
+    }
+
     /^[[:space:]]*[A-Za-z0-9].*[[:space:]]\(sinks:/ {
         line=$0
         sub(/^[[:space:]]*/, "", line)
+
         split(line, parts, ": ")
         profile = parts[1]
+
         desc=line
         sub(/^[^:]*:[[:space:]]*/, "", desc)
         sub(/[[:space:]]+\(sinks:.*/, "", desc)
+
         avail="yes"
         if (line ~ /available:[[:space:]]*no/)
             avail="no"
-        print profile "|" desc "|" avail
+
+        print card "|" profile "|" desc "|" avail
     }
     '
 )
@@ -142,7 +171,7 @@ mapfile -t SINKS < <(
 
         case "$sink" in 
             *pro-output-[0-9]*)
-                label="$(grep -o 'pro-output-[0-9]\+' <<< "$sink")"
+                label="${sink##*.}"
                 ;;
             *analog*)
                 label="analog-stereo"
