@@ -28,6 +28,42 @@ get_sofa_gain() {
     fi
 }
 
+get_ash_gain() {
+    local input="$1"
+    local brir="$2"
+    local hp_ir="$3"
+
+    local peak
+
+    peak="$(
+        ffmpeg \
+            -hide_banner \
+            -i "$input" \
+            -i "$brir" \
+            -i "$hp_ir" \
+            -filter_complex \
+            "[0:a]aresample=96000[a];[a][2:a]afir=irnorm=-1[c];[c][1:a]afir=irnorm=-1,astats=metadata=1:reset=0" \
+            -f null - 2>&1 |
+        awk -F': ' '
+            /Peak level dB/ { peak=$2 }
+            END { print peak }
+        '
+    )"
+
+    awk -v p="$peak" '
+        BEGIN {
+            g = -p
+
+            g = int(g * 10) / 10.0
+
+            if (g > -p)
+                g -= 0.1
+
+            printf "%.1f\n", g
+        }
+    '
+}
+
 # ==================================================
 # dsp settings
 # ==================================================
@@ -352,40 +388,88 @@ process_file() {
             "$out_cloud3_fir_sofalizer/${stem}.m4a"
 
     fi
+
     # earpods ash
     if selected 9; then
         mkdir -p "$out_earpods_ash"
+        gain="$(
+            get_ash_gain \
+                "$input" \
+                "$HOME/Documents/prefs/audio/ASH-Toolset earpods/BRIR_True_Stereo.wav" \
+                "$HOME/Documents/prefs/audio/ASH-Toolset earpods/Apple_EarPods_Averaged_Measurements.wav"
+        )"
 
         ffmpeg "${ffmpeg_opts[@]}" -y \
             -i "$input" \
             -i "$HOME/Documents/prefs/audio/ASH-Toolset earpods/BRIR_True_Stereo.wav" \
             -i "$HOME/Documents/prefs/audio/ASH-Toolset earpods/Apple_EarPods_Averaged_Measurements.wav" \
             -vn \
-            -filter_complex "[0:a][2:a]afir=irnorm=-1[c];[c][1:a]afir=irnorm=-1" \
-            -ar 96000 \
+            -filter_complex "[0:a]aresample=96000,volume=${gain}dB[a];[a][2:a]afir=irnorm=-1[c];[c][1:a]afir=irnorm=-1" \
             -c:a alac \
             "$out_earpods_ash/${stem}.m4a"
 
         copy_cover_and_tags "$input" "$out_earpods_ash/${stem}.m4a"
 
     fi
+
     # cloud3 ash
     if selected 10; then
         mkdir -p "$out_cloud3_ash"
+        gain="$(
+            get_ash_gain \
+                "$input" \
+                "$HOME/Documents/prefs/audio/ASH-Toolset cloud3/BRIR_True_Stereo.wav" \
+                "$HOME/Documents/prefs/audio/ASH-Toolset cloud3/HyperX_Cloud_III_Rtings.wav"
+        )"
 
         ffmpeg "${ffmpeg_opts[@]}" -y \
             -i "$input" \
             -i "$HOME/Documents/prefs/audio/ASH-Toolset cloud3/BRIR_True_Stereo.wav" \
             -i "$HOME/Documents/prefs/audio/ASH-Toolset cloud3/HyperX_Cloud_III_Rtings.wav" \
             -vn \
-            -filter_complex "[0:a][2:a]afir=irnorm=-1[c];[c][1:a]afir=irnorm=-1" \
-            -ar 96000 \
+            -filter_complex "[0:a]aresample=96000,volume=${gain}dB[a];[a][2:a]afir=irnorm=-1[c];[c][1:a]afir=irnorm=-1" \
             -c:a alac \
             "$out_cloud3_ash/${stem}.m4a"
 
         copy_cover_and_tags "$input" "$out_cloud3_ash/${stem}.m4a"
 
     fi
+}
+
+choose_profiles() {
+    echo "[0] cancel"
+    echo "[1] earpods fir"
+    echo "[2] cloud3 fir"
+    echo "[3] bs2b"
+    echo "[4] earpods fir + bs2b"
+    echo "[5] cloud3 fir + bs2b"
+    echo "[6] sofalizer"
+    echo "[7] earpods fir + sofalizer"
+    echo "[8] cloud3 fir + sofalizer"
+    echo "[9] earpods ash"
+    echo "[10] cloud3 ash"
+    echo "[11] process all profiles"
+    echo
+
+    read -rp "selection: " profile_selection
+
+    profile_selection="${profile_selection// /}"
+
+    if [[ "$profile_selection" == "0" ]]; then
+        echo "cancelled."
+        exit 0
+    fi
+
+    if [[ "$profile_selection" == "11" ]]; then
+        profile_selection="1,2,3,4,5,6,7,8,9,10"
+    fi
+
+    for item in ${profile_selection//,/ }; do
+        if ! [[ "$item" =~ ^(1|2|3|4|5|6|7|8|9|10)$ ]]; then
+            echo "invalid selection: $item"
+            exit 1
+        fi
+    done
 }
 
 swaynag \
@@ -450,9 +534,9 @@ ffmpeg "${ffmpeg_opts[@]}" -y \
     "$covers_dir/$stem.png" \
     >/dev/null 2>&1 || true
 
-echo
+choose_profiles
 
-profile_selection="1,2,3,4,5,6,7,8,9,10"
+echo
 
 process_file "$input"
 
@@ -498,41 +582,7 @@ elif [[ "$mode" == "covers" ]]; then
 
 elif [[ "$mode" == "full" ]]; then
 
-echo
-echo "[0] keep existing files (exit)"
-echo
-echo "[1] earpods fir"
-echo "[2] cloud3 fir"
-echo "[3] bs2b"
-echo "[4] earpods fir + bs2b"
-echo "[5] cloud3 fir + bs2b"
-echo "[6] sofalizer"
-echo "[7] earpods fir + sofalizer"
-echo "[8] cloud3 fir + sofalizer"
-echo "[9] earpods ash"
-echo "[10] cloud3 ash"
-echo "[11] update all folders"
-echo
-
-read -rp "selection: " profile_selection
-
-profile_selection="${profile_selection// /}"
-
-if [[ "$profile_selection" == "0" ]]; then
-    echo "keeping existing files."
-    exit 0
-fi
-
-if [[ "$profile_selection" == "11" ]]; then
-    profile_selection="1,2,3,4,5,6,7,8,9,10"
-fi
-
-for item in ${profile_selection//,/ }; do
-    if ! [[ "$item" =~ ^(1|2|3|4|5|6|7|8|9|10)$ ]]; then
-        echo "invalid selection: $item"
-        exit 1
-    fi
-done
+choose_profiles
 
 mapfile -d '' files < <(
 find "$src" -type f \( \

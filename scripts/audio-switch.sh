@@ -245,7 +245,7 @@ else
         mapfile -t RANDOM_CANDIDATES < <(
             printf '%s\n' "${SINKS[@]}" |
             cut -d'|' -f1 |
-            grep -E '^(earpods_fir.*|alsa_output.*Headphones.*)$'
+            grep -E '^(earpods.*|alsa_output.*Headphones.*)$'
         )
 
         sink="$(
@@ -261,7 +261,7 @@ else
         mapfile -t RANDOM_CANDIDATES < <(
             printf '%s\n' "${SINKS[@]}" |
             cut -d'|' -f1 |
-            grep -E '^(cloud3_fir.*|alsa_output.*Headphones.*)$'
+            grep -E '^(cloud3.*|alsa_output.*Headphones.*)$'
         )
 
         sink="$(
