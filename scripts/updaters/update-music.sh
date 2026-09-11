@@ -16,8 +16,94 @@ ffmpeg_opts=(
     -nostats
 )
 
+audio_find_args=(
+    \(
+    -iname "*.m4a"
+    -o -iname "*.aac"
+    -o -iname "*.mp3"
+    -o -iname "*.flac"
+    -o -iname "*.wav"
+    -o -iname "*.ogg"
+    -o -iname "*.opus"
+    \)
+)
+
 profile_selection=""
 sofa_track_gain=""
+
+playlist_root="$HOME/Downloads/Music/favourites eq"
+
+playlist_for_profile() {
+    case "$1" in
+        1) echo "$playlist_root/earpods fir.m3u" ;;
+        2) echo "$playlist_root/cloud3 fir.m3u" ;;
+        3) echo "$playlist_root/bs2b.m3u" ;;
+        4) echo "$playlist_root/earpods fir + bs2b.m3u" ;;
+        5) echo "$playlist_root/cloud3 fir + bs2b.m3u" ;;
+        6) echo "$playlist_root/sofalizer.m3u" ;;
+        7) echo "$playlist_root/earpods fir + sofalizer.m3u" ;;
+        8) echo "$playlist_root/cloud3 fir + sofalizer.m3u" ;;
+        9) echo "$playlist_root/ash earpods.m3u" ;;
+        10) echo "$playlist_root/ash cloud3.m3u" ;;
+    esac
+}
+
+build_playlist() {
+    local profile="$1"
+    local playlist
+    local dir
+
+    playlist="$(playlist_for_profile "$profile")"
+
+    case "$profile" in
+        1) dir="$out_earpods_fir" ;;
+        2) dir="$out_cloud3_fir" ;;
+        3) dir="$out_bs2b" ;;
+        4) dir="$out_earpods_fir_bs2b" ;;
+        5) dir="$out_cloud3_fir_bs2b" ;;
+        6) dir="$out_sofalizer" ;;
+        7) dir="$out_earpods_fir_sofalizer" ;;
+        8) dir="$out_cloud3_fir_sofalizer" ;;
+        9) dir="$out_earpods_ash" ;;
+        10) dir="$out_cloud3_ash" ;;
+    esac
+
+    [[ -d "$dir" ]] || return 0
+
+    {
+        echo '#EXTM3U'
+
+        find "$dir" -type f "${audio_find_args[@]}" |
+        sort -V -r |
+        while read -r file; do
+            realpath --relative-to="$playlist_root" "$file"
+        done
+    } > "$playlist"
+}
+
+sync_favourites_playlist() {
+    local playlist="$HOME/Downloads/Music/favourites.m3u"
+    local tmp
+
+    tmp="$(mktemp)"
+
+    {
+        echo '#EXTM3U'
+
+        find "$src" -maxdepth 1 -type f "${audio_find_args[@]}" |
+        sort -V -r |
+        while read -r file; do
+            printf 'favourites/%s\n' "$(basename "$file")"
+        done
+    } > "$tmp"
+
+    if ! cmp -s "$tmp" "$playlist"; then
+        echo "updating favourites playlist..."
+        mv "$tmp" "$playlist"
+    else
+        rm -f "$tmp"
+    fi
+}
 
 get_sofa_gain() {
     local input="$1"
@@ -190,6 +276,7 @@ copy_cover_and_tags() {
 # ==================================================
 
 src="$HOME/Downloads/Music/favourites"
+
 covers_dir="$HOME/Downloads/Music/covers"
 
 out_bs2b="$HOME/Downloads/Music/favourites eq/bs2b"
@@ -498,6 +585,8 @@ rm -f "$result_file"
 mode="$(cat "$mode_file" 2>/dev/null || true)"
 rm -f "$mode_file"
 
+sync_favourites_playlist
+
 if [[ "$mode" == "single" ]]; then
     echo
     echo "enter filename from favourites or absolute path:"
@@ -540,6 +629,10 @@ echo
 
 process_file "$input"
 
+for item in ${profile_selection//,/ }; do
+    build_playlist "$item"
+done
+
 # covers
 
 elif [[ "$mode" == "covers" ]]; then
@@ -548,16 +641,8 @@ elif [[ "$mode" == "covers" ]]; then
 
     mkdir -p "$covers_dir"
 
-    find "$src" -type f \
-        \( -iname "*.m4a" -o \
-           -iname "*.mp3" -o \
-           -iname "*.flac" -o \
-           -iname "*.aac" -o \
-           -iname "*.ogg" -o \
-           -iname "*.opus" \
-        \) \
-        -print0 |
-    while ifs= read -r -d '' file; do
+    find "$src" -type f "${audio_find_args[@]}" -print0 |
+    while IFS= read -r -d '' file; do
 
         base="$(basename "${file%.*}")"
         out="$covers_dir/$base.png"
@@ -585,19 +670,15 @@ elif [[ "$mode" == "full" ]]; then
 choose_profiles
 
 mapfile -d '' files < <(
-find "$src" -type f \( \
-    -iname "*.m4a" -o \
-    -iname "*.aac" -o \
-    -iname "*.mp3" -o \
-    -iname "*.flac" -o \
-    -iname "*.wav" -o \
-    -iname "*.ogg" -o \
-    -iname "*.opus" \
-\) -print0
+  find "$src" -type f "${audio_find_args[@]}" -print0
 )
 
 for file in "${files[@]}"; do
     process_file "$file"
+done
+
+for item in ${profile_selection//,/ }; do
+    build_playlist "$item"
 done
 
 fi
