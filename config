@@ -326,4 +326,5 @@ bindsym --no-repeat $mod+r mode "resize"
      bindsym --locked XF86MonBrightnessDown exec brightnessctl set 5%-
      bindsym --locked XF86MonBrightnessUp exec brightnessctl set 5%+
 
-     bindsym --locked Print exec "printf 'cycle pause\n' | socat - /tmp/mpvsocket"     
+     bindsym --locked Print exec "printf 'cycle pause\n' | socat - /tmp/mpvsocket"    
+     bindsym --locked $mod+Print exec pactl set-sink-volume @DEFAULT_SINK@ 100%
