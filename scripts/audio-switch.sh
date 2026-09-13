@@ -182,20 +182,12 @@ if pactl list cards short | grep -q "HyperX_Cloud_III"; then
         >/dev/null 2>&1 || true
 fi
 
-############################################################################
-# FORCE USB AUDIO DEVICE SINKS TO 100%
-############################################################################
-
 pactl list short sinks |
-while read -r sink_id sink_name rest; do
-
-    case "$sink_name" in
-        alsa_output.usb-*)
-            pactl set-sink-volume "$sink_name" 100% \
-                >>"$ACTION_LOG" 2>&1 || true
-            ;;
-    esac
-
+awk '{print $2}' |
+grep '^alsa_output\.' |
+while read -r hw_sink; do
+    pactl set-sink-volume "$hw_sink" 100% \
+        >>"$ACTION_LOG" 2>&1 || true
 done
 
 ###############################################################################
