@@ -17,13 +17,9 @@ ARGS=(
     -t warning
     -y overlay
     -m "Audio Profile Select"
-    -z "Audio Hard Reset"
+    -z "audio restart"
     "
-    systemctl --user stop wireplumber pipewire pipewire-pulse
-
-    rm -rf ~/.local/state/wireplumber
-
-    systemctl --user start pipewire pipewire-pulse wireplumber
+    systemctl --user restart wireplumber pipewire pipewire-pulse
 
     until pactl info >/dev/null 2>&1; do
         sleep 0.1
