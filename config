@@ -325,3 +325,5 @@ bindsym --no-repeat $mod+r mode "resize"
     # Special keys to adjust brightness via brightnessctl
      bindsym --locked XF86MonBrightnessDown exec brightnessctl set 5%-
      bindsym --locked XF86MonBrightnessUp exec brightnessctl set 5%+
+
+     bindsym --locked Print exec "printf 'cycle pause\n' | socat - /tmp/mpvsocket"     
