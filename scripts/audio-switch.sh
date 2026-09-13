@@ -17,6 +17,22 @@ ARGS=(
     -t warning
     -y overlay
     -m "Audio Profile Select"
+    -z "Audio Hard Reset"
+    "
+    systemctl --user stop wireplumber pipewire pipewire-pulse
+
+    rm -rf ~/.local/state/wireplumber
+
+    systemctl --user start pipewire pipewire-pulse wireplumber
+
+    until pactl info >/dev/null 2>&1; do
+        sleep 0.1
+    done
+
+    echo \"Audio reset\" > /tmp/audio-profile-selected
+    touch \"$RESULT_FILE\"
+    exit 0
+    "
 )
 
 ###############################################################################
@@ -25,12 +41,14 @@ ARGS=(
 
 add_profile_button() {
     local label="$1"
-    local profile="$2"
+    local card="$2"
+    local profile="$3"
 
     ARGS+=(
         -z "$label"
         "
-pactl set-card-profile \"$CARD\" \"$profile\" >>\"\$ACTION_LOG\" 2>&1
+echo \"$label\" > /tmp/audio-profile-selected
+pactl set-card-profile \"$card\" \"$profile\" >>\"\$ACTION_LOG\" 2>&1
 touch \"\$RESULT_FILE\"
 "
     )
@@ -114,7 +132,7 @@ while IFS='|' read -r card profile description available; do
 
     [[ "$available" == "no" ]] && continue
 
-    add_profile_button "$label" "$profile"
+    add_profile_button "$label" "$card" "$profile"
 
 done < <(
     pactl list cards | awk '
@@ -153,11 +171,24 @@ while [[ ! -f "$RESULT_FILE" ]]; do
     sleep 0.1
 done
 
+if [[ -f /tmp/audio-profile-selected ]] &&
+   grep -qx "Audio reset" /tmp/audio-profile-selected; then
+
+    echo
+    echo "Audio reset completed."
+    echo
+    read -n 1 -rsp "Press any key to close..."
+    exit 0
+fi
+
+if pactl list cards short | grep -q "HyperX_Cloud_III"; then
+    amixer -c 1 sset 'Speaker Volume' 100% unmute \
+        >/dev/null 2>&1 || true
+fi
+
 ###############################################################################
 # BUILD SINK MENU
 ###############################################################################
-
-sleep 1
 
 CURRENT_SINK="$(pactl get-default-sink 2>/dev/null || true)"
 
@@ -285,63 +316,79 @@ else
 
     fi
     
+OLD_VOLUME=""
+
+if pactl list short sinks | awk '{print $2}' | grep -qx "$CURRENT_SINK"; then
     OLD_VOLUME="$(
         pactl get-sink-volume "$CURRENT_SINK" |
         grep -Po '[0-9]+%' |
         head -n1
     )"
+fi
 
-    pactl set-default-sink "$sink" >>"$ACTION_LOG" 2>&1
-
-    # If moving from a raw sink to a FIR sink, force Headphone to 100%
-    if [[ "$sink" =~ ^(earpods_|cloud3_) ]]; then
-
-        if [[ ! "$CURRENT_SINK" =~ ^(earpods_|cloud3_) ]]; then
-            amixer -c 0 sget Headphone |
-            grep -Po '[0-9]+(?=%)' |
-            head -n1 > "$HEADPHONE_STATE"
-
-            amixer -c 0 sset Headphone 100% >/dev/null 2>&1 || true
-        fi
-
-    # If moving from a FIR sink back to a raw sink, restore Headphone volume
-    else
-
-        if [[ "$CURRENT_SINK" =~ ^(earpods_|cloud3_) ]]; then
-
-            if [[ -f "$HEADPHONE_STATE" ]]; then
-                SAVED_VOL="$(cat "$HEADPHONE_STATE")"
-
-                amixer -c 0 sset Headphone "${SAVED_VOL}%" >/dev/null 2>&1 || true
-
-                rm -f "$HEADPHONE_STATE"
-            fi
-        fi
-
+    if pactl list short sinks | awk '{print $2}' | grep -qx "$sink"; then
+        pactl set-default-sink "$sink" >>"$ACTION_LOG" 2>&1
     fi
 
-    # Apply previous volume AFTER all FIR/raw gain changes
-    sleep 0.5
+    ############################################################################
+    # MOVE STREAMS FIRST
+    ############################################################################
 
-    pactl set-sink-volume "$sink" "$OLD_VOLUME" \
-        >>"$ACTION_LOG" 2>&1 || true
+    if pactl list short sinks | awk '{print $2}' | grep -qx "$sink"; then
+        pactl list sink-inputs short | awk '{print $1}' |
+        while read -r id; do
+            pactl move-sink-input "$id" "$sink" \
+                >>"$ACTION_LOG" 2>&1 || true
+        done
+    fi
+############################################################################
+# WAIT FOR SINK SWITCH TO SETTLE (DON'T HANG FOREVER)
+############################################################################
 
-    # 4. MIGRATE ALL RUNNING AUDIO STREAMS
-    pactl list sink-inputs short | awk '{print $1}' | while read -r id; do
-        pactl move-sink-input "$id" "$sink" >>"$ACTION_LOG" 2>&1
-    done
+SWITCH_OK=0
+
+for _ in {1..50}; do
+    if [[ "$(pactl get-default-sink 2>/dev/null || true)" == "$sink" ]]; then
+        SWITCH_OK=1
+        break
+    fi
+    sleep 0.1
+done
+
+if (( ! SWITCH_OK )); then
+    echo "Warning: failed to switch to sink '$sink'" >>"$ACTION_LOG"
+fi
+
+############################################################################
+# ONLY TOUCH ALSA IF THE SWITCH ACTUALLY SUCCEEDED
+############################################################################
+
+if (( SWITCH_OK )); then
+
+    if [[ ! -f "$HEADPHONE_STATE" ]]; then
+        amixer -c 0 sget Headphone |
+        grep -Po '[0-9]+(?=%)' |
+        head -n1 > "$HEADPHONE_STATE" || true
+    fi
+
+    if [[ "$sink" =~ ^(earpods_|cloud3_) ]]; then
+        amixer -c 0 sset Headphone 100% >/dev/null 2>&1 || true
+    else
+        if [[ -f "$HEADPHONE_STATE" ]]; then
+            SAVED_VOL="$(cat "$HEADPHONE_STATE")"
+            amixer -c 0 sset Headphone "${SAVED_VOL}%" >/dev/null 2>&1 || true
+        fi
+    fi
+
+    if [[ -n "${OLD_VOLUME:-}" ]]; then
+        pactl set-sink-volume "$sink" "$OLD_VOLUME" \
+            >>"$ACTION_LOG" 2>&1 || true
+    fi
+fi
+
 fi
 
 ###############################################################################
-
-if [[ -s "$ACTION_LOG" ]]; then
-    cat "$ACTION_LOG"
-    echo
-fi
-
-rm -f "$RESULT_FILE" "$ACTION_LOG"
-
-pactl list cards | grep "Active Profile" || true
 
 echo
 
@@ -351,6 +398,12 @@ else
     echo "Current sink:"
     pactl get-default-sink 2>/dev/null || true
 fi
+
+if [[ -f /tmp/audio-profile-selected ]]; then
+    echo
+    echo "Current profile:"
+    cat /tmp/audio-profile-selected
+fi
+
 echo
 read -n 1 -rsp "Press any key to close..."
-
