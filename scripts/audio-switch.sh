@@ -4,45 +4,76 @@ set -euo pipefail
 
 RESULT_FILE="/tmp/audio-toggle-complete.$$"
 ACTION_LOG="/tmp/audio-toggle-action.$$"
-HEADPHONE_STATE="/tmp/headphone-volume.saved"
 
 rm -f "$RESULT_FILE" "$ACTION_LOG"
 touch "$ACTION_LOG"
 
-export RESULT_FILE ACTION_LOG
+echo '{ "command": ["set_property", "pause", true] }' | socat - /tmp/mpvsocket >/dev/null 2>&1
+
+normalize_audio_volumes() {
+    local restore_volume="${1:-}"
+    local restore_sink="${2:-}"
+
+    SOF_CARD="$(
+        aplay -l |
+        awk -F': ' '/sof|SOF/ {print $1; exit}' |
+        grep -o '[0-9]\+' || true
+    )"
+
+    if [[ -n "${SOF_CARD:-}" ]]; then
+        amixer -c "$SOF_CARD" sset Headphone 100% >/dev/null 2>&1 || true
+    fi
+
+    HYPERX_CARD="$(
+        aplay -l |
+        awk -F': ' '/HyperX Cloud III/ {print $1; exit}' |
+        grep -o '[0-9]\+' || true
+    )"
+
+    if [[ -n "${HYPERX_CARD:-}" ]]; then
+        amixer -c "$HYPERX_CARD" \
+            sset 'Speaker Volume' 100% unmute \
+            >/dev/null 2>&1 || true
+    fi
+
+    pactl list short sinks |
+    awk '{print $2}' |
+    while read -r sink; do
+        pactl set-sink-mute "$sink" 0 >/dev/null 2>&1 || true
+        pactl set-sink-volume "$sink" 100% >/dev/null 2>&1 || true
+    done
+
+    if [[ -n "$restore_volume" && -n "$restore_sink" ]]; then
+        pactl set-sink-volume "$restore_sink" "$restore_volume" \
+            >/dev/null 2>&1 || true
+    fi
+}
+
+export -f normalize_audio_volumes
 
 ###############################################################################
-# FORCE VOLUMES IMMEDIATELY
+# CAPTURE CURRENT VOLUME FIRST
 ###############################################################################
 
-SOF_CARD="$(
-    aplay -l |
-    awk -F': ' '/sof|SOF/ {print $1; exit}' |
-    grep -o '[0-9]\+' || true
-)"
+ORIGINAL_SINK="$(pactl get-default-sink 2>/dev/null || true)"
 
-if [[ -n "${SOF_CARD:-}" ]]; then
-    amixer -c "$SOF_CARD" sset Headphone 100% >/dev/null 2>&1 || true
+ORIGINAL_VOLUME=""
+
+if pactl list short sinks | awk '{print $2}' | grep -qx "$ORIGINAL_SINK"; then
+    ORIGINAL_VOLUME="$(
+        pactl get-sink-volume "$ORIGINAL_SINK" |
+        grep -Po '[0-9]+%' |
+        head -n1
+    )"
 fi
 
-HYPERX_CARD="$(
-    aplay -l |
-    awk -F': ' '/HyperX Cloud III/ {print $1; exit}' |
-    grep -o '[0-9]\+' || true
-)"
+export RESULT_FILE ACTION_LOG ORIGINAL_VOLUME
 
-if [[ -n "${HYPERX_CARD:-}" ]]; then
-    amixer -c "$HYPERX_CARD" sset 'Speaker Volume' 100% unmute >/dev/null 2>&1 || true
-fi
+normalize_audio_volumes "$ORIGINAL_VOLUME" "$ORIGINAL_SINK"
 
-pactl list short sinks |
-awk '{print $2}' |
-grep '^alsa_output\.' |
-while read -r sink; do
-    pactl set-sink-volume "$sink" 100% >/dev/null 2>&1 || true
-done
-
-CARD="$(pactl list cards short | awk 'NR==1 {print $2}')"
+###################
+# SWAYNAG BUILD
+####################
 
 ARGS=(
     -t warning
@@ -62,32 +93,9 @@ ARGS=(
         sleep 0.1
     done
 
-    SOF_CARD=\"\$(
-        aplay -l |
-        awk -F': ' '/sof|SOF/ {print \$1; exit}' |
-        grep -o '[0-9]\+' || true
-    )\"
+    CURRENT_SINK=\"\$(pactl get-default-sink 2>/dev/null || true)\"
 
-    if [[ -n \"\${SOF_CARD:-}\" ]]; then
-        amixer -c \"\$SOF_CARD\" sset Headphone 100% >/dev/null 2>&1 || true
-    fi
-
-    HYPERX_CARD=\"\$(
-        aplay -l |
-        awk -F': ' '/HyperX Cloud III/ {print \$1; exit}' |
-        grep -o '[0-9]\+' || true
-    )\"
-
-    if [[ -n \"\${HYPERX_CARD:-}\" ]]; then
-        amixer -c \"\$HYPERX_CARD\" sset 'Speaker Volume' 100% unmute >/dev/null 2>&1 || true
-    fi
-
-    pactl list short sinks |
-    awk '{print \$2}' |
-    while read -r sink; do
-        pactl set-sink-mute \"\$sink\" 0 >/dev/null 2>&1 || true
-        pactl set-sink-volume \"\$sink\" 100% >/dev/null 2>&1 || true
-    done
+    normalize_audio_volumes \"$ORIGINAL_VOLUME\" \"\$CURRENT_SINK\"
 
     echo \"Audio reset\" > /tmp/audio-profile-selected
     touch \"$RESULT_FILE\"
@@ -116,33 +124,9 @@ for _ in {1..50}; do
     sleep 0.1
 done
 
-SOF_CARD="$(
-    aplay -l |
-    awk -F': ' '/sof|SOF/ {print $1; exit}' |
-    grep -o '[0-9]\+' || true
-)"
+CURRENT_SINK=\"\$(pactl get-default-sink 2>/dev/null || true)\"
 
-if [[ -n "${SOF_CARD:-}" ]]; then
-    amixer -c "$SOF_CARD" sset Headphone 100% >/dev/null 2>&1 || true
-fi
-
-HYPERX_CARD="$(
-    aplay -l |
-    awk -F': ' '/HyperX Cloud III/ {print $1; exit}' |
-    grep -o '[0-9]\+' || true
-)"
-
-if [[ -n "${HYPERX_CARD:-}" ]]; then
-    amixer -c "$HYPERX_CARD" sset 'Speaker Volume' 100% unmute >/dev/null 2>&1 || true
-fi
-
-# Reassert PipeWire volumes after every profile change
-pactl list short sinks |
-awk '{print \$2}' |
-grep '^alsa_output\.' |
-while read -r sink; do
-    pactl set-sink-volume \"\$sink\" 100% >/dev/null 2>&1 || true
-done
+normalize_audio_volumes \"$ORIGINAL_VOLUME\" \"\$CURRENT_SINK\"
 
 touch \"\$RESULT_FILE\"
 "
@@ -276,19 +260,6 @@ if [[ -f /tmp/audio-profile-selected ]] &&
     exit 0
 fi
 
-if pactl list cards short | grep -q "HyperX_Cloud_III"; then
-    amixer -c 1 sset 'Speaker Volume' 100% unmute \
-        >/dev/null 2>&1 || true
-fi
-
-pactl list short sinks |
-awk '{print $2}' |
-grep '^alsa_output\.' |
-while read -r hw_sink; do
-    pactl set-sink-volume "$hw_sink" 100% \
-        >>"$ACTION_LOG" 2>&1 || true
-done
-
 ###############################################################################
 # BUILD SINK MENU
 ###############################################################################
@@ -419,16 +390,6 @@ else
 
     fi
     
-OLD_VOLUME=""
-
-if pactl list short sinks | awk '{print $2}' | grep -qx "$CURRENT_SINK"; then
-    OLD_VOLUME="$(
-        pactl get-sink-volume "$CURRENT_SINK" |
-        grep -Po '[0-9]+%' |
-        head -n1
-    )"
-fi
-
     if pactl list short sinks | awk '{print $2}' | grep -qx "$sink"; then
         pactl set-default-sink "$sink" >>"$ACTION_LOG" 2>&1
     fi
@@ -467,26 +428,7 @@ fi
 ############################################################################
 
 if (( SWITCH_OK )); then
-
-    if [[ ! -f "$HEADPHONE_STATE" ]]; then
-        amixer -c 0 sget Headphone |
-        grep -Po '[0-9]+(?=%)' |
-        head -n1 > "$HEADPHONE_STATE" || true
-    fi
-
-    if [[ "$sink" =~ ^(earpods_|cloud3_) ]]; then
-        amixer -c 0 sset Headphone 100% >/dev/null 2>&1 || true
-    else
-        if [[ -f "$HEADPHONE_STATE" ]]; then
-            SAVED_VOL="$(cat "$HEADPHONE_STATE")"
-            amixer -c 0 sset Headphone "${SAVED_VOL}%" >/dev/null 2>&1 || true
-        fi
-    fi
-
-    if [[ -n "${OLD_VOLUME:-}" ]]; then
-        pactl set-sink-volume "$sink" "$OLD_VOLUME" \
-            >>"$ACTION_LOG" 2>&1 || true
-    fi
+    normalize_audio_volumes "$ORIGINAL_VOLUME" "$sink"
 fi
 
 fi
