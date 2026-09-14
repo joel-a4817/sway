@@ -11,6 +11,37 @@ touch "$ACTION_LOG"
 
 export RESULT_FILE ACTION_LOG
 
+###############################################################################
+# FORCE VOLUMES IMMEDIATELY
+###############################################################################
+
+SOF_CARD="$(
+    aplay -l |
+    awk -F': ' '/sof|SOF/ {print $1; exit}' |
+    grep -o '[0-9]\+' || true
+)"
+
+if [[ -n "${SOF_CARD:-}" ]]; then
+    amixer -c "$SOF_CARD" sset Headphone 100% >/dev/null 2>&1 || true
+fi
+
+HYPERX_CARD="$(
+    aplay -l |
+    awk -F': ' '/HyperX Cloud III/ {print $1; exit}' |
+    grep -o '[0-9]\+' || true
+)"
+
+if [[ -n "${HYPERX_CARD:-}" ]]; then
+    amixer -c "$HYPERX_CARD" sset 'Speaker Volume' 100% unmute >/dev/null 2>&1 || true
+fi
+
+pactl list short sinks |
+awk '{print $2}' |
+grep '^alsa_output\.' |
+while read -r sink; do
+    pactl set-sink-volume "$sink" 100% >/dev/null 2>&1 || true
+done
+
 CARD="$(pactl list cards short | awk 'NR==1 {print $2}')"
 
 ARGS=(
@@ -44,7 +75,42 @@ add_profile_button() {
         -z "$label"
         "
 echo \"$label\" > /tmp/audio-profile-selected
+
 pactl set-card-profile \"$card\" \"$profile\" >>\"\$ACTION_LOG\" 2>&1
+
+for _ in {1..50}; do
+    pactl list short sinks | grep -q . && break
+    sleep 0.1
+done
+
+SOF_CARD="$(
+    aplay -l |
+    awk -F': ' '/sof|SOF/ {print $1; exit}' |
+    grep -o '[0-9]\+' || true
+)"
+
+if [[ -n "${SOF_CARD:-}" ]]; then
+    amixer -c "$SOF_CARD" sset Headphone 100% >/dev/null 2>&1 || true
+fi
+
+HYPERX_CARD="$(
+    aplay -l |
+    awk -F': ' '/HyperX Cloud III/ {print $1; exit}' |
+    grep -o '[0-9]\+' || true
+)"
+
+if [[ -n "${HYPERX_CARD:-}" ]]; then
+    amixer -c "$HYPERX_CARD" sset 'Speaker Volume' 100% unmute >/dev/null 2>&1 || true
+fi
+
+# Reassert PipeWire volumes after every profile change
+pactl list short sinks |
+awk '{print \$2}' |
+grep '^alsa_output\.' |
+while read -r sink; do
+    pactl set-sink-volume \"\$sink\" 100% >/dev/null 2>&1 || true
+done
+
 touch \"\$RESULT_FILE\"
 "
     )
