@@ -329,4 +329,4 @@ bindsym --no-repeat $mod+r mode "resize"
      bindsym --locked $mod+Control+Delete exec "printf 'cycle pause\n' | socat - /tmp/mpvsocket"    
      bindsym --locked $mod+Print exec systemctl suspend
 
-     bindsym --locked $mod+Shift+Delete exec sh -c 'cur=$(pactl get-sink-volume @DEFAULT_SINK@ | grep -o "[0-9]\+%" | head -1 | tr -d "%"); new=$((cur + 5)); [ $new -gt 100 ] && new=100; pactl set-sink-volume @DEFAULT_SINK@ ${new}%
+     bindsym --locked $mod+Shift+Delete exec bash -lc 'cur=$(pactl get-sink-volume @DEFAULT_SINK@ | grep -o "[0-9]\+%" | head -1 | tr -d "%"); new=$((cur + 5)); [ $new -gt 100 ] && new=100; pactl set-sink-volume @DEFAULT_SINK@ ${new}%'
