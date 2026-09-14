@@ -50,10 +50,43 @@ ARGS=(
     -m "Audio Profile Select"
     -z "audio restart"
     "
-    systemctl --user restart wireplumber pipewire pipewire-pulse
+    systemctl --user stop wireplumber.service pipewire.service pipewire-pulse.service pipewire.socket pipewire-pulse.socket
+
+    rm -rf ~/.local/state/wireplumber
+
+    systemctl --user start pipewire.socket pipewire-pulse.socket wireplumber.service
+
+    systemctl --user start wireplumber pipewire pipewire-pulse
 
     until pactl info >/dev/null 2>&1; do
         sleep 0.1
+    done
+
+    SOF_CARD=\"\$(
+        aplay -l |
+        awk -F': ' '/sof|SOF/ {print \$1; exit}' |
+        grep -o '[0-9]\+' || true
+    )\"
+
+    if [[ -n \"\${SOF_CARD:-}\" ]]; then
+        amixer -c \"\$SOF_CARD\" sset Headphone 100% >/dev/null 2>&1 || true
+    fi
+
+    HYPERX_CARD=\"\$(
+        aplay -l |
+        awk -F': ' '/HyperX Cloud III/ {print \$1; exit}' |
+        grep -o '[0-9]\+' || true
+    )\"
+
+    if [[ -n \"\${HYPERX_CARD:-}\" ]]; then
+        amixer -c \"\$HYPERX_CARD\" sset 'Speaker Volume' 100% unmute >/dev/null 2>&1 || true
+    fi
+
+    pactl list short sinks |
+    awk '{print \$2}' |
+    while read -r sink; do
+        pactl set-sink-mute \"\$sink\" 0 >/dev/null 2>&1 || true
+        pactl set-sink-volume \"\$sink\" 100% >/dev/null 2>&1 || true
     done
 
     echo \"Audio reset\" > /tmp/audio-profile-selected
