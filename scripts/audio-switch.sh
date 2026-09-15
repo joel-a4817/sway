@@ -21,8 +21,10 @@ cleanup() {
     rm -f \
         "$RESULT_FILE" \
         "$ACTION_STARTED_FILE" \
+        "$ACTION_LOG" \
         "$CARD_SELECTION_FILE" \
-        "$PROFILE_SELECTION_FILE"
+        "$PROFILE_SELECTION_FILE" \
+        "${SWAYNAG_LOG:-}"
 }
 
 pause_before_close() {
@@ -215,14 +217,21 @@ card_display_label() {
 ###############################################################################
 
 ARGS=(-t warning -y overlay -m "Audio Device Select")
-AIRPLAY_CONFIG_DIR="/home/joel/Documents/prefs/audio/airplay"
+AIRPLAY_CONFIG_DIR="$HOME/Documents/prefs/audio/airplay"
+AUDIO_STACK_DIR="${XDG_RUNTIME_DIR:-/tmp}/${USER:-user}-airplay-stack"
+RUNTIME_CONFIG_DIR="$AUDIO_STACK_DIR/configs"
 
-HYPERX_CLOUD3_CONFIG="$AIRPLAY_CONFIG_DIR/camilladsp-hyperx-cloud3.yml"
-HYPERX_EARPODS_CONFIG="$AIRPLAY_CONFIG_DIR/camilladsp-hyperx-earpods.yml"
-BUILTIN_CLOUD3_CONFIG="$AIRPLAY_CONFIG_DIR/camilladsp-builtin-cloud3.yml"
-BUILTIN_EARPODS_CONFIG="$AIRPLAY_CONFIG_DIR/camilladsp-builtin-earpods.yml"
+mkdir -p "$AUDIO_STACK_DIR" "$RUNTIME_CONFIG_DIR"
 
-AUDIO_STACK_DIR="${XDG_RUNTIME_DIR:-/tmp}/joel-airplay-stack"
+HYPERX_CLOUD3_TEMPLATE="$AIRPLAY_CONFIG_DIR/camilladsp-hyperx-cloud3.yml"
+HYPERX_EARPODS_TEMPLATE="$AIRPLAY_CONFIG_DIR/camilladsp-hyperx-earpods.yml"
+BUILTIN_CLOUD3_TEMPLATE="$AIRPLAY_CONFIG_DIR/camilladsp-builtin-cloud3.yml"
+BUILTIN_EARPODS_TEMPLATE="$AIRPLAY_CONFIG_DIR/camilladsp-builtin-earpods.yml"
+
+HYPERX_CLOUD3_CONFIG="$RUNTIME_CONFIG_DIR/camilladsp-hyperx-cloud3.yml"
+HYPERX_EARPODS_CONFIG="$RUNTIME_CONFIG_DIR/camilladsp-hyperx-earpods.yml"
+BUILTIN_CLOUD3_CONFIG="$RUNTIME_CONFIG_DIR/camilladsp-builtin-cloud3.yml"
+BUILTIN_EARPODS_CONFIG="$RUNTIME_CONFIG_DIR/camilladsp-builtin-earpods.yml"
 
 HYPERX_STATE_FILE="$AUDIO_STACK_DIR/hyperx-profile"
 BUILTIN_STATE_FILE="$AUDIO_STACK_DIR/builtin-profile"
@@ -236,6 +245,154 @@ BUILTIN_LOG="$AUDIO_STACK_DIR/camilladsp-builtin.log"
 SHAIRPORT_LOG="$AUDIO_STACK_DIR/shairport-sync.log"
 NQPTP_LOG="$AUDIO_STACK_DIR/nqptp.log"
 mkdir -p "$AUDIO_STACK_DIR"
+
+###############################################################################
+# GENERATE MACHINE-LOCAL CAMILLADSP CONFIGS
+###############################################################################
+
+find_playback_device() {
+    local wanted_type="$1"
+    local card_dir
+    local card_number
+    local card_id
+    local card_name
+    local device_dir
+    local device_number
+    local sys_path
+
+    for card_dir in /sys/class/sound/card[0-9]*; do
+        [[ -e "$card_dir" ]] || continue
+
+        card_number="${card_dir##*card}"
+        sys_path="$(readlink -f "$card_dir/device" 2>/dev/null || true)"
+        card_id="$(cat "$card_dir/id" 2>/dev/null || true)"
+        card_name="$(cat "/proc/asound/card${card_number}/id" 2>/dev/null || true)"
+
+        [[ -n "$sys_path" ]] || continue
+
+        case "$wanted_type" in
+            hyperx)
+                [[ "$sys_path" == *"/usb"* ]] || continue
+
+                if [[ "$card_id $card_name" != *HyperX* &&
+                      "$card_id $card_name" != *Cloud* ]]; then
+                    continue
+                fi
+                ;;
+
+            builtin)
+                [[ "$sys_path" != *"/usb"* ]] || continue
+                [[ "$sys_path" != *"/virtual/"* ]] || continue
+
+                if [[ "$card_id $card_name" != *sof* &&
+                      "$card_id $card_name" != *SOF* &&
+                      "$card_id $card_name" != *PCH* ]]; then
+                    continue
+                fi
+                ;;
+
+            *)
+                return 1
+                ;;
+        esac
+
+        for device_dir in \
+            "/sys/class/sound/card${card_number}"/pcm*p; do
+
+            [[ -e "$device_dir" ]] || continue
+
+            device_number="$(
+                basename "$device_dir" |
+                sed -nE 's/^pcmC[0-9]+D([0-9]+)p$/\1/p'
+            )"
+
+            [[ "$device_number" =~ ^[0-9]+$ ]] || continue
+
+            if [[ "$wanted_type" == "builtin" ]]; then
+                printf 'plughw:%s,%s\n' \
+                    "$card_number" \
+                    "$device_number"
+            else
+                printf 'hw:%s,%s\n' \
+                    "$card_number" \
+                    "$device_number"
+            fi
+
+            return 0
+        done
+    done
+
+    return 1
+}
+
+USB_PLAYBACK_DEVICE="$(
+    find_playback_device hyperx || true
+)"
+
+BUILTIN_PLAYBACK_DEVICE="$(
+    find_playback_device builtin || true
+)"
+
+generate_camilla_config() {
+    local template="$1"
+    local destination="$2"
+    local playback_device="$3"
+    local temporary
+
+    [[ -f "$template" ]] || {
+        echo "Missing CamillaDSP template: $template" \
+            >>"$ACTION_LOG"
+
+        return 1
+    }
+
+    [[ -n "$playback_device" ]] || {
+        echo "No suitable playback device was detected for: $template" \
+            >>"$ACTION_LOG"
+
+        return 1
+    }
+
+    temporary="${destination}.tmp"
+
+    sed \
+        -e "s|__HOME__|$HOME|g" \
+        -e "s|__USB_PLAYBACK_DEVICE__|$playback_device|g" \
+        -e "s|__BUILTIN_PLAYBACK_DEVICE__|$playback_device|g" \
+        "$template" \
+        >"$temporary" ||
+        return 1
+
+    camilladsp -c "$temporary" \
+        >>"$ACTION_LOG" 2>&1 ||
+        return 1
+
+    mv -f "$temporary" "$destination"
+}
+
+generate_camilla_config \
+    "$HYPERX_CLOUD3_TEMPLATE" \
+    "$HYPERX_CLOUD3_CONFIG" \
+    "$USB_PLAYBACK_DEVICE" ||
+    true
+
+generate_camilla_config \
+    "$HYPERX_EARPODS_TEMPLATE" \
+    "$HYPERX_EARPODS_CONFIG" \
+    "$USB_PLAYBACK_DEVICE" ||
+    true
+
+generate_camilla_config \
+    "$BUILTIN_CLOUD3_TEMPLATE" \
+    "$BUILTIN_CLOUD3_CONFIG" \
+    "$BUILTIN_PLAYBACK_DEVICE" ||
+    true
+
+generate_camilla_config \
+    "$BUILTIN_EARPODS_TEMPLATE" \
+    "$BUILTIN_EARPODS_CONFIG" \
+    "$BUILTIN_PLAYBACK_DEVICE" ||
+    true
 
 HOTSPOT_CONNECTION="AirPlay Direct"
 
@@ -1087,22 +1244,17 @@ if [[ "$SELECTED_CARD_VALUE" == dual-* ]]; then
     fi
 
     # Exactly one AirPlay output may run at a time.
-    HAD_ACTIVE_SLOT=0
-
-    if pid_file_running "$HYPERX_PID_FILE" ||
-       pid_file_running "$BUILTIN_PID_FILE"; then
-        HAD_ACTIVE_SLOT=1
-    fi
-
     stop_camilla_slot "$HYPERX_PID_FILE" "$HYPERX_STATE_FILE"
-
     stop_camilla_slot "$BUILTIN_PID_FILE" "$BUILTIN_STATE_FILE"
 
-    if (( ! HAD_ACTIVE_SLOT )); then
-        if ! stop_pipewire_for_dual_mode; then
-            echo "PipeWire did not release the devices."
-            exit 1
-        fi
+    if ! stop_pipewire_for_dual_mode; then
+        echo
+        echo "PipeWire did not release the audio devices."
+
+        stop_shared_airplay
+        restore_pipewire_after_dual_mode
+
+        exit 1
     fi
 
     if ! start_camilla_slot \
