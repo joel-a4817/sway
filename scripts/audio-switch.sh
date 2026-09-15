@@ -1,17 +1,86 @@
 #!/usr/bin/env bash
 
 RESULT_FILE="/tmp/audio-toggle-complete.$$"
+ACTION_STARTED_FILE="/tmp/audio-toggle-started.$$"
 ACTION_LOG="/tmp/audio-toggle-action.$$"
 CARD_SELECTION_FILE="/tmp/audio-card-selected.$$"
 PROFILE_SELECTION_FILE="/tmp/audio-profile-selected.$$"
 
-rm -f "$RESULT_FILE" "$ACTION_LOG" "$CARD_SELECTION_FILE" "$PROFILE_SELECTION_FILE"
+rm -f \
+    "$RESULT_FILE" \
+    "$ACTION_STARTED_FILE" \
+    "$ACTION_LOG" \
+    "$CARD_SELECTION_FILE" \
+    "$PROFILE_SELECTION_FILE"
 touch "$ACTION_LOG"
 
+FINAL_PAUSE_REACHED=0
+EXIT_HANDLER_RUNNING=0
+
 cleanup() {
-    rm -f "$RESULT_FILE" "$CARD_SELECTION_FILE" "$PROFILE_SELECTION_FILE"
+    rm -f \
+        "$RESULT_FILE" \
+        "$ACTION_STARTED_FILE" \
+        "$CARD_SELECTION_FILE" \
+        "$PROFILE_SELECTION_FILE"
 }
-trap cleanup EXIT
+
+pause_before_close() {
+    FINAL_PAUSE_REACHED=1
+
+    echo
+
+    if [[ -r /dev/tty && -w /dev/tty ]]; then
+        read \
+            -n 1 \
+            -r \
+            -s \
+            -p "Press any key to close..." \
+            </dev/tty || true
+
+        echo >/dev/tty
+    else
+        echo "No controlling terminal is available."
+    fi
+}
+
+handle_script_exit() {
+    local exit_status=$?
+
+    if (( EXIT_HANDLER_RUNNING )); then
+        return
+    fi
+
+    EXIT_HANDLER_RUNNING=1
+
+    trap - EXIT INT TERM HUP QUIT
+
+    if (( exit_status != 0 && ! FINAL_PAUSE_REACHED )); then
+        echo
+        echo "Audio script exited unexpectedly."
+        echo "Exit status: $exit_status"
+
+        if [[ -s "$ACTION_LOG" ]]; then
+            echo
+            echo "Action log:"
+            echo "$ACTION_LOG"
+            echo
+            cat "$ACTION_LOG"
+        fi
+
+        pause_before_close
+    fi
+
+    cleanup
+
+    builtin exit "$exit_status"
+}
+
+trap handle_script_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+trap 'exit 131' QUIT
 
 echo '{ "command": ["set_property", "pause", true] }' | socat - /tmp/mpvsocket >/dev/null 2>&1
 
@@ -34,30 +103,63 @@ normalize_audio_volumes() {
         [[ -z "$sink" ]] && continue
         pactl set-sink-mute "$sink" 0 >/dev/null 2>&1 || true
         pactl set-sink-volume "$sink" 100% >/dev/null 2>&1 || true
-    done < <(pactl list short sinks | awk '{print $2}')
+    done < <(
+        pactl list short sinks 2>/dev/null |
+        awk '{print $2}'
+    )
 
-    if [[ -n "$restore_volume" && -n "$restore_sink" ]] &&
-       pactl list short sinks | awk '{print $2}' | grep -Fqx "$restore_sink"; then
-        pactl set-sink-volume "$restore_sink" "$restore_volume" >/dev/null 2>&1 || true
+    if [[ -n "$restore_volume" && -n "$restore_sink" ]]; then
+        if pactl list short sinks 2>/dev/null |
+           awk '{print $2}' |
+           grep -Fqx "$restore_sink"; then
+
+            pactl set-sink-volume \
+                "$restore_sink" \
+                "$restore_volume" \
+                >/dev/null 2>&1 || true
+        fi
     fi
 }
+
 export -f normalize_audio_volumes
 
-ORIGINAL_SINK="$(pactl get-default-sink 2>/dev/null || true)"
+ORIGINAL_SINK=""
 ORIGINAL_VOLUME=""
-if pactl list short sinks | awk '{print $2}' | grep -Fqx "$ORIGINAL_SINK"; then
-    ORIGINAL_VOLUME="$(pactl get-sink-volume "$ORIGINAL_SINK" | grep -Po '[0-9]+%' | head -n1)"
+
+if pactl info >/dev/null 2>&1; then
+    ORIGINAL_SINK="$(pactl get-default-sink 2>/dev/null || true)"
+
+    if pactl list short sinks 2>/dev/null |
+       awk '{print $2}' |
+       grep -Fqx "$ORIGINAL_SINK"; then
+
+        ORIGINAL_VOLUME="$(
+            pactl get-sink-volume "$ORIGINAL_SINK" 2>/dev/null |
+            grep -Po '[0-9]+%' |
+            head -n1
+        )"
+    fi
+
+    normalize_audio_volumes \
+        "$ORIGINAL_VOLUME" \
+        "$ORIGINAL_SINK"
 fi
 
-export RESULT_FILE ACTION_LOG CARD_SELECTION_FILE PROFILE_SELECTION_FILE ORIGINAL_VOLUME ORIGINAL_SINK
-normalize_audio_volumes "$ORIGINAL_VOLUME" "$ORIGINAL_SINK"
+export \
+    RESULT_FILE \
+    ACTION_STARTED_FILE \
+    ACTION_LOG \
+    CARD_SELECTION_FILE \
+    PROFILE_SELECTION_FILE \
+    ORIGINAL_VOLUME \
+    ORIGINAL_SINK
 
 ###############################################################################
 # DISCOVER CARDS
 ###############################################################################
 
 mapfile -t CARDS < <(
-    pactl list cards | awk '
+    pactl list cards 2>/dev/null | awk '
     function output_card() {
         if (card != "") {
             if (description == "") description = card
@@ -89,11 +191,11 @@ mapfile -t CARDS < <(
 )
 
 if (( ${#CARDS[@]} == 0 )); then
-    echo "No PipeWire/PulseAudio cards were found."
-    echo
-    read -n 1 -rsp "Press any key to close..."
-    echo
-    exit 1
+    PIPEWIRE_CARDS_AVAILABLE=0
+    echo "PipeWire is unavailable or currently stopped." \
+        >>"$ACTION_LOG"
+else
+    PIPEWIRE_CARDS_AVAILABLE=1
 fi
 
 card_display_label() {
@@ -113,58 +215,1023 @@ card_display_label() {
 ###############################################################################
 
 ARGS=(-t warning -y overlay -m "Audio Device Select")
+AIRPLAY_CONFIG_DIR="/home/joel/Documents/prefs/audio/airplay"
+
+HYPERX_CLOUD3_CONFIG="$AIRPLAY_CONFIG_DIR/camilladsp-hyperx-cloud3.yml"
+HYPERX_EARPODS_CONFIG="$AIRPLAY_CONFIG_DIR/camilladsp-hyperx-earpods.yml"
+BUILTIN_CLOUD3_CONFIG="$AIRPLAY_CONFIG_DIR/camilladsp-builtin-cloud3.yml"
+BUILTIN_EARPODS_CONFIG="$AIRPLAY_CONFIG_DIR/camilladsp-builtin-earpods.yml"
+
+AUDIO_STACK_DIR="${XDG_RUNTIME_DIR:-/tmp}/joel-airplay-stack"
+
+HYPERX_STATE_FILE="$AUDIO_STACK_DIR/hyperx-profile"
+BUILTIN_STATE_FILE="$AUDIO_STACK_DIR/builtin-profile"
+
+HYPERX_PID_FILE="$AUDIO_STACK_DIR/camilladsp-hyperx.pid"
+BUILTIN_PID_FILE="$AUDIO_STACK_DIR/camilladsp-builtin.pid"
+
+HYPERX_LOG="$AUDIO_STACK_DIR/camilladsp-hyperx.log"
+BUILTIN_LOG="$AUDIO_STACK_DIR/camilladsp-builtin.log"
+
+SHAIRPORT_LOG="$AUDIO_STACK_DIR/shairport-sync.log"
+NQPTP_LOG="$AUDIO_STACK_DIR/nqptp.log"
+mkdir -p "$AUDIO_STACK_DIR"
+
+HOTSPOT_CONNECTION="AirPlay Direct"
+
+###############################################################################
+# AUDIO RESTART BUTTON
+###############################################################################
 
 RESET_ACTION="$(cat <<EOF_RESET
-systemctl --user stop wireplumber.service pipewire.service pipewire-pulse.service pipewire.socket pipewire-pulse.socket
-rm -rf "\$HOME/.local/state/wireplumber"
-systemctl --user start pipewire.socket pipewire-pulse.socket wireplumber.service
-systemctl --user start wireplumber pipewire pipewire-pulse
-for _ in {1..100}; do
-    pactl info >/dev/null 2>&1 && break
+touch "$ACTION_STARTED_FILE"
+echo "Audio Restart action started." >>"$ACTION_LOG"
+
+for proc in /proc/[[:digit:]]*; do
+    [ -d "\$proc" ] || continue
+
+    pid="\${proc##*/}"
+    exe="\$(readlink -f "\$proc/exe" 2>/dev/null || true)"
+
+    [ -n "\$exe" ] || continue
+
+    if [ "\${exe##*/}" = "shairport-sync" ]; then
+        kill -TERM "\$pid" 2>/dev/null || true
+    fi
+done
+
+pkill -TERM -x camilladsp >/dev/null 2>&1 || true
+sudo -n pkill -TERM -x nqptp >/dev/null 2>&1 || true
+
+rm -f \
+    "$AUDIO_STACK_DIR/shairport-sync.pid" \
+    "$AUDIO_STACK_DIR/shairport-sync.port" \
+    "$AUDIO_STACK_DIR/shairport-sync-runtime.conf" \
+    "$AUDIO_STACK_DIR/hyperx-profile" \
+    "$AUDIO_STACK_DIR/builtin-profile" \
+    "$AUDIO_STACK_DIR/camilladsp-hyperx.pid" \
+    "$AUDIO_STACK_DIR/camilladsp-builtin.pid" \
+    "$AUDIO_STACK_DIR/shairport-hyperx.pid" \
+    "$AUDIO_STACK_DIR/shairport-builtin.pid"
+
+for _ in \$(seq 1 50); do
+    SHARED_AUDIO_BUSY=0
+
+    pgrep -x camilladsp >/dev/null 2>&1 &&
+        SHARED_AUDIO_BUSY=1
+
+    pgrep -x nqptp >/dev/null 2>&1 &&
+        SHARED_AUDIO_BUSY=1
+
+    for proc in /proc/[[:digit:]]*; do
+        [ -d "\$proc" ] || continue
+
+        exe="\$(readlink -f "\$proc/exe" 2>/dev/null || true)"
+
+        if [ "\${exe##*/}" = "shairport-sync" ]; then
+            SHARED_AUDIO_BUSY=1
+            break
+        fi
+    done
+
+    [ "\$SHARED_AUDIO_BUSY" -eq 0 ] &&
+        break
+
     sleep 0.1
 done
-CURRENT_SINK="\$(pactl get-default-sink 2>/dev/null || true)"
-normalize_audio_volumes "$ORIGINAL_VOLUME" "\$CURRENT_SINK"
-printf '%s\n' "Audio reset" > "$CARD_SELECTION_FILE"
+
+systemctl --user stop \
+    wireplumber.service \
+    pipewire-pulse.service \
+    pipewire-pulse.socket \
+    pipewire.service \
+    pipewire.socket \
+    >/dev/null 2>&1 || true
+
+rm -rf "\$HOME/.local/state/wireplumber"
+
+systemctl --user start \
+    pipewire.socket \
+    pipewire-pulse.socket \
+    pipewire.service \
+    pipewire-pulse.service \
+    wireplumber.service \
+    >/dev/null 2>&1 || true
+
+PIPEWIRE_READY=0
+
+for _ in \$(seq 1 100); do
+    if pactl info >/dev/null 2>&1; then
+        PIPEWIRE_READY=1
+        break
+    fi
+
+    sleep 0.1
+done
+
+if [ "\$PIPEWIRE_READY" -eq 1 ]; then
+    CURRENT_SINK="\$(pactl get-default-sink 2>/dev/null || true)"
+
+    normalize_audio_volumes \
+        "$ORIGINAL_VOLUME" \
+        "\$CURRENT_SINK"
+
+    printf '%s\n' "Audio reset" >"$CARD_SELECTION_FILE"
+else
+    printf '%s\n' "Audio reset failed" >"$CARD_SELECTION_FILE"
+fi
+
 touch "$RESULT_FILE"
 EOF_RESET
 )"
 
-ARGS+=(-z "Audio Restart" "$RESET_ACTION")
+ARGS+=(
+    -z "Audio Restart"
+    "$RESET_ACTION"
+)
 
-for i in "${!CARDS[@]}"; do
-    card="${CARDS[$i]%%|*}"
-    description="${CARDS[$i]#*|}"
-    label="$(card_display_label "$card" "$description")"
-    ARGS+=(-z "$label" "printf '%s\n' '$i' > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'")
-done
+###############################################################################
+# AIRPLAY + CAMILLADSP PROFILE BUTTONS
+###############################################################################
+hotspot_active() {
+    nmcli \
+        -t \
+        -f NAME \
+        connection show --active \
+        2>/dev/null |
+    grep -Fqx "$HOTSPOT_CONNECTION"
+}
 
-swaynag "${ARGS[@]}" &
+toggle_hotspot() {
+    if hotspot_active; then
+        echo "Stopping hotspot: $HOTSPOT_CONNECTION" \
+            >>"$ACTION_LOG"
+
+        if nmcli connection down "$HOTSPOT_CONNECTION" \
+            >>"$ACTION_LOG" 2>&1; then
+
+            printf '%s\n' "Hotspot stopped" \
+                >"$CARD_SELECTION_FILE"
+
+            return 0
+        fi
+
+        printf '%s\n' "Hotspot action failed" \
+            >"$CARD_SELECTION_FILE"
+
+        return 1
+    fi
+
+    echo "Starting hotspot: $HOTSPOT_CONNECTION" \
+        >>"$ACTION_LOG"
+
+    if nmcli connection up "$HOTSPOT_CONNECTION" \
+        >>"$ACTION_LOG" 2>&1; then
+
+        printf '%s\n' "Hotspot started" \
+            >"$CARD_SELECTION_FILE"
+
+        return 0
+    fi
+
+    printf '%s\n' "Hotspot action failed" \
+        >"$CARD_SELECTION_FILE"
+
+    return 1
+}
+
+camilladsp_running() {
+    pgrep -x camilladsp >/dev/null 2>&1
+}
+
+shairport_pids() {
+    local proc
+    local pid
+    local exe
+
+    for proc in /proc/[[:digit:]]*; do
+        [[ -d "$proc" ]] || continue
+
+        pid="${proc##*/}"
+
+        exe="$(
+            readlink -f "$proc/exe" \
+                2>/dev/null || true
+        )"
+
+        [[ -n "$exe" ]] || continue
+
+        if [[ "${exe##*/}" == "shairport-sync" ]]; then
+            printf '%s\n' "$pid"
+        fi
+    done
+}
+
+shairport_running() {
+    local shairport_pid
+
+    while read -r shairport_pid; do
+        [[ -n "$shairport_pid" ]] && return 0
+    done < <(shairport_pids)
+
+    return 1
+}
+
+nqptp_running() {
+    pgrep -x nqptp >/dev/null 2>&1
+}
+
+read_state_file() {
+    local state_file="$1"
+
+    if [[ -f "$state_file" ]]; then
+        cat "$state_file"
+    fi
+}
+
+pid_file_running() {
+    local pid_file="$1"
+    local pid
+    local exe
+
+    [[ -s "$pid_file" ]] || return 1
+
+    read -r pid <"$pid_file"
+
+    if [[ ! "$pid" =~ ^[[:digit:]]+$ ]]; then
+        rm -f "$pid_file"
+        return 1
+    fi
+
+    if ! kill -0 "$pid" 2>/dev/null; then
+        rm -f "$pid_file"
+        return 1
+    fi
+
+    exe="$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)"
+
+    if [[ "${exe##*/}" != "camilladsp" ]]; then
+        rm -f "$pid_file"
+        return 1
+    fi
+
+    return 0
+}
+
+if ! pid_file_running "$HYPERX_PID_FILE"; then
+    rm -f "$HYPERX_STATE_FILE"
+fi
+
+if ! pid_file_running "$BUILTIN_PID_FILE"; then
+    rm -f "$BUILTIN_STATE_FILE"
+fi
+
+HYPERX_STATE="$(read_state_file "$HYPERX_STATE_FILE")"
+BUILTIN_STATE="$(read_state_file "$BUILTIN_STATE_FILE")"
+
+if pid_file_running "$HYPERX_PID_FILE" ||
+   pid_file_running "$BUILTIN_PID_FILE"; then
+
+    AIRPLAY_CONTROLS_LABEL="AirPlay Controls"
+
+    if pid_file_running "$HYPERX_PID_FILE"; then
+        AIRPLAY_CONTROLS_LABEL+=" [HyperX: ${HYPERX_STATE:-active}]"
+    fi
+
+    if pid_file_running "$BUILTIN_PID_FILE"; then
+        AIRPLAY_CONTROLS_LABEL+=" [Built-in: ${BUILTIN_STATE:-active}]"
+    fi
+elif shairport_running || nqptp_running; then
+    AIRPLAY_CONTROLS_LABEL="AirPlay Controls [partial stack active]"
+else
+    AIRPLAY_CONTROLS_LABEL="AirPlay Controls [stopped]"
+fi
+
+ARGS+=(
+    -z "$AIRPLAY_CONTROLS_LABEL"
+    "touch '$ACTION_STARTED_FILE'; printf '%s\n' 'airplay-controls' >'$CARD_SELECTION_FILE'; touch '$RESULT_FILE'"
+)
+if hotspot_active; then
+    HOTSPOT_BUTTON_LABEL="Stop AirPlay Hotspot [active]"
+else
+    HOTSPOT_BUTTON_LABEL="Start AirPlay Hotspot [inactive]"
+fi
+
+ARGS+=(
+    -z "$HOTSPOT_BUTTON_LABEL"
+    "touch '$ACTION_STARTED_FILE'; printf '%s\n' 'toggle-airplay-hotspot' >'$CARD_SELECTION_FILE'; touch '$RESULT_FILE'"
+)
+
+###############################################################################
+# AUDIO CARD BUTTONS
+###############################################################################
+
+if (( PIPEWIRE_CARDS_AVAILABLE )); then
+    for i in "${!CARDS[@]}"; do
+        card="${CARDS[$i]%%|*}"
+        description="${CARDS[$i]#*|}"
+        label="$(card_display_label "$card" "$description")"
+
+        ARGS+=(
+            -z "$label"
+            "touch '$ACTION_STARTED_FILE'; printf '%s\n' '$i' >'$CARD_SELECTION_FILE'; touch '$RESULT_FILE'"
+        )
+    done
+fi
+
+###############################################################################
+# SHOW SWAYNAG
+###############################################################################
+
+SWAYNAG_LOG="/tmp/audio-switch-swaynag.$$"
+
+swaynag "${ARGS[@]}" \
+    >"$SWAYNAG_LOG" 2>&1 &
+
 SWAYNAG_PID=$!
 
+
 while [[ ! -f "$RESULT_FILE" ]]; do
-    if ! kill -0 "$SWAYNAG_PID" 2>/dev/null; then
-        echo "Audio device selection was cancelled."
-        exit 1
+    if kill -0 "$SWAYNAG_PID" 2>/dev/null; then
+        sleep 0.1
+        continue
     fi
-    sleep 0.1
+
+    wait "$SWAYNAG_PID" 2>/dev/null
+    SWAYNAG_STATUS=$?
+
+    if [[ -f "$ACTION_STARTED_FILE" ]]; then
+        echo "Waiting for the selected audio action to finish." \
+            >>"$ACTION_LOG"
+
+        while [[ ! -f "$RESULT_FILE" ]]; do
+            sleep 0.1
+        done
+
+        break
+    fi
+
+    if [[ -s "$SWAYNAG_LOG" ]]; then
+        echo
+        echo "Swaynag exited before completing the action."
+        echo
+        cat "$SWAYNAG_LOG"
+
+        exit "${SWAYNAG_STATUS:-1}"
+    fi
+
+    echo
+    echo "No audio action was selected."
+
+    pause_before_close
+    exit 0
 done
+
+if kill -0 "$SWAYNAG_PID" 2>/dev/null; then
+    kill "$SWAYNAG_PID" 2>/dev/null || true
+fi
+
 wait "$SWAYNAG_PID" 2>/dev/null || true
 
 if [[ ! -f "$CARD_SELECTION_FILE" ]]; then
-    echo "No audio device was selected."
+    echo "No audio action was selected."
     exit 1
 fi
 
 SELECTED_CARD_VALUE="$(cat "$CARD_SELECTION_FILE")"
-if [[ "$SELECTED_CARD_VALUE" == "Audio reset" ]]; then
+
+###############################################################################
+# HANDLE HOTSPOT TOGGLE
+###############################################################################
+
+if [[ "$SELECTED_CARD_VALUE" == "toggle-airplay-hotspot" ]]; then
+    if toggle_hotspot; then
+        HOTSPOT_RESULT="$(
+            cat "$CARD_SELECTION_FILE" \
+                2>/dev/null || true
+        )"
+
+        echo
+
+        case "$HOTSPOT_RESULT" in
+            "Hotspot started")
+                echo "AirPlay hotspot started."
+                echo
+                echo "NetworkManager connection:"
+                echo "$HOTSPOT_CONNECTION"
+                ;;
+
+            "Hotspot stopped")
+                echo "AirPlay hotspot stopped."
+                ;;
+
+            *)
+                echo "AirPlay hotspot action completed."
+                ;;
+        esac
+
+    pause_before_close
+        exit 0
+    fi
+
     echo
-    echo "Audio reset completed."
+    echo "The AirPlay hotspot could not be toggled."
+
+    if [[ -s "$ACTION_LOG" ]]; then
+        echo
+        echo "Details:"
+        cat "$ACTION_LOG"
+    fi
+
+    exit 1
+fi
+
+
+
+
+###############################################################################
+# HANDLE COMBINED AIRPLAY CONTROLS MENU
+###############################################################################
+if [[ "$SELECTED_CARD_VALUE" == "airplay-controls" ]]; then
+    HYPERX_STATE="$(read_state_file "$HYPERX_STATE_FILE")"
+    BUILTIN_STATE="$(read_state_file "$BUILTIN_STATE_FILE")"
+
+    HYPERX_CLOUD_LABEL="HyperX: Cloud III"
+    HYPERX_EARPODS_LABEL="HyperX: EarPods"
+    BUILTIN_CLOUD_LABEL="Built-in: Cloud III"
+    BUILTIN_EARPODS_LABEL="Built-in: EarPods"
+
+    if pid_file_running "$HYPERX_PID_FILE"; then
+        case "$HYPERX_STATE" in
+            cloud3)
+                HYPERX_CLOUD_LABEL+=" [active, select to stop]"
+                ;;
+            earpods)
+                HYPERX_EARPODS_LABEL+=" [active, select to stop]"
+                ;;
+        esac
+    fi
+
+    if pid_file_running "$BUILTIN_PID_FILE"; then
+        case "$BUILTIN_STATE" in
+            cloud3)
+                BUILTIN_CLOUD_LABEL+=" [active, select to stop]"
+                ;;
+            earpods)
+                BUILTIN_EARPODS_LABEL+=" [active, select to stop]"
+                ;;
+        esac
+    fi
+
     echo
-    read -n 1 -rsp "Press any key to close..."
+    echo "AirPlay Controls"
     echo
+    echo "Shared services"
+    printf 'NQPTP:      '
+    nqptp_running && echo running || echo stopped
+    printf 'Shairport:  '
+    shairport_running && echo running || echo stopped
+    echo
+    echo "Output slots"
+    printf 'HyperX:     '
+    if pid_file_running "$HYPERX_PID_FILE"; then
+        echo "${HYPERX_STATE:-active}"
+    else
+        echo stopped
+    fi
+
+    printf 'Built-in:   '
+    if pid_file_running "$BUILTIN_PID_FILE"; then
+        echo "${BUILTIN_STATE:-active}"
+    else
+        echo stopped
+    fi
+
+    echo
+    echo "[0] Exit without changes"
+    echo "[1] $HYPERX_CLOUD_LABEL"
+    echo "[2] $HYPERX_EARPODS_LABEL"
+    echo "[3] $BUILTIN_CLOUD_LABEL"
+    echo "[4] $BUILTIN_EARPODS_LABEL"
+    echo "[5] Restart AirPlay receiver"
+    echo
+
+    read -rp "Select AirPlay action: " AIRPLAY_CHOICE
+
+    case "$AIRPLAY_CHOICE" in
+        0)
+            echo
+            echo "No changes made."
+    pause_before_close
+            exit 0
+            ;;
+        1)
+            SELECTED_CARD_VALUE="dual-hyperx-cloud3"
+            ;;
+        2)
+            SELECTED_CARD_VALUE="dual-hyperx-earpods"
+            ;;
+        3)
+            SELECTED_CARD_VALUE="dual-builtin-cloud3"
+            ;;
+        4)
+            SELECTED_CARD_VALUE="dual-builtin-earpods"
+            ;;
+        5)
+            SELECTED_CARD_VALUE="restart-airplay-stream"
+            ;;
+        *)
+            echo "Invalid AirPlay selection."
+            exit 1
+            ;;
+    esac
+fi
+
+if [[ "$SELECTED_CARD_VALUE" == "restart-airplay-stream" ]]; then
+    SHAIRPORT_CONFIG="/home/joel/Documents/prefs/audio/airplay/shairport-sync.conf"
+
+    mapfile -t EXISTING_SHAIRPORT_PIDS < <(
+        shairport_pids
+    )
+
+    for shairport_pid in "${EXISTING_SHAIRPORT_PIDS[@]}"; do
+        [[ "$shairport_pid" =~ ^[[:digit:]]+$ ]] || continue
+        kill -TERM "$shairport_pid" 2>/dev/null || true
+    done
+
+    for _ in {1..50}; do
+        shairport_running || break
+        sleep 0.1
+    done
+
+    if shairport_running; then
+        mapfile -t EXISTING_SHAIRPORT_PIDS < <(
+            shairport_pids
+        )
+
+        for shairport_pid in "${EXISTING_SHAIRPORT_PIDS[@]}"; do
+            [[ "$shairport_pid" =~ ^[[:digit:]]+$ ]] || continue
+            kill -KILL "$shairport_pid" 2>/dev/null || true
+        done
+    fi
+
+    rm -f "$AUDIO_STACK_DIR/shairport-sync.pid"
+    : >"$SHAIRPORT_LOG"
+
+    if [[ ! -f "$SHAIRPORT_CONFIG" ]]; then
+        echo
+        echo "Shairport configuration was not found:"
+        echo "$SHAIRPORT_CONFIG"
+        echo
+
+    pause_before_close
+        exit 1
+    fi
+
+    nohup shairport-sync \
+        -c "$SHAIRPORT_CONFIG" \
+        -vv \
+        >>"$SHAIRPORT_LOG" 2>&1 &
+
+    shairport_pid=$!
+
+    printf '%s\n' "$shairport_pid" \
+        >"$AUDIO_STACK_DIR/shairport-sync.pid"
+
+    SHAIRPORT_RESTART_OK=1
+
+    for _ in {1..30}; do
+        if ! kill -0 "$shairport_pid" 2>/dev/null; then
+            SHAIRPORT_RESTART_OK=0
+            break
+        fi
+
+        sleep 0.1
+    done
+
+    if (( ! SHAIRPORT_RESTART_OK )); then
+        echo
+        echo "Shairport Sync exited during restart."
+        echo
+        tail -n 100 "$SHAIRPORT_LOG"
+        echo
+
+        rm -f "$AUDIO_STACK_DIR/shairport-sync.pid"
+
+    pause_before_close
+        exit 1
+    fi
+
+    echo
+    echo "AirPlay receiver restarted."
+    echo "Reconnect Joel Laptop AirPlay on the sender."
+    echo
+
+    pause_before_close
     exit 0
 fi
+###############################################################################
+# HANDLE INDEPENDENT HYPERX AND BUILT-IN CAMILLADSP SLOTS
+###############################################################################
+
+if [[ "$SELECTED_CARD_VALUE" == dual-* ]]; then
+    case "$SELECTED_CARD_VALUE" in
+        dual-hyperx-cloud3)
+            SLOT="hyperx"
+            PROFILE="cloud3"
+            CONFIG="$HYPERX_CLOUD3_CONFIG"
+            PID_FILE="$HYPERX_PID_FILE"
+            STATE_FILE="$HYPERX_STATE_FILE"
+            LOG_FILE="$HYPERX_LOG"
+            OUTPUT_LABEL="HyperX"
+            ;;
+        dual-hyperx-earpods)
+            SLOT="hyperx"
+            PROFILE="earpods"
+            CONFIG="$HYPERX_EARPODS_CONFIG"
+            PID_FILE="$HYPERX_PID_FILE"
+            STATE_FILE="$HYPERX_STATE_FILE"
+            LOG_FILE="$HYPERX_LOG"
+            OUTPUT_LABEL="HyperX"
+            ;;
+        dual-builtin-cloud3)
+            SLOT="builtin"
+            PROFILE="cloud3"
+            CONFIG="$BUILTIN_CLOUD3_CONFIG"
+            PID_FILE="$BUILTIN_PID_FILE"
+            STATE_FILE="$BUILTIN_STATE_FILE"
+            LOG_FILE="$BUILTIN_LOG"
+            OUTPUT_LABEL="Built-in"
+            ;;
+        dual-builtin-earpods)
+            SLOT="builtin"
+            PROFILE="earpods"
+            CONFIG="$BUILTIN_EARPODS_CONFIG"
+            PID_FILE="$BUILTIN_PID_FILE"
+            STATE_FILE="$BUILTIN_STATE_FILE"
+            LOG_FILE="$BUILTIN_LOG"
+            OUTPUT_LABEL="Built-in"
+            ;;
+        *)
+            echo "Unknown dual-output action."
+            exit 1
+            ;;
+    esac
+
+    stop_camilla_slot() {
+        local pid_file="$1"
+        local state_file="$2"
+        local pid
+
+        if [[ -s "$pid_file" ]]; then
+            read -r pid <"$pid_file"
+
+            if [[ "$pid" =~ ^[[:digit:]]+$ ]]; then
+                kill -TERM "$pid" 2>/dev/null || true
+
+                for _ in {1..50}; do
+                    kill -0 "$pid" 2>/dev/null || break
+                    sleep 0.1
+                done
+
+                if kill -0 "$pid" 2>/dev/null; then
+                    kill -KILL "$pid" 2>/dev/null || true
+                fi
+            fi
+        fi
+
+        rm -f "$pid_file" "$state_file"
+    }
+
+    stop_all_shairport() {
+        local pid
+
+        while read -r pid; do
+            [[ "$pid" =~ ^[[:digit:]]+$ ]] || continue
+            kill -TERM "$pid" 2>/dev/null || true
+        done < <(shairport_pids)
+
+        for _ in {1..50}; do
+            shairport_running || return 0
+            sleep 0.1
+        done
+
+        while read -r pid; do
+            [[ "$pid" =~ ^[[:digit:]]+$ ]] || continue
+            kill -KILL "$pid" 2>/dev/null || true
+        done < <(shairport_pids)
+    }
+
+    stop_shared_airplay() {
+        stop_all_shairport
+
+        sudo -n pkill -TERM -x nqptp 2>/dev/null ||
+            pkill -TERM -x nqptp 2>/dev/null ||
+            true
+
+        for _ in {1..50}; do
+            nqptp_running || break
+            sleep 0.1
+        done
+
+        if nqptp_running; then
+            sudo -n pkill -KILL -x nqptp 2>/dev/null ||
+                pkill -KILL -x nqptp 2>/dev/null ||
+                true
+        fi
+
+        rm -f "$AUDIO_STACK_DIR/shairport-sync.pid"
+    }
+
+    start_shared_airplay() {
+        local shairport_pid
+
+        if ! nqptp_running; then
+            : >"$NQPTP_LOG"
+
+            sudo -n sh -c \
+                "nohup '$(command -v nqptp)' >'$NQPTP_LOG' 2>&1 &"
+
+            for _ in {1..50}; do
+                nqptp_running && break
+                sleep 0.1
+            done
+
+            nqptp_running || return 1
+        fi
+
+        if ! shairport_running; then
+            : >"$SHAIRPORT_LOG"
+
+            nohup shairport-sync \
+                -c "$AIRPLAY_CONFIG_DIR/shairport-sync.conf" \
+                -vv \
+                >>"$SHAIRPORT_LOG" 2>&1 &
+
+            shairport_pid=$!
+
+            printf '%s\n' "$shairport_pid" \
+                >"$AUDIO_STACK_DIR/shairport-sync.pid"
+
+            for _ in {1..30}; do
+                kill -0 "$shairport_pid" 2>/dev/null ||
+                    return 1
+
+                sleep 0.1
+            done
+        fi
+    }
+
+    stop_pipewire_for_dual_mode() {
+        systemctl --user stop \
+            wireplumber.service \
+            pipewire-pulse.service \
+            pipewire-pulse.socket \
+            pipewire.service \
+            pipewire.socket \
+            >>"$ACTION_LOG" 2>&1 ||
+            true
+
+        for _ in {1..50}; do
+            if ! pgrep -x pipewire >/dev/null 2>&1 &&
+               ! pgrep -x wireplumber >/dev/null 2>&1; then
+                return 0
+            fi
+
+            sleep 0.1
+        done
+
+        return 1
+    }
+
+    restore_pipewire_after_dual_mode() {
+        systemctl --user start \
+            pipewire.socket \
+            pipewire-pulse.socket \
+            pipewire.service \
+            pipewire-pulse.service \
+            wireplumber.service \
+            >>"$ACTION_LOG" 2>&1 ||
+            true
+
+        for _ in {1..100}; do
+            pactl info >/dev/null 2>&1 && return 0
+            sleep 0.1
+        done
+
+        return 1
+    }
+
+    start_camilla_slot() {
+        local config="$1"
+        local pid_file="$2"
+        local state_file="$3"
+        local log_file="$4"
+        local profile="$5"
+        local pid
+
+        [[ -f "$config" ]] || {
+            echo "Missing generated config: $config" \
+                >>"$ACTION_LOG"
+            return 1
+        }
+
+        camilladsp -c "$config" \
+            >>"$ACTION_LOG" 2>&1 ||
+            return 1
+
+        : >"$log_file"
+
+        nohup camilladsp \
+            --loglevel=debug \
+            --logfile="$log_file" \
+            "$config" \
+            >>"$log_file" 2>&1 &
+
+        pid=$!
+
+        printf '%s\n' "$pid" >"$pid_file"
+
+        for _ in {1..30}; do
+            if ! kill -0 "$pid" 2>/dev/null; then
+                tail -n 100 "$log_file" \
+                    >>"$ACTION_LOG" 2>&1 ||
+                    true
+
+                rm -f "$pid_file" "$state_file"
+                return 1
+            fi
+
+            sleep 0.1
+        done
+
+        printf '%s\n' "$profile" >"$state_file"
+    }
+
+    CURRENT_SLOT_PROFILE="$(read_state_file "$STATE_FILE")"
+
+    if pid_file_running "$PID_FILE" &&
+       [[ "$CURRENT_SLOT_PROFILE" == "$PROFILE" ]]; then
+
+        stop_camilla_slot "$HYPERX_PID_FILE" "$HYPERX_STATE_FILE"
+
+        stop_camilla_slot "$BUILTIN_PID_FILE" "$BUILTIN_STATE_FILE"
+
+        stop_shared_airplay
+        restore_pipewire_after_dual_mode
+
+        echo
+        echo "$OUTPUT_LABEL $PROFILE convolution stopped."
+    pause_before_close
+        exit 0
+    fi
+
+    # Exactly one AirPlay output may run at a time.
+    HAD_ACTIVE_SLOT=0
+
+    if pid_file_running "$HYPERX_PID_FILE" ||
+       pid_file_running "$BUILTIN_PID_FILE"; then
+        HAD_ACTIVE_SLOT=1
+    fi
+
+    stop_camilla_slot "$HYPERX_PID_FILE" "$HYPERX_STATE_FILE"
+
+    stop_camilla_slot "$BUILTIN_PID_FILE" "$BUILTIN_STATE_FILE"
+
+    if (( ! HAD_ACTIVE_SLOT )); then
+        if ! stop_pipewire_for_dual_mode; then
+            echo "PipeWire did not release the devices."
+            exit 1
+        fi
+    fi
+
+    if ! start_camilla_slot \
+        "$CONFIG" \
+        "$PID_FILE" \
+        "$STATE_FILE" \
+        "$LOG_FILE" \
+        "$PROFILE"; then
+
+        rm -f "$PID_FILE" "$STATE_FILE"
+
+        if ! pid_file_running "$HYPERX_PID_FILE" &&
+           ! pid_file_running "$BUILTIN_PID_FILE"; then
+
+            stop_shared_airplay
+            restore_pipewire_after_dual_mode
+        fi
+
+        echo
+        echo "$OUTPUT_LABEL CamillaDSP instance failed."
+
+        if [[ -s "$LOG_FILE" ]]; then
+            echo
+            echo "$OUTPUT_LABEL CamillaDSP log:"
+            tail -n 100 "$LOG_FILE"
+        fi
+
+        if [[ -s "$ACTION_LOG" ]]; then
+            echo
+            echo "Action log:"
+            cat "$ACTION_LOG"
+        fi
+
+        exit 1
+    fi
+
+    if ! start_shared_airplay; then
+        stop_camilla_slot "$PID_FILE" "$STATE_FILE"
+
+        if ! pid_file_running "$HYPERX_PID_FILE" &&
+           ! pid_file_running "$BUILTIN_PID_FILE"; then
+
+            restore_pipewire_after_dual_mode
+        fi
+
+        echo "Shared AirPlay services failed to start."
+        cat "$ACTION_LOG"
+        exit 1
+    fi
+
+    echo
+    echo "$OUTPUT_LABEL $PROFILE convolution started."
+    echo
+    echo "HyperX:"
+    if pid_file_running "$HYPERX_PID_FILE"; then
+        read_state_file "$HYPERX_STATE_FILE"
+    else
+        echo stopped
+    fi
+
+    echo
+    echo "Built-in:"
+    if pid_file_running "$BUILTIN_PID_FILE"; then
+        read_state_file "$BUILTIN_STATE_FILE"
+    else
+        echo stopped
+    fi
+
+    pause_before_close
+    exit 0
+fi
+###############################################################################
+# HANDLE NON-CARD ACTIONS
+###############################################################################
+
+case "$SELECTED_CARD_VALUE" in
+    "Audio reset")
+        echo
+        echo "Audio reset completed."
+        echo
+
+    pause_before_close
+
+        exit 0
+        ;;
+    "Audio reset failed")
+        echo
+        echo "The DSP stack was stopped, but PipeWire did not become ready."
+        echo
+        echo "Check:"
+        echo "  systemctl --user status pipewire.service"
+        echo "  systemctl --user status wireplumber.service"
+        echo
+
+    pause_before_close
+
+        exit 1
+        ;;
+            "Hotspot started")
+        echo
+        echo "AirPlay hotspot started."
+        echo
+        echo "Connect the sender to the hotspot network."
+        echo
+
+    pause_before_close
+        exit 0
+        ;;
+
+    "Hotspot stopped")
+        echo
+        echo "AirPlay hotspot stopped."
+        echo
+
+    pause_before_close
+        exit 0
+        ;;
+
+    "Hotspot action failed")
+        echo
+        echo "The AirPlay hotspot action failed."
+        echo
+        cat "$ACTION_LOG"
+        echo
+
+    pause_before_close
+        exit 1
+        ;;
+esac
 
 if [[ ! "$SELECTED_CARD_VALUE" =~ ^[0-9]+$ ]] || (( SELECTED_CARD_VALUE >= ${#CARDS[@]} )); then
     echo "Invalid audio device selection."
@@ -278,9 +1345,7 @@ if (( ${#PROFILES[@]} == 0 )); then
     selected && in_profiles && /^[[:space:]]*Active Profile:/ { exit }
     selected && in_profiles { print }
     '
-    echo
-    read -n 1 -rsp "Press any key to close..."
-    echo
+    pause_before_close
     exit 1
 fi
 
@@ -563,6 +1628,5 @@ else
     echo "$SELECTED_PROFILE"
 fi
 
-echo
-read -n 1 -rsp "Press any key to close..."
-echo
+    pause_before_close
+exit 0
