@@ -1,4 +1,47 @@
 #!/usr/bin/env bash
+set -u
+
+HOME_DIR="/home/joel"
+AIRPLAY_CONFIG_DIR="/home/joel/Documents/prefs/audio/airplay"
+AUDIO_STACK_DIR="/run/user/1000/joel-airplay-stack"
+RUNTIME_CONFIG_DIR="/run/user/1000/joel-airplay-stack/configs"
+PERSIST_DIR="/home/joel/.local/state/audio-suspend-toggle"
+
+LAST_CONTROL_FILE="$PERSIST_DIR/last-airplay-control"
+ACTIVE_CONTROL_FILE="$AUDIO_STACK_DIR/active-control"
+HYPERX_CLOUD3_TEMPLATE="$AIRPLAY_CONFIG_DIR/camilladsp-hyperx-cloud3.yml"
+HYPERX_EARPODS_TEMPLATE="$AIRPLAY_CONFIG_DIR/camilladsp-hyperx-earpods.yml"
+BUILTIN_CLOUD3_TEMPLATE="$AIRPLAY_CONFIG_DIR/camilladsp-builtin-cloud3.yml"
+BUILTIN_EARPODS_TEMPLATE="$AIRPLAY_CONFIG_DIR/camilladsp-builtin-earpods.yml"
+
+HYPERX_CLOUD3_CONFIG="$RUNTIME_CONFIG_DIR/camilladsp-hyperx-cloud3.yml"
+HYPERX_EARPODS_CONFIG="$RUNTIME_CONFIG_DIR/camilladsp-hyperx-earpods.yml"
+BUILTIN_CLOUD3_CONFIG="$RUNTIME_CONFIG_DIR/camilladsp-builtin-cloud3.yml"
+BUILTIN_EARPODS_CONFIG="$RUNTIME_CONFIG_DIR/camilladsp-builtin-earpods.yml"
+
+HYPERX_STATE_FILE="$AUDIO_STACK_DIR/hyperx-profile"
+BUILTIN_STATE_FILE="$AUDIO_STACK_DIR/builtin-profile"
+
+HYPERX_PID_FILE="$AUDIO_STACK_DIR/camilladsp-hyperx.pid"
+BUILTIN_PID_FILE="$AUDIO_STACK_DIR/camilladsp-builtin.pid"
+
+HYPERX_LOG="$AUDIO_STACK_DIR/camilladsp-hyperx.log"
+BUILTIN_LOG="$AUDIO_STACK_DIR/camilladsp-builtin.log"
+
+SHAIRPORT_CONFIG="$AIRPLAY_CONFIG_DIR/shairport-sync.conf"
+SHAIRPORT_PID_FILE="$AUDIO_STACK_DIR/shairport-sync.pid"
+SHAIRPORT_LOG="$AUDIO_STACK_DIR/shairport-sync.log"
+NQPTP_LOG="$AUDIO_STACK_DIR/nqptp.log"
+
+HOTSPOT_CONNECTION="AirPlay Direct"
+
+mkdir -p \
+    "$AUDIO_STACK_DIR" \
+    "$RUNTIME_CONFIG_DIR" \
+    "$PERSIST_DIR"
+
+chmod 700 "$PERSIST_DIR" 2>/dev/null || true
+
 
 RESULT_FILE="/tmp/audio-toggle-complete.$$"
 ACTION_STARTED_FILE="/tmp/audio-toggle-started.$$"
@@ -217,34 +260,6 @@ card_display_label() {
 ###############################################################################
 
 ARGS=(-t warning -y overlay -m "Audio Device Select")
-AIRPLAY_CONFIG_DIR="$HOME/Documents/prefs/audio/airplay"
-AUDIO_STACK_DIR="${XDG_RUNTIME_DIR:-/tmp}/${USER:-user}-airplay-stack"
-RUNTIME_CONFIG_DIR="$AUDIO_STACK_DIR/configs"
-
-mkdir -p "$AUDIO_STACK_DIR" "$RUNTIME_CONFIG_DIR"
-
-HYPERX_CLOUD3_TEMPLATE="$AIRPLAY_CONFIG_DIR/camilladsp-hyperx-cloud3.yml"
-HYPERX_EARPODS_TEMPLATE="$AIRPLAY_CONFIG_DIR/camilladsp-hyperx-earpods.yml"
-BUILTIN_CLOUD3_TEMPLATE="$AIRPLAY_CONFIG_DIR/camilladsp-builtin-cloud3.yml"
-BUILTIN_EARPODS_TEMPLATE="$AIRPLAY_CONFIG_DIR/camilladsp-builtin-earpods.yml"
-
-HYPERX_CLOUD3_CONFIG="$RUNTIME_CONFIG_DIR/camilladsp-hyperx-cloud3.yml"
-HYPERX_EARPODS_CONFIG="$RUNTIME_CONFIG_DIR/camilladsp-hyperx-earpods.yml"
-BUILTIN_CLOUD3_CONFIG="$RUNTIME_CONFIG_DIR/camilladsp-builtin-cloud3.yml"
-BUILTIN_EARPODS_CONFIG="$RUNTIME_CONFIG_DIR/camilladsp-builtin-earpods.yml"
-
-HYPERX_STATE_FILE="$AUDIO_STACK_DIR/hyperx-profile"
-BUILTIN_STATE_FILE="$AUDIO_STACK_DIR/builtin-profile"
-
-HYPERX_PID_FILE="$AUDIO_STACK_DIR/camilladsp-hyperx.pid"
-BUILTIN_PID_FILE="$AUDIO_STACK_DIR/camilladsp-builtin.pid"
-
-HYPERX_LOG="$AUDIO_STACK_DIR/camilladsp-hyperx.log"
-BUILTIN_LOG="$AUDIO_STACK_DIR/camilladsp-builtin.log"
-
-SHAIRPORT_LOG="$AUDIO_STACK_DIR/shairport-sync.log"
-NQPTP_LOG="$AUDIO_STACK_DIR/nqptp.log"
-mkdir -p "$AUDIO_STACK_DIR"
 
 ###############################################################################
 # GENERATE MACHINE-LOCAL CAMILLADSP CONFIGS
@@ -356,7 +371,7 @@ generate_camilla_config() {
     temporary="${destination}.tmp"
 
     sed \
-        -e "s|__HOME__|$HOME|g" \
+        -e "s|__HOME__|$HOME_DIR|g" \
         -e "s|__USB_PLAYBACK_DEVICE__|$playback_device|g" \
         -e "s|__BUILTIN_PLAYBACK_DEVICE__|$playback_device|g" \
         "$template" \
@@ -421,7 +436,8 @@ pkill -TERM -x camilladsp >/dev/null 2>&1 || true
 sudo -n pkill -TERM -x nqptp >/dev/null 2>&1 || true
 
 rm -f \
-    "$AUDIO_STACK_DIR/shairport-sync.pid" \
+    "$ACTIVE_CONTROL_FILE" \
+    "$SHAIRPORT_PID_FILE" \
     "$AUDIO_STACK_DIR/shairport-sync.port" \
     "$AUDIO_STACK_DIR/shairport-sync-runtime.conf" \
     "$AUDIO_STACK_DIR/hyperx-profile" \
@@ -635,6 +651,50 @@ pid_file_running() {
     return 0
 }
 
+get_active_airplay_control() {
+    local slot="" profile="" temporary=""
+
+    if [[ -r "$ACTIVE_CONTROL_FILE" ]]; then
+        read -r slot profile <"$ACTIVE_CONTROL_FILE" || true
+        case "$slot:$profile" in
+            hyperx:cloud3|hyperx:earpods)
+                pid_file_running "$HYPERX_PID_FILE" && { printf '%s %s\n' "$slot" "$profile"; return 0; }
+                ;;
+            builtin:cloud3|builtin:earpods)
+                pid_file_running "$BUILTIN_PID_FILE" && { printf '%s %s\n' "$slot" "$profile"; return 0; }
+                ;;
+        esac
+        rm -f "$ACTIVE_CONTROL_FILE"
+    fi
+
+    if pid_file_running "$HYPERX_PID_FILE"; then
+        profile="$(read_state_file "$HYPERX_STATE_FILE")"
+        case "$profile" in
+            cloud3|earpods)
+                temporary="${ACTIVE_CONTROL_FILE}.tmp.$$"
+                printf 'hyperx %s\n' "$profile" >"$temporary"
+                mv -f "$temporary" "$ACTIVE_CONTROL_FILE"
+                printf 'hyperx %s\n' "$profile"
+                return 0
+                ;;
+        esac
+    fi
+
+    if pid_file_running "$BUILTIN_PID_FILE"; then
+        profile="$(read_state_file "$BUILTIN_STATE_FILE")"
+        case "$profile" in
+            cloud3|earpods)
+                temporary="${ACTIVE_CONTROL_FILE}.tmp.$$"
+                printf 'builtin %s\n' "$profile" >"$temporary"
+                mv -f "$temporary" "$ACTIVE_CONTROL_FILE"
+                printf 'builtin %s\n' "$profile"
+                return 0
+                ;;
+        esac
+    fi
+    return 1
+}
+
 if ! pid_file_running "$HYPERX_PID_FILE"; then
     rm -f "$HYPERX_STATE_FILE"
 fi
@@ -643,25 +703,22 @@ if ! pid_file_running "$BUILTIN_PID_FILE"; then
     rm -f "$BUILTIN_STATE_FILE"
 fi
 
-HYPERX_STATE="$(read_state_file "$HYPERX_STATE_FILE")"
-BUILTIN_STATE="$(read_state_file "$BUILTIN_STATE_FILE")"
+ACTIVE_AIRPLAY_CONTROL=""
+ACTIVE_AIRPLAY_SLOT=""
+ACTIVE_AIRPLAY_PROFILE=""
 
-if pid_file_running "$HYPERX_PID_FILE" ||
-   pid_file_running "$BUILTIN_PID_FILE"; then
-
-    AIRPLAY_CONTROLS_LABEL="AirPlay Controls"
-
-    if pid_file_running "$HYPERX_PID_FILE"; then
-        AIRPLAY_CONTROLS_LABEL+=" [HyperX: ${HYPERX_STATE:-active}]"
-    fi
-
-    if pid_file_running "$BUILTIN_PID_FILE"; then
-        AIRPLAY_CONTROLS_LABEL+=" [Built-in: ${BUILTIN_STATE:-active}]"
-    fi
+if ACTIVE_AIRPLAY_CONTROL="$(get_active_airplay_control)"; then
+    read -r ACTIVE_AIRPLAY_SLOT ACTIVE_AIRPLAY_PROFILE <<<"$ACTIVE_AIRPLAY_CONTROL"
+    case "$ACTIVE_AIRPLAY_SLOT:$ACTIVE_AIRPLAY_PROFILE" in
+        hyperx:cloud3) AIRPLAY_CONTROLS_LABEL="AirPlay Controls [active: HyperX Cloud III]" ;;
+        hyperx:earpods) AIRPLAY_CONTROLS_LABEL="AirPlay Controls [active: HyperX EarPods]" ;;
+        builtin:cloud3) AIRPLAY_CONTROLS_LABEL="AirPlay Controls [active: Built-in Cloud III]" ;;
+        builtin:earpods) AIRPLAY_CONTROLS_LABEL="AirPlay Controls [active: Built-in EarPods]" ;;
+    esac
 elif shairport_running || nqptp_running; then
-    AIRPLAY_CONTROLS_LABEL="AirPlay Controls [partial stack active]"
+    AIRPLAY_CONTROLS_LABEL="AirPlay Controls [partial active]"
 else
-    AIRPLAY_CONTROLS_LABEL="AirPlay Controls [stopped]"
+    AIRPLAY_CONTROLS_LABEL="AirPlay Controls [inactive]"
 fi
 
 ARGS+=(
@@ -810,33 +867,21 @@ fi
 # HANDLE COMBINED AIRPLAY CONTROLS MENU
 ###############################################################################
 if [[ "$SELECTED_CARD_VALUE" == "airplay-controls" ]]; then
-    HYPERX_STATE="$(read_state_file "$HYPERX_STATE_FILE")"
-    BUILTIN_STATE="$(read_state_file "$BUILTIN_STATE_FILE")"
+    HYPERX_CLOUD_LABEL="HyperX: Cloud III [inactive]"
+    HYPERX_EARPODS_LABEL="HyperX: EarPods [inactive]"
+    BUILTIN_CLOUD_LABEL="Built-in: Cloud III [inactive]"
+    BUILTIN_EARPODS_LABEL="Built-in: EarPods [inactive]"
+    ACTIVE_AIRPLAY_CONTROL=""
+    ACTIVE_AIRPLAY_SLOT=""
+    ACTIVE_AIRPLAY_PROFILE=""
 
-    HYPERX_CLOUD_LABEL="HyperX: Cloud III"
-    HYPERX_EARPODS_LABEL="HyperX: EarPods"
-    BUILTIN_CLOUD_LABEL="Built-in: Cloud III"
-    BUILTIN_EARPODS_LABEL="Built-in: EarPods"
-
-    if pid_file_running "$HYPERX_PID_FILE"; then
-        case "$HYPERX_STATE" in
-            cloud3)
-                HYPERX_CLOUD_LABEL+=" [active, select to stop]"
-                ;;
-            earpods)
-                HYPERX_EARPODS_LABEL+=" [active, select to stop]"
-                ;;
-        esac
-    fi
-
-    if pid_file_running "$BUILTIN_PID_FILE"; then
-        case "$BUILTIN_STATE" in
-            cloud3)
-                BUILTIN_CLOUD_LABEL+=" [active, select to stop]"
-                ;;
-            earpods)
-                BUILTIN_EARPODS_LABEL+=" [active, select to stop]"
-                ;;
+    if ACTIVE_AIRPLAY_CONTROL="$(get_active_airplay_control)"; then
+        read -r ACTIVE_AIRPLAY_SLOT ACTIVE_AIRPLAY_PROFILE <<<"$ACTIVE_AIRPLAY_CONTROL"
+        case "$ACTIVE_AIRPLAY_SLOT:$ACTIVE_AIRPLAY_PROFILE" in
+            hyperx:cloud3) HYPERX_CLOUD_LABEL="HyperX: Cloud III [active, select to stop]" ;;
+            hyperx:earpods) HYPERX_EARPODS_LABEL="HyperX: EarPods [active, select to stop]" ;;
+            builtin:cloud3) BUILTIN_CLOUD_LABEL="Built-in: Cloud III [active, select to stop]" ;;
+            builtin:earpods) BUILTIN_EARPODS_LABEL="Built-in: EarPods [active, select to stop]" ;;
         esac
     fi
 
@@ -850,19 +895,13 @@ if [[ "$SELECTED_CARD_VALUE" == "airplay-controls" ]]; then
     shairport_running && echo running || echo stopped
     echo
     echo "Output slots"
-    printf 'HyperX:     '
-    if pid_file_running "$HYPERX_PID_FILE"; then
-        echo "${HYPERX_STATE:-active}"
-    else
-        echo stopped
-    fi
-
-    printf 'Built-in:   '
-    if pid_file_running "$BUILTIN_PID_FILE"; then
-        echo "${BUILTIN_STATE:-active}"
-    else
-        echo stopped
-    fi
+    case "$ACTIVE_AIRPLAY_SLOT:$ACTIVE_AIRPLAY_PROFILE" in
+        hyperx:cloud3) echo "HyperX:     Cloud III"; echo "Built-in:   stopped" ;;
+        hyperx:earpods) echo "HyperX:     EarPods"; echo "Built-in:   stopped" ;;
+        builtin:cloud3) echo "HyperX:     stopped"; echo "Built-in:   Cloud III" ;;
+        builtin:earpods) echo "HyperX:     stopped"; echo "Built-in:   EarPods" ;;
+        *) echo "HyperX:     stopped"; echo "Built-in:   stopped" ;;
+    esac
 
     echo
     echo "[0] Exit without changes"
@@ -932,7 +971,7 @@ if [[ "$SELECTED_CARD_VALUE" == "restart-airplay-stream" ]]; then
         done
     fi
 
-    rm -f "$AUDIO_STACK_DIR/shairport-sync.pid"
+    rm -f "$SHAIRPORT_PID_FILE"
     : >"$SHAIRPORT_LOG"
 
     if [[ ! -f "$SHAIRPORT_CONFIG" ]]; then
@@ -953,7 +992,7 @@ if [[ "$SELECTED_CARD_VALUE" == "restart-airplay-stream" ]]; then
     shairport_pid=$!
 
     printf '%s\n' "$shairport_pid" \
-        >"$AUDIO_STACK_DIR/shairport-sync.pid"
+        >"$SHAIRPORT_PID_FILE"
 
     SHAIRPORT_RESTART_OK=1
 
@@ -973,7 +1012,7 @@ if [[ "$SELECTED_CARD_VALUE" == "restart-airplay-stream" ]]; then
         tail -n 100 "$SHAIRPORT_LOG"
         echo
 
-        rm -f "$AUDIO_STACK_DIR/shairport-sync.pid"
+        rm -f "$SHAIRPORT_PID_FILE"
 
     pause_before_close
         exit 1
@@ -1058,6 +1097,8 @@ if [[ "$SELECTED_CARD_VALUE" == dual-* ]]; then
         fi
 
         rm -f "$pid_file" "$state_file"
+
+        rm -f "$ACTIVE_CONTROL_FILE"
     }
 
     stop_all_shairport() {
@@ -1097,7 +1138,7 @@ if [[ "$SELECTED_CARD_VALUE" == dual-* ]]; then
                 true
         fi
 
-        rm -f "$AUDIO_STACK_DIR/shairport-sync.pid"
+        rm -f "$SHAIRPORT_PID_FILE"
     }
 
     start_shared_airplay() {
@@ -1121,14 +1162,14 @@ if [[ "$SELECTED_CARD_VALUE" == dual-* ]]; then
             : >"$SHAIRPORT_LOG"
 
             nohup shairport-sync \
-                -c "$AIRPLAY_CONFIG_DIR/shairport-sync.conf" \
+                -c "$SHAIRPORT_CONFIG" \
                 -vv \
                 >>"$SHAIRPORT_LOG" 2>&1 &
 
             shairport_pid=$!
 
             printf '%s\n' "$shairport_pid" \
-                >"$AUDIO_STACK_DIR/shairport-sync.pid"
+                >"$SHAIRPORT_PID_FILE"
 
             for _ in {1..30}; do
                 kill -0 "$shairport_pid" 2>/dev/null ||
@@ -1186,6 +1227,7 @@ if [[ "$SELECTED_CARD_VALUE" == dual-* ]]; then
         local log_file="$4"
         local profile="$5"
         local pid
+        local temporary_active_control
 
         [[ -f "$config" ]] || {
             echo "Missing generated config: $config" \
@@ -1223,6 +1265,13 @@ if [[ "$SELECTED_CARD_VALUE" == dual-* ]]; then
         done
 
         printf '%s\n' "$profile" >"$state_file"
+
+        temporary_active_control="${ACTIVE_CONTROL_FILE}.tmp.$$"
+        printf '%s %s\n' "$SLOT" "$profile" >"$temporary_active_control"
+        mv -f "$temporary_active_control" "$ACTIVE_CONTROL_FILE"
+
+        umask 077
+        printf '%s %s\n' "$SLOT" "$profile" >"$LAST_CONTROL_FILE"
     }
 
     CURRENT_SLOT_PROFILE="$(read_state_file "$STATE_FILE")"

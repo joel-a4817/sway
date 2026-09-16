@@ -157,7 +157,7 @@ bindsym --no-repeat $mod+F5 exec bash -c '~/.config/sway/scripts/screen-capture.
 #screenshot
 
 #audio device output switch
-bindsym --locked --no-repeat $mod+F7 fullscreen disable; exec $term -T "$popup-audio-select" -e bash -c '~/.config/sway/scripts/audio-switch.sh'
+bindsym --locked --no-repeat $mod+F7 fullscreen disable; exec $term -T "$popup-audio-select" -e bash -c '~/.config/sway/scripts/audio/audio-switch.sh'
 
 #mount dev
 bindsym --no-repeat $mod+F8 fullscreen disable; exec $term -T "$popup-mount" -e bash -c '/home/joel/.config/sway/scripts/mount/mount-swaynag.sh'
@@ -326,7 +326,8 @@ bindsym --no-repeat $mod+r mode "resize"
      bindsym --locked XF86MonBrightnessDown exec brightnessctl set 5%-
      bindsym --locked XF86MonBrightnessUp exec brightnessctl set 5%+
 
-     bindsym --locked $mod+Control+Delete exec ~/.config/sway/scripts/mpv-toggle.sh
-     bindsym --locked $mod+Print exec systemctl suspend
+     bindsym --locked $mod+Control+Delete exec ~/.config/sway/scripts/audio/mpv-toggle.sh
+     bindsym --locked $mod+Print exec bash -lc '/home/joel/.config/sway/scripts/audio/audio-suspend-toggle.sh'
 
      bindsym --locked $mod+Shift+Delete exec bash -lc 'cur=$(pactl get-sink-volume @DEFAULT_SINK@ | grep -o "[0-9]\+%" | head -1 | tr -d "%"); new=$((cur + 5)); [ $new -gt 100 ] && new=100; pactl set-sink-volume @DEFAULT_SINK@ ${new}%'
+     bindsym XF86PowerOff output * power on
