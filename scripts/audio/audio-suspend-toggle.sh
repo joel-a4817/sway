@@ -320,7 +320,8 @@ stop_camilla() {
 
     rm -f \
         "$pid_file" \
-        "$state_file"
+        "$state_file" \
+        "$ACTIVE_CONTROL_FILE"
 
     if [[ -r "$ACTIVE_CONTROL_FILE" ]]; then
         read -r active_slot active_profile \
@@ -680,6 +681,67 @@ start_shared_airplay() {
 # START EVERYTHING
 ###############################################################################
 
+normalize_selected_hardware_volume() {
+    local slot="$1"
+    local playback_device
+    local card_number
+
+    playback_device="$(find_playback_device "$slot")" || {
+        echo "WARNING: unable to find hardware volume device for $slot"
+        return 1
+    }
+
+    card_number="$(
+        sed -nE \
+            's/^(plug)?hw:([0-9]+),[0-9]+$/\2/p' \
+            <<<"$playback_device"
+    )"
+
+    [[ "$card_number" =~ ^[0-9]+$ ]] || {
+        echo "WARNING: unable to extract ALSA card from $playback_device"
+        return 1
+    }
+
+    case "$slot" in
+        hyperx)
+            if amixer \
+                -c "$card_number" \
+                sset 'Speaker Volume' \
+                100% \
+                unmute \
+                >/dev/null 2>&1; then
+
+                echo "hardware volume normalized: HyperX card $card_number"
+                return 0
+            fi
+
+            echo "WARNING: HyperX Speaker Volume control was unavailable"
+            return 1
+            ;;
+
+        builtin)
+            if amixer \
+                -c "$card_number" \
+                sset Headphone \
+                100% \
+                unmute \
+                >/dev/null 2>&1; then
+
+                echo "hardware volume normalized: Built-in card $card_number"
+                return 0
+            fi
+
+            echo "WARNING: Built-in Headphone control was unavailable"
+            return 1
+            ;;
+
+        *)
+            echo "WARNING: invalid hardware volume slot: $slot"
+            return 1
+            ;;
+    esac
+}
+
 start_all() {
     local slot
     local profile
@@ -711,6 +773,12 @@ start_all() {
         "$BUILTIN_STATE_FILE"
 
     stop_shared_airplay
+
+    echo "normalizing selected hardware output"
+
+    normalize_selected_hardware_volume "$slot" || {
+        echo "WARNING: continuing without hardware volume normalization"
+    }
 
     echo "stopping PipeWire"
 
