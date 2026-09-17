@@ -331,7 +331,7 @@ bindsym --no-repeat $mod+r mode "resize"
      bindsym --locked $mod+Shift+Escape exec bash -lc 'cur=$(pactl get-sink-volume @DEFAULT_SINK@ | grep -o "[0-9]\+%" | head -1 | tr -d "%"); new=$((cur + 5)); [ $new -gt 100 ] && new=100; pactl set-sink-volume @DEFAULT_SINK@ ${new}%'
      bindsym --locked $mod+Control+Shift+Escape systemctl suspend
 
-     bindsym --locked $mod+Print exec bash -lc '/home/joel/.config/sway/scripts/audio/airplay-toggle.sh'
+     bindsym --locked $mod+Print exec bash -lc '/home/joel/.config/sway/scripts/audio/hotspot-toggle.sh'
      bindsym --locked $mod+Shift+Print exec bash -lc '/home/joel/.config/sway/scripts/audio/hyperx-cloud3-toggle.sh'
      bindsym --locked $mod+Control+Print exec bash -lc '/home/joel/.config/sway/scripts/audio/hyperx-earpods-toggle.sh'
      bindsym --locked $mod+Control+Shift+Print exec bash -lc '/home/joel/.config/sway/scripts/audio/suspend-display-toggle.sh'

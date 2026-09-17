@@ -23,9 +23,11 @@ STATE_DIR="$HOME_DIR/.local/state/audio-suspend-toggle"
 
 TEMPLATE="$AIRPLAY_DIR/camilladsp-hyperx-${PROFILE}.yml"
 CONFIG="$CONFIG_DIR/camilladsp-hyperx-${PROFILE}.yml"
+SHAIRPORT_CONFIG="$AIRPLAY_DIR/shairport-sync.conf"
 
 HYPERX_PID_FILE="$STACK_DIR/camilladsp-hyperx.pid"
 BUILTIN_PID_FILE="$STACK_DIR/camilladsp-builtin.pid"
+SHAIRPORT_PID_FILE="$STACK_DIR/shairport-sync.pid"
 
 HYPERX_STATE_FILE="$STACK_DIR/hyperx-profile"
 BUILTIN_STATE_FILE="$STACK_DIR/builtin-profile"
@@ -34,7 +36,9 @@ ACTIVE_CONTROL_FILE="$STACK_DIR/active-control"
 LAST_CONTROL_FILE="$STATE_DIR/last-airplay-control"
 
 LOG_FILE="$STACK_DIR/camilladsp-hyperx.log"
-ACTION_LOG="$STATE_DIR/hyperx-profile-toggle.log"
+SHAIRPORT_LOG="$STACK_DIR/shairport-sync.log"
+NQPTP_LOG="$STACK_DIR/nqptp.log"
+ACTION_LOG="$STATE_DIR/audio-toggle.log"
 LOCK_DIR="$STATE_DIR/hyperx-profile-toggle-lock.d"
 
 mkdir -p "$CONFIG_DIR" "$STATE_DIR"
@@ -146,6 +150,130 @@ stop_all_camilla() {
         "$HYPERX_STATE_FILE" \
         "$BUILTIN_STATE_FILE" \
         "$ACTIVE_CONTROL_FILE"
+}
+
+shairport_pids() {
+    local proc
+    local pid
+    local exe
+
+    for proc in /proc/[0-9]*; do
+        [[ -d "$proc" ]] || continue
+
+        pid="${proc##*/}"
+        exe="$(readlink -f "$proc/exe" 2>/dev/null || true)"
+
+        if [[ "${exe##*/}" == "shairport-sync" ]]; then
+            printf '%s\n' "$pid"
+        fi
+    done
+}
+
+shairport_running() {
+    [[ -n "$(shairport_pids)" ]]
+}
+
+nqptp_running() {
+    pgrep -x nqptp >/dev/null 2>&1
+}
+
+stop_shairport() {
+    local pid
+
+    while read -r pid; do
+        [[ "$pid" =~ ^[0-9]+$ ]] || continue
+        kill -TERM "$pid" 2>/dev/null || true
+    done < <(shairport_pids)
+
+    for _ in {1..30}; do
+        shairport_running || break
+        sleep 0.1
+    done
+
+    while read -r pid; do
+        [[ "$pid" =~ ^[0-9]+$ ]] || continue
+        kill -KILL "$pid" 2>/dev/null || true
+    done < <(shairport_pids)
+
+    rm -f "$SHAIRPORT_PID_FILE"
+}
+
+stop_nqptp() {
+    sudo -n pkill -TERM -x nqptp 2>/dev/null ||
+        pkill -TERM -x nqptp 2>/dev/null ||
+        true
+
+    for _ in {1..30}; do
+        nqptp_running || break
+        sleep 0.1
+    done
+
+    if nqptp_running; then
+        sudo -n pkill -KILL -x nqptp 2>/dev/null ||
+            pkill -KILL -x nqptp 2>/dev/null ||
+            true
+    fi
+}
+
+start_nqptp() {
+    local binary
+
+    nqptp_running && return 0
+
+    binary="$(command -v nqptp)" || {
+        echo "ERROR: nqptp was not found"
+        return 1
+    }
+
+    : >"$NQPTP_LOG"
+
+    sudo -n sh -c \
+        "nohup '$binary' >>'$NQPTP_LOG' 2>&1 &" ||
+        return 1
+
+    for _ in {1..50}; do
+        nqptp_running && return 0
+        sleep 0.1
+    done
+
+    echo "ERROR: NQPTP failed to start"
+    return 1
+}
+
+start_shairport() {
+    local pid
+
+    shairport_running && return 0
+
+    [[ -f "$SHAIRPORT_CONFIG" ]] || {
+        echo "ERROR: missing Shairport config: $SHAIRPORT_CONFIG"
+        return 1
+    }
+
+    : >"$SHAIRPORT_LOG"
+
+    nohup shairport-sync \
+        -c "$SHAIRPORT_CONFIG" \
+        -vv \
+        >>"$SHAIRPORT_LOG" \
+        2>&1 &
+
+    pid=$!
+
+    printf '%s\n' "$pid" >"$SHAIRPORT_PID_FILE"
+
+    for _ in {1..30}; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            echo "ERROR: Shairport Sync exited"
+            tail -n 80 "$SHAIRPORT_LOG" 2>/dev/null || true
+            rm -f "$SHAIRPORT_PID_FILE"
+            return 1
+        fi
+
+        sleep 0.1
+    done
+
+    return 0
 }
 
 stop_pipewire() {
@@ -278,6 +406,8 @@ if [[ "$CURRENT_PROFILE" == "$PROFILE" ]]; then
     echo "action=stop-hyperx-$PROFILE"
 
     stop_all_camilla
+    stop_shairport
+    stop_nqptp
     restore_pipewire
 
     echo "result=stopped"
@@ -331,6 +461,19 @@ stop_pipewire || {
     echo "WARNING: PipeWire did not completely stop"
 }
 
+if ! start_nqptp; then
+    stop_nqptp
+    restore_pipewire
+    exit 1
+fi
+
+if ! start_shairport; then
+    stop_shairport
+    stop_nqptp
+    restore_pipewire
+    exit 1
+fi
+
 card_number="$(
     sed -nE \
         's/^hw:([0-9]+),[0-9]+$/\1/p' \
@@ -370,6 +513,8 @@ for _ in {1..40}; do
             "$HYPERX_STATE_FILE" \
             "$ACTIVE_CONTROL_FILE"
 
+        stop_shairport
+        stop_nqptp
         restore_pipewire
         exit 1
     fi
@@ -398,3 +543,5 @@ printf 'hyperx %s\n' \
 echo "result=active"
 echo "profile=hyperx/$PROFILE"
 echo "playback=$PLAYBACK_DEVICE"
+echo "nqptp=running"
+echo "shairport=running"
