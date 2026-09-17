@@ -859,6 +859,42 @@ nqptp_running() {
     pgrep -x nqptp >/dev/null 2>&1
 }
 
+airplay_name_for() {
+    local slot="$1"
+    local profile="$2"
+
+    case "$slot:$profile" in
+        hyperx:cloud3)
+            printf '%s\n' "Joel Laptop - HyperX Cloud III"
+            ;;
+        hyperx:earpods)
+            printf '%s\n' "Joel Laptop - HyperX EarPods"
+            ;;
+        builtin:cloud3)
+            printf '%s\n' "Joel Laptop - Built-in Cloud III"
+            ;;
+        builtin:earpods)
+            printf '%s\n' "Joel Laptop - Built-in EarPods"
+            ;;
+        *)
+            printf '%s\n' "Joel Laptop"
+            ;;
+    esac
+}
+
+active_airplay_name() {
+    local active=""
+    local slot=""
+    local profile=""
+
+    if active="$(get_active_airplay_control 2>/dev/null)"; then
+        read -r slot profile <<<"$active"
+        airplay_name_for "$slot" "$profile"
+    else
+        printf '%s\n' "Joel Laptop"
+    fi
+}
+
 read_state_file() {
     local state_file="$1"
 
@@ -1216,6 +1252,7 @@ esac
 
 if [[ "$SELECTED_CARD_VALUE" == "restart-airplay-stream" ]]; then
     SHAIRPORT_CONFIG="/home/joel/Documents/prefs/audio/airplay/shairport-sync.conf"
+    AIRPLAY_NAME="$(active_airplay_name)"
 
     mapfile -t EXISTING_SHAIRPORT_PIDS < <(
         shairport_pids
@@ -1256,6 +1293,7 @@ if [[ "$SELECTED_CARD_VALUE" == "restart-airplay-stream" ]]; then
     fi
 
     nohup shairport-sync \
+        -a "$AIRPLAY_NAME" \
         -c "$SHAIRPORT_CONFIG" \
         -vv \
         >>"$SHAIRPORT_LOG" 2>&1 &
@@ -1291,7 +1329,7 @@ if [[ "$SELECTED_CARD_VALUE" == "restart-airplay-stream" ]]; then
 
     echo
     echo "AirPlay receiver restarted."
-    echo "Reconnect Joel Laptop AirPlay on the sender."
+    echo "Reconnect $AIRPLAY_NAME on the sender."
     echo
 
     pause_before_close
@@ -1344,6 +1382,9 @@ if [[ "$SELECTED_CARD_VALUE" == dual-* ]]; then
             exit 1
             ;;
     esac
+
+    AIRPLAY_NAME="$(airplay_name_for "$SLOT" "$PROFILE")"
+
     : >"$LOG_FILE"
 
     stop_camilla_slot() {
@@ -1434,6 +1475,7 @@ if [[ "$SELECTED_CARD_VALUE" == dual-* ]]; then
             : >"$SHAIRPORT_LOG"
 
             nohup shairport-sync \
+                -a "$AIRPLAY_NAME" \
                 -c "$SHAIRPORT_CONFIG" \
                 -vv \
                 >>"$SHAIRPORT_LOG" 2>&1 &
@@ -1616,6 +1658,12 @@ if [[ "$SELECTED_CARD_VALUE" == dual-* ]]; then
         exit 1
     fi
 
+    # The selected slot/profile determines the advertised receiver name.
+    # Restart the single Shairport instance so mDNS publishes the new name.
+    # NQPTP is deliberately left running across profile/output switches.
+    stop_all_shairport
+    rm -f "$SHAIRPORT_PID_FILE"
+
     if ! start_shared_airplay; then
         stop_camilla_slot "$PID_FILE" "$STATE_FILE"
 
@@ -1632,6 +1680,7 @@ if [[ "$SELECTED_CARD_VALUE" == dual-* ]]; then
 
     echo
     echo "$OUTPUT_LABEL $PROFILE convolution started."
+    echo "AirPlay name: $AIRPLAY_NAME"
     echo
     echo "HyperX:"
     if pid_file_running "$HYPERX_PID_FILE"; then
