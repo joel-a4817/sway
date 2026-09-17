@@ -7,7 +7,11 @@ export PATH
 PROFILE="${1:-}"
 
 case "$PROFILE" in
-    cloud3|earpods)
+    cloud3)
+        AIRPLAY_NAME="Joel Laptop - Cloud III"
+        ;;
+    earpods)
+        AIRPLAY_NAME="Joel Laptop - EarPods"
         ;;
     *)
         echo "Usage: $0 cloud3|earpods" >&2
@@ -253,6 +257,7 @@ start_shairport() {
     : >"$SHAIRPORT_LOG"
 
     nohup shairport-sync \
+        -a "$AIRPLAY_NAME" \
         -c "$SHAIRPORT_CONFIG" \
         -vv \
         >>"$SHAIRPORT_LOG" \
@@ -467,6 +472,10 @@ if ! start_nqptp; then
     exit 1
 fi
 
+# The receiver name depends on the selected profile. Restart only Shairport
+# when changing profiles so the new AirPlay name is advertised. NQPTP stays up.
+stop_shairport
+
 if ! start_shairport; then
     stop_shairport
     stop_nqptp
@@ -545,3 +554,4 @@ echo "profile=hyperx/$PROFILE"
 echo "playback=$PLAYBACK_DEVICE"
 echo "nqptp=running"
 echo "shairport=running"
+echo "airplay-name=$AIRPLAY_NAME"
