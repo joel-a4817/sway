@@ -265,44 +265,211 @@ ARGS=(-t warning -y overlay -m "Audio Device Select")
 # GENERATE MACHINE-LOCAL CAMILLADSP CONFIGS
 ###############################################################################
 
+playback_device_metadata() {
+    local card_number="$1"
+    local info_file="$2"
+    local card_id
+    local card_longname
+    local pcm_name
+    local pcm_id
+    local sys_path
+    local parent
+    local usb_product=""
+    local usb_manufacturer=""
+    local usb_vendor=""
+    local usb_product_id=""
+    local udev_properties=""
+
+    card_id="$(
+        cat "/proc/asound/card${card_number}/id" \
+            2>/dev/null || true
+    )"
+
+    card_longname="$(
+        cat "/proc/asound/card${card_number}/longname" \
+            2>/dev/null || true
+    )"
+
+    pcm_name="$(
+        sed -n 's/^name:[[:space:]]*//p' "$info_file" |
+        head -n 1
+    )"
+
+    pcm_id="$(
+        sed -n 's/^id:[[:space:]]*//p' "$info_file" |
+        head -n 1
+    )"
+
+    sys_path="$(
+        readlink -f \
+            "/sys/class/sound/card${card_number}/device" \
+            2>/dev/null || true
+    )"
+
+    parent="$sys_path"
+
+    while [[ -n "$parent" && "$parent" != "/" ]]; do
+        if [[ -r "$parent/idVendor" &&
+              -r "$parent/idProduct" ]]; then
+
+            usb_vendor="$(
+                cat "$parent/idVendor" \
+                    2>/dev/null || true
+            )"
+
+            usb_product_id="$(
+                cat "$parent/idProduct" \
+                    2>/dev/null || true
+            )"
+
+            usb_product="$(
+                cat "$parent/product" \
+                    2>/dev/null || true
+            )"
+
+            usb_manufacturer="$(
+                cat "$parent/manufacturer" \
+                    2>/dev/null || true
+            )"
+
+            break
+        fi
+
+        parent="${parent%/*}"
+        [[ -n "$parent" ]] || parent="/"
+    done
+
+    if command -v udevadm >/dev/null 2>&1; then
+        udev_properties="$(
+            udevadm info \
+                --query=property \
+                --path="/sys/class/sound/card${card_number}" \
+                2>/dev/null || true
+        )"
+    fi
+
+    printf '%s\n' \
+        "$card_id $card_longname $pcm_id $pcm_name $sys_path $usb_product $usb_manufacturer $usb_vendor $usb_product_id $udev_properties"
+}
+
 find_playback_device() {
     local wanted_type="$1"
+    local info_file
+    local pcm_dir
     local card_dir
     local card_number
-    local card_id
-    local card_name
-    local device_dir
     local device_number
+    local metadata
+    local metadata_lower
     local sys_path
+    local parent
+    local usb_device=0
 
-    for card_dir in /sys/class/sound/card[0-9]*; do
-        [[ -e "$card_dir" ]] || continue
+    for info_file in /proc/asound/card[0-9]*/pcm[0-9]*p/info; do
+        [[ -r "$info_file" ]] || continue
 
-        card_number="${card_dir##*card}"
-        sys_path="$(readlink -f "$card_dir/device" 2>/dev/null || true)"
-        card_id="$(cat "$card_dir/id" 2>/dev/null || true)"
-        card_name="$(cat "/proc/asound/card${card_number}/id" 2>/dev/null || true)"
+        pcm_dir="${info_file%/info}"
+        card_dir="${pcm_dir%/*}"
 
-        [[ -n "$sys_path" ]] || continue
+        card_number="${card_dir##*/card}"
+        device_number="${pcm_dir##*/pcm}"
+        device_number="${device_number%p}"
+
+        [[ "$card_number" =~ ^[0-9]+$ ]] || continue
+        [[ "$device_number" =~ ^[0-9]+$ ]] || continue
+
+        metadata="$(
+            playback_device_metadata \
+                "$card_number" \
+                "$info_file"
+        )"
+
+        metadata_lower="${metadata,,}"
+
+        sys_path="$(
+            readlink -f \
+                "/sys/class/sound/card${card_number}/device" \
+                2>/dev/null || true
+        )"
+
+        usb_device=0
+        parent="$sys_path"
+
+        while [[ -n "$parent" && "$parent" != "/" ]]; do
+            if [[ -r "$parent/idVendor" &&
+                  -r "$parent/idProduct" ]]; then
+                usb_device=1
+                break
+            fi
+
+            parent="${parent%/*}"
+            [[ -n "$parent" ]] || parent="/"
+        done
+
+        printf 'candidate hw:%s,%s usb=%s metadata=%q\n' \
+            "$card_number" \
+            "$device_number" \
+            "$usb_device" \
+            "$metadata" \
+            >>"$ACTION_LOG"
+
+        # ALSA Loopback is an intentional capture transport, but it must
+        # never be selected as a physical playback destination.
+        if [[ "$metadata_lower" == *loopback* ||
+              "$sys_path" == *"/virtual/"* ]]; then
+            continue
+        fi
 
         case "$wanted_type" in
             hyperx)
-                [[ "$sys_path" == *"/usb"* ]] || continue
+                # Strong explicit match.
+                if [[ "$metadata_lower" == *hyperx* ||
+                      "$metadata_lower" == *"cloud iii"* ||
+                      "$metadata_lower" == *cloud_iii* ]]; then
 
-                if [[ "$card_id $card_name" != *HyperX* &&
-                      "$card_id $card_name" != *Cloud* ]]; then
-                    continue
+                    printf 'hw:%s,%s\n' \
+                        "$card_number" \
+                        "$device_number"
+
+                    return 0
+                fi
+
+                # Appliance fallback: the intended non-SOF USB playback
+                # endpoint is the HyperX USB DAC.
+                if (( usb_device )) &&
+                   [[ "$metadata_lower" != *sof* &&
+                      "$metadata_lower" != *pch* &&
+                      "$metadata_lower" != *hdmi* &&
+                      "$metadata_lower" != *displayport* ]]; then
+
+                    printf 'hw:%s,%s\n' \
+                        "$card_number" \
+                        "$device_number"
+
+                    return 0
                 fi
                 ;;
 
             builtin)
-                [[ "$sys_path" != *"/usb"* ]] || continue
-                [[ "$sys_path" != *"/virtual/"* ]] || continue
+                (( usb_device == 0 )) || continue
 
-                if [[ "$card_id $card_name" != *sof* &&
-                      "$card_id $card_name" != *SOF* &&
-                      "$card_id $card_name" != *PCH* ]]; then
+                if [[ "$metadata_lower" == *hdmi* ||
+                      "$metadata_lower" == *displayport* ]]; then
                     continue
+                fi
+
+                if [[ "$metadata_lower" == *sof* ||
+                      "$metadata_lower" == *pch* ||
+                      "$metadata_lower" == *hda* ||
+                      "$metadata_lower" == *analog* ||
+                      "$metadata_lower" == *headphone* ||
+                      "$metadata_lower" == *speaker* ]]; then
+
+                    printf 'hw:%s,%s\n' \
+                        "$card_number" \
+                        "$device_number"
+
+                    return 0
                 fi
                 ;;
 
@@ -310,35 +477,122 @@ find_playback_device() {
                 return 1
                 ;;
         esac
-
-        for device_dir in \
-            "/sys/class/sound/card${card_number}"/pcm*p; do
-
-            [[ -e "$device_dir" ]] || continue
-
-            device_number="$(
-                basename "$device_dir" |
-                sed -nE 's/^pcmC[0-9]+D([0-9]+)p$/\1/p'
-            )"
-
-            [[ "$device_number" =~ ^[0-9]+$ ]] || continue
-
-            if [[ "$wanted_type" == "builtin" ]]; then
-                printf 'plughw:%s,%s\n' \
-                    "$card_number" \
-                    "$device_number"
-            else
-                printf 'hw:%s,%s\n' \
-                    "$card_number" \
-                    "$device_number"
-            fi
-
-            return 0
-        done
     done
 
     return 1
 }
+
+dump_playback_devices() {
+    local info_file
+    local pcm_dir
+    local card_dir
+    local card_number
+    local device_number
+    local metadata
+
+    echo "ALSA playback-device inventory:" \
+        >>"$ACTION_LOG"
+
+    for info_file in /proc/asound/card[0-9]*/pcm[0-9]*p/info; do
+        [[ -r "$info_file" ]] || continue
+
+        pcm_dir="${info_file%/info}"
+        card_dir="${pcm_dir%/*}"
+
+        card_number="${card_dir##*/card}"
+        device_number="${pcm_dir##*/pcm}"
+        device_number="${device_number%p}"
+
+        metadata="$(
+            playback_device_metadata \
+                "$card_number" \
+                "$info_file"
+        )"
+
+        printf '  hw:%s,%s metadata=%q\n' \
+            "$card_number" \
+            "$device_number" \
+            "$metadata" \
+            >>"$ACTION_LOG"
+    done
+
+    echo "aplay -l output:" \
+        >>"$ACTION_LOG"
+
+    aplay -l \
+        >>"$ACTION_LOG" 2>&1 ||
+        true
+}
+
+generate_camilla_config() {
+    local template="$1"
+    local destination="$2"
+    local playback_device="$3"
+    local temporary
+
+    rm -f \
+        "$destination" \
+        "${destination}.tmp"
+
+    if [[ ! -f "$template" ]]; then
+        echo "Missing CamillaDSP template: $template" \
+            >>"$ACTION_LOG"
+        return 1
+    fi
+
+    if [[ -z "$playback_device" ]]; then
+        echo "No suitable playback device was detected for: $template" \
+            >>"$ACTION_LOG"
+        return 1
+    fi
+
+    temporary="${destination}.tmp"
+
+    if ! sed \
+        -e "s|__HOME__|$HOME_DIR|g" \
+        -e "s|__USB_PLAYBACK_DEVICE__|$playback_device|g" \
+        -e "s|__BUILTIN_PLAYBACK_DEVICE__|$playback_device|g" \
+        "$template" \
+        >"$temporary"; then
+
+        echo "Failed to render CamillaDSP template: $template" \
+            >>"$ACTION_LOG"
+
+        rm -f "$temporary"
+        return 1
+    fi
+
+    if grep -qE \
+        '__HOME__|__USB_PLAYBACK_DEVICE__|__BUILTIN_PLAYBACK_DEVICE__' \
+        "$temporary"; then
+
+        echo "Unresolved placeholder in generated config: $temporary" \
+            >>"$ACTION_LOG"
+
+        rm -f "$temporary"
+        return 1
+    fi
+
+    if ! camilladsp -c "$temporary" \
+        >>"$ACTION_LOG" 2>&1; then
+
+        echo "CamillaDSP rejected generated config: $temporary" \
+            >>"$ACTION_LOG"
+
+        rm -f "$temporary"
+        return 1
+    fi
+
+    mv -f \
+        "$temporary" \
+        "$destination"
+}
+
+rm -f \
+    "$HYPERX_CLOUD3_CONFIG" \
+    "$HYPERX_EARPODS_CONFIG" \
+    "$BUILTIN_CLOUD3_CONFIG" \
+    "$BUILTIN_EARPODS_CONFIG"
 
 USB_PLAYBACK_DEVICE="$(
     find_playback_device hyperx || true
@@ -348,66 +602,57 @@ BUILTIN_PLAYBACK_DEVICE="$(
     find_playback_device builtin || true
 )"
 
-generate_camilla_config() {
-    local template="$1"
-    local destination="$2"
-    local playback_device="$3"
-    local temporary
+printf 'Detected HyperX playback device: %s\n' \
+    "${USB_PLAYBACK_DEVICE:-NONE}" \
+    >>"$ACTION_LOG"
 
-    [[ -f "$template" ]] || {
-        echo "Missing CamillaDSP template: $template" \
-            >>"$ACTION_LOG"
+printf 'Detected built-in playback device: %s\n' \
+    "${BUILTIN_PLAYBACK_DEVICE:-NONE}" \
+    >>"$ACTION_LOG"
 
-        return 1
-    }
+if [[ -z "$USB_PLAYBACK_DEVICE" ||
+      -z "$BUILTIN_PLAYBACK_DEVICE" ]]; then
+    dump_playback_devices
+fi
 
-    [[ -n "$playback_device" ]] || {
-        echo "No suitable playback device was detected for: $template" \
-            >>"$ACTION_LOG"
+HYPERX_CONFIGS_READY=0
+BUILTIN_CONFIGS_READY=0
 
-        return 1
-    }
+if [[ -n "$USB_PLAYBACK_DEVICE" ]]; then
+    if generate_camilla_config \
+           "$HYPERX_CLOUD3_TEMPLATE" \
+           "$HYPERX_CLOUD3_CONFIG" \
+           "$USB_PLAYBACK_DEVICE" &&
+       generate_camilla_config \
+           "$HYPERX_EARPODS_TEMPLATE" \
+           "$HYPERX_EARPODS_CONFIG" \
+           "$USB_PLAYBACK_DEVICE"; then
 
-    temporary="${destination}.tmp"
+        HYPERX_CONFIGS_READY=1
+    fi
+fi
 
-    sed \
-        -e "s|__HOME__|$HOME_DIR|g" \
-        -e "s|__USB_PLAYBACK_DEVICE__|$playback_device|g" \
-        -e "s|__BUILTIN_PLAYBACK_DEVICE__|$playback_device|g" \
-        "$template" \
-        >"$temporary" ||
-        return 1
+if [[ -n "$BUILTIN_PLAYBACK_DEVICE" ]]; then
+    if generate_camilla_config \
+           "$BUILTIN_CLOUD3_TEMPLATE" \
+           "$BUILTIN_CLOUD3_CONFIG" \
+           "$BUILTIN_PLAYBACK_DEVICE" &&
+       generate_camilla_config \
+           "$BUILTIN_EARPODS_TEMPLATE" \
+           "$BUILTIN_EARPODS_CONFIG" \
+           "$BUILTIN_PLAYBACK_DEVICE"; then
 
-    camilladsp -c "$temporary" \
-        >>"$ACTION_LOG" 2>&1 ||
-        return 1
+        BUILTIN_CONFIGS_READY=1
+    fi
+fi
 
-    mv -f "$temporary" "$destination"
-}
+printf 'HyperX configs ready: %s\n' \
+    "$HYPERX_CONFIGS_READY" \
+    >>"$ACTION_LOG"
 
-generate_camilla_config \
-    "$HYPERX_CLOUD3_TEMPLATE" \
-    "$HYPERX_CLOUD3_CONFIG" \
-    "$USB_PLAYBACK_DEVICE" ||
-    true
-
-generate_camilla_config \
-    "$HYPERX_EARPODS_TEMPLATE" \
-    "$HYPERX_EARPODS_CONFIG" \
-    "$USB_PLAYBACK_DEVICE" ||
-    true
-
-generate_camilla_config \
-    "$BUILTIN_CLOUD3_TEMPLATE" \
-    "$BUILTIN_CLOUD3_CONFIG" \
-    "$BUILTIN_PLAYBACK_DEVICE" ||
-    true
-
-generate_camilla_config \
-    "$BUILTIN_EARPODS_TEMPLATE" \
-    "$BUILTIN_EARPODS_CONFIG" \
-    "$BUILTIN_PLAYBACK_DEVICE" ||
-    true
+printf 'Built-in configs ready: %s\n' \
+    "$BUILTIN_CONFIGS_READY" \
+    >>"$ACTION_LOG"
 
 HOTSPOT_CONNECTION="AirPlay Direct"
 
@@ -943,6 +1188,32 @@ if [[ "$SELECTED_CARD_VALUE" == "airplay-controls" ]]; then
     esac
 fi
 
+case "$SELECTED_CARD_VALUE" in
+    dual-hyperx-*)
+        if (( ! HYPERX_CONFIGS_READY )); then
+            echo
+            echo "HyperX AirPlay output is unavailable."
+            echo
+            echo "No usable HyperX runtime configurations were generated."
+            echo
+            cat "$ACTION_LOG"
+            exit 1
+        fi
+        ;;
+
+    dual-builtin-*)
+        if (( ! BUILTIN_CONFIGS_READY )); then
+            echo
+            echo "Built-in AirPlay output is unavailable."
+            echo
+            echo "No usable built-in runtime configurations were generated."
+            echo
+            cat "$ACTION_LOG"
+            exit 1
+        fi
+        ;;
+esac
+
 if [[ "$SELECTED_CARD_VALUE" == "restart-airplay-stream" ]]; then
     SHAIRPORT_CONFIG="/home/joel/Documents/prefs/audio/airplay/shairport-sync.conf"
 
@@ -1073,6 +1344,7 @@ if [[ "$SELECTED_CARD_VALUE" == dual-* ]]; then
             exit 1
             ;;
     esac
+    : >"$LOG_FILE"
 
     stop_camilla_slot() {
         local pid_file="$1"
@@ -1329,6 +1601,10 @@ if [[ "$SELECTED_CARD_VALUE" == dual-* ]]; then
             echo
             echo "$OUTPUT_LABEL CamillaDSP log:"
             tail -n 100 "$LOG_FILE"
+        else
+            echo
+            echo "$OUTPUT_LABEL CamillaDSP did not start."
+            echo "No new CamillaDSP runtime log was produced."
         fi
 
         if [[ -s "$ACTION_LOG" ]]; then
