@@ -1,6 +1,66 @@
 #!/usr/bin/env bash
 set -u
 
+REQUESTED_SLOT=""
+REQUESTED_PROFILE=""
+
+while (( $# > 0 )); do
+    case "$1" in
+        --slot)
+            [[ $# -ge 2 ]] || {
+                echo "ERROR: --slot requires a value" >&2
+                exit 2
+            }
+
+            REQUESTED_SLOT="$2"
+            shift 2
+            ;;
+
+        --profile)
+            [[ $# -ge 2 ]] || {
+                echo "ERROR: --profile requires a value" >&2
+                exit 2
+            }
+
+            REQUESTED_PROFILE="$2"
+            shift 2
+            ;;
+
+        *)
+            echo "ERROR: unknown argument: $1" >&2
+            exit 2
+            ;;
+    esac
+done
+
+case "$REQUESTED_SLOT" in
+    ""|hyperx|builtin)
+        ;;
+    *)
+        echo "ERROR: invalid slot: $REQUESTED_SLOT" >&2
+        exit 2
+        ;;
+esac
+
+case "$REQUESTED_PROFILE" in
+    ""|cloud3|earpods)
+        ;;
+    *)
+        echo "ERROR: invalid profile: $REQUESTED_PROFILE" >&2
+        exit 2
+        ;;
+esac
+
+if [[ -n "$REQUESTED_SLOT" && -z "$REQUESTED_PROFILE" ]]; then
+    echo "ERROR: --slot requires --profile" >&2
+    exit 2
+fi
+
+if [[ -z "$REQUESTED_SLOT" && -n "$REQUESTED_PROFILE" ]]; then
+    echo "ERROR: --profile requires --slot" >&2
+    exit 2
+fi
+
 PATH="/run/wrappers/bin:/home/joel/.nix-profile/bin:/etc/profiles/per-user/joel/bin:/run/current-system/sw/bin:/usr/local/bin:/usr/bin:/bin"
 export PATH
 
@@ -950,9 +1010,18 @@ start_all() {
     local slot
     local profile
 
-    read -r slot profile < <(load_control)
+    if [[ -n "$REQUESTED_SLOT" &&
+          -n "$REQUESTED_PROFILE" ]]; then
 
-    echo "requested control=$slot/$profile"
+        slot="$REQUESTED_SLOT"
+        profile="$REQUESTED_PROFILE"
+
+        echo "explicitly requested control=$slot/$profile"
+    else
+        read -r slot profile < <(load_control)
+
+        echo "restored control=$slot/$profile"
+    fi
 
     if ! find_playback_device "$slot" >/dev/null; then
         echo "saved output $slot is unavailable"
