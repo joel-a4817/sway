@@ -89,6 +89,8 @@ fi
 echo "action=select-cloud3-ash"
 echo "sink=$TARGET_SINK"
 
+swaymsg workspace 10
+
 pactl set-default-sink "$TARGET_SINK" || {
     echo "ERROR: unable to set default sink"
     exit 1
