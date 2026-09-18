@@ -23,7 +23,8 @@ HOME_DIR="/home/joel"
 AIRPLAY_DIR="$HOME_DIR/Documents/prefs/audio/airplay"
 STACK_DIR="/run/user/1000/joel-airplay-stack"
 CONFIG_DIR="$STACK_DIR/configs"
-STATE_DIR="$HOME_DIR/.local/state/audio-suspend-toggle"
+STATE_DIR="$HOME_DIR/.local/state/audio"
+LOG_DIR="$STATE_DIR"
 
 TEMPLATE="$AIRPLAY_DIR/camilladsp-hyperx-${PROFILE}.yml"
 CONFIG="$CONFIG_DIR/camilladsp-hyperx-${PROFILE}.yml"
@@ -39,13 +40,14 @@ BUILTIN_STATE_FILE="$STACK_DIR/builtin-profile"
 ACTIVE_CONTROL_FILE="$STACK_DIR/active-control"
 LAST_CONTROL_FILE="$STATE_DIR/last-airplay-control"
 
-LOG_FILE="$STACK_DIR/camilladsp-hyperx.log"
-SHAIRPORT_LOG="$STACK_DIR/shairport-sync.log"
-NQPTP_LOG="$STACK_DIR/nqptp.log"
-ACTION_LOG="$STATE_DIR/audio-toggle.log"
+LOG_FILE="$LOG_DIR/camilladsp-hyperx.log"
+SHAIRPORT_LOG="$LOG_DIR/shairport-sync.log"
+NQPTP_LOG="$LOG_DIR/nqptp.log"
+ACTION_LOG="$LOG_DIR/hyperx-profile.log"
 LOCK_DIR="$STATE_DIR/hyperx-profile-toggle-lock.d"
 
-mkdir -p "$CONFIG_DIR" "$STATE_DIR"
+mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$LOG_DIR"
+chmod 700 "$STATE_DIR" "$LOG_DIR" 2>/dev/null || true
 
 exec >>"$ACTION_LOG" 2>&1
 
@@ -254,12 +256,12 @@ start_shairport() {
         return 1
     }
 
-    : >"$SHAIRPORT_LOG"
+    printf '\n[%s] shairport start name=%s\n' "$(date -Iseconds 2>/dev/null || date)" "$AIRPLAY_NAME" >>"$SHAIRPORT_LOG"
 
     nohup shairport-sync \
         -a "$AIRPLAY_NAME" \
         -c "$SHAIRPORT_CONFIG" \
-        -vv \
+        -vvv \
         >>"$SHAIRPORT_LOG" \
         2>&1 &
 
@@ -315,89 +317,69 @@ restore_pipewire() {
 }
 
 find_hyperx_device() {
-    local info_file
-    local pcm_dir
-    local card_dir
-    local card_number
-    local device_number
-    local metadata
-    local lower
-    local card_path
-    local parent
-    local is_usb
+    local info_file pcm_dir card_dir card_number device_number card_id
+    local metadata lower card_path parent is_usb
+    local fallback_device=""
 
     for info_file in /proc/asound/card[0-9]*/pcm[0-9]*p/info; do
         [[ -r "$info_file" ]] || continue
 
         pcm_dir="${info_file%/info}"
         card_dir="${pcm_dir%/*}"
-
         card_number="${card_dir##*/card}"
         device_number="${pcm_dir##*/pcm}"
         device_number="${device_number%p}"
 
-        metadata="$(
-            {
-                cat "/proc/asound/card${card_number}/id" 2>/dev/null || true
-                cat "/proc/asound/card${card_number}/longname" 2>/dev/null || true
-                cat "$info_file" 2>/dev/null || true
-                udevadm info \
-                    --query=property \
-                    --path="/sys/class/sound/card${card_number}" \
-                    2>/dev/null || true
-            } |
-            tr '\n' ' '
-        )"
+        [[ "$card_number" =~ ^[0-9]+$ ]] || continue
+        [[ "$device_number" =~ ^[0-9]+$ ]] || continue
 
+        card_id="$(cat "/proc/asound/card${card_number}/id" 2>/dev/null || true)"
+        metadata="$({
+            printf '%s\n' "$card_id"
+            cat "/proc/asound/card${card_number}/longname" 2>/dev/null || true
+            cat "$info_file" 2>/dev/null || true
+            if command -v udevadm >/dev/null 2>&1; then
+                udevadm info --query=property \
+                    --path="/sys/class/sound/card${card_number}" 2>/dev/null || true
+            fi
+        } | tr '\n' ' ')"
         lower="${metadata,,}"
-
         [[ "$lower" == *loopback* ]] && continue
 
-        card_path="$(
-            readlink -f \
-                "/sys/class/sound/card${card_number}/device" \
-                2>/dev/null || true
-        )"
-
+        card_path="$(readlink -f "/sys/class/sound/card${card_number}/device" 2>/dev/null || true)"
         is_usb=0
         parent="$card_path"
-
         while [[ -n "$parent" && "$parent" != "/" ]]; do
-            if [[ -r "$parent/idVendor" &&
-                  -r "$parent/idProduct" ]]; then
+            if [[ -r "$parent/idVendor" && -r "$parent/idProduct" ]]; then
                 is_usb=1
                 break
             fi
-
             parent="${parent%/*}"
             [[ -n "$parent" ]] || parent="/"
         done
 
-        if [[ "$lower" == *hyperx* ||
-              "$lower" == *"cloud iii"* ||
-              "$lower" == *cloud_iii* ]]; then
-
-            printf 'hw:%s,%s\n' \
-                "$card_number" \
-                "$device_number"
-
+        if [[ "$lower" == *hyperx* || "$lower" == *"cloud iii"* || "$lower" == *cloud_iii* ]]; then
+            if [[ "$card_id" =~ ^[A-Za-z0-9_-]+$ ]]; then
+                printf 'hw:CARD=%s,DEV=%s\n' "$card_id" "$device_number"
+            else
+                printf 'hw:%s,%s\n' "$card_number" "$device_number"
+            fi
             return 0
         fi
 
         if (( is_usb )) &&
-           [[ "$lower" != *hdmi* &&
-              "$lower" != *displayport* &&
-              "$lower" != *sof* ]]; then
-
-            printf 'hw:%s,%s\n' \
-                "$card_number" \
-                "$device_number"
-
-            return 0
+           [[ "$lower" != *hdmi* && "$lower" != *displayport* && "$lower" != *sof* ]] &&
+           [[ -z "$fallback_device" ]]; then
+            if [[ "$card_id" =~ ^[A-Za-z0-9_-]+$ ]]; then
+                fallback_device="hw:CARD=${card_id},DEV=${device_number}"
+            else
+                fallback_device="hw:${card_number},${device_number}"
+            fi
         fi
     done
 
-    return 1
+    [[ -n "$fallback_device" ]] || return 1
+    printf '%s\n' "$fallback_device"
 }
 
 CURRENT_PROFILE=""
@@ -483,20 +465,12 @@ if ! start_shairport; then
     exit 1
 fi
 
-card_number="$(
-    sed -nE \
-        's/^hw:([0-9]+),[0-9]+$/\1/p' \
-        <<<"$PLAYBACK_DEVICE"
-)"
-
-if [[ "$card_number" =~ ^[0-9]+$ ]]; then
-    amixer \
-        -c "$card_number" \
-        sset 'Speaker Volume' \
-        100% \
-        unmute \
-        >/dev/null 2>&1 ||
-        true
+playback_card="$(sed -nE 's/^hw:CARD=([^,]+),DEV=[0-9]+$/\1/p' <<<"$PLAYBACK_DEVICE")"
+if [[ -z "$playback_card" ]]; then
+    playback_card="$(sed -nE 's/^hw:([0-9]+),[0-9]+$/\1/p' <<<"$PLAYBACK_DEVICE")"
+fi
+if [[ -n "$playback_card" ]]; then
+    amixer -c "$playback_card" sset 'Speaker Volume' 100% unmute >/dev/null 2>&1 || true
 fi
 
 : >"$LOG_FILE"

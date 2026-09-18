@@ -5,7 +5,8 @@ HOME_DIR="/home/joel"
 AIRPLAY_CONFIG_DIR="/home/joel/Documents/prefs/audio/airplay"
 AUDIO_STACK_DIR="/run/user/1000/joel-airplay-stack"
 RUNTIME_CONFIG_DIR="/run/user/1000/joel-airplay-stack/configs"
-PERSIST_DIR="/home/joel/.local/state/audio-suspend-toggle"
+PERSIST_DIR="$HOME_DIR/.local/state/audio"
+LOG_DIR="$PERSIST_DIR"
 
 LAST_CONTROL_FILE="$PERSIST_DIR/last-airplay-control"
 ACTIVE_CONTROL_FILE="$AUDIO_STACK_DIR/active-control"
@@ -25,37 +26,37 @@ BUILTIN_STATE_FILE="$AUDIO_STACK_DIR/builtin-profile"
 HYPERX_PID_FILE="$AUDIO_STACK_DIR/camilladsp-hyperx.pid"
 BUILTIN_PID_FILE="$AUDIO_STACK_DIR/camilladsp-builtin.pid"
 
-HYPERX_LOG="$AUDIO_STACK_DIR/camilladsp-hyperx.log"
-BUILTIN_LOG="$AUDIO_STACK_DIR/camilladsp-builtin.log"
+HYPERX_LOG="$LOG_DIR/camilladsp-hyperx.log"
+BUILTIN_LOG="$LOG_DIR/camilladsp-builtin.log"
 
 SHAIRPORT_CONFIG="$AIRPLAY_CONFIG_DIR/shairport-sync.conf"
 SHAIRPORT_PID_FILE="$AUDIO_STACK_DIR/shairport-sync.pid"
-SHAIRPORT_LOG="$AUDIO_STACK_DIR/shairport-sync.log"
-NQPTP_LOG="$AUDIO_STACK_DIR/nqptp.log"
+SHAIRPORT_LOG="$LOG_DIR/shairport-sync.log"
+NQPTP_LOG="$LOG_DIR/nqptp.log"
 
 HOTSPOT_CONNECTION="AirPlay Direct"
 
 mkdir -p \
     "$AUDIO_STACK_DIR" \
     "$RUNTIME_CONFIG_DIR" \
-    "$PERSIST_DIR"
+    "$PERSIST_DIR" \
+    "$LOG_DIR"
 
-chmod 700 "$PERSIST_DIR" 2>/dev/null || true
+chmod 700 "$PERSIST_DIR" "$LOG_DIR" 2>/dev/null || true
 
 
 RESULT_FILE="/tmp/audio-toggle-complete.$$"
 ACTION_STARTED_FILE="/tmp/audio-toggle-started.$$"
-ACTION_LOG="/tmp/audio-toggle-action.$$"
+ACTION_LOG="$LOG_DIR/audio-switch.log"
 CARD_SELECTION_FILE="/tmp/audio-card-selected.$$"
 PROFILE_SELECTION_FILE="/tmp/audio-profile-selected.$$"
 
 rm -f \
     "$RESULT_FILE" \
     "$ACTION_STARTED_FILE" \
-    "$ACTION_LOG" \
     "$CARD_SELECTION_FILE" \
     "$PROFILE_SELECTION_FILE"
-touch "$ACTION_LOG"
+printf '\n[%s] audio-switch pid=%s\n' "$(date -Iseconds 2>/dev/null || date)" "$$" >>"$ACTION_LOG"
 
 FINAL_PAUSE_REACHED=0
 EXIT_HANDLER_RUNNING=0
@@ -64,8 +65,7 @@ cleanup() {
     rm -f \
         "$RESULT_FILE" \
         "$ACTION_STARTED_FILE" \
-        "$ACTION_LOG" \
-        "$CARD_SELECTION_FILE" \
+            "$CARD_SELECTION_FILE" \
         "$PROFILE_SELECTION_FILE" \
         "${SWAYNAG_LOG:-}"
 }
@@ -354,23 +354,15 @@ playback_device_metadata() {
 
 find_playback_device() {
     local wanted_type="$1"
-    local info_file
-    local pcm_dir
-    local card_dir
-    local card_number
-    local device_number
-    local metadata
-    local metadata_lower
-    local sys_path
-    local parent
-    local usb_device=0
+    local info_file pcm_dir card_dir card_number device_number card_id
+    local metadata metadata_lower sys_path parent usb_device
+    local hyperx_fallback=""
 
     for info_file in /proc/asound/card[0-9]*/pcm[0-9]*p/info; do
         [[ -r "$info_file" ]] || continue
 
         pcm_dir="${info_file%/info}"
         card_dir="${pcm_dir%/*}"
-
         card_number="${card_dir##*/card}"
         device_number="${pcm_dir##*/pcm}"
         device_number="${device_number%p}"
@@ -378,106 +370,81 @@ find_playback_device() {
         [[ "$card_number" =~ ^[0-9]+$ ]] || continue
         [[ "$device_number" =~ ^[0-9]+$ ]] || continue
 
-        metadata="$(
-            playback_device_metadata \
-                "$card_number" \
-                "$info_file"
-        )"
-
+        card_id="$(cat "/proc/asound/card${card_number}/id" 2>/dev/null || true)"
+        metadata="$(playback_device_metadata "$card_number" "$info_file")"
         metadata_lower="${metadata,,}"
-
-        sys_path="$(
-            readlink -f \
-                "/sys/class/sound/card${card_number}/device" \
-                2>/dev/null || true
-        )"
+        sys_path="$(readlink -f "/sys/class/sound/card${card_number}/device" 2>/dev/null || true)"
 
         usb_device=0
         parent="$sys_path"
-
         while [[ -n "$parent" && "$parent" != "/" ]]; do
-            if [[ -r "$parent/idVendor" &&
-                  -r "$parent/idProduct" ]]; then
+            if [[ -r "$parent/idVendor" && -r "$parent/idProduct" ]]; then
                 usb_device=1
                 break
             fi
-
             parent="${parent%/*}"
             [[ -n "$parent" ]] || parent="/"
         done
 
-        printf 'candidate hw:%s,%s usb=%s metadata=%q\n' \
-            "$card_number" \
-            "$device_number" \
-            "$usb_device" \
-            "$metadata" \
+        printf 'candidate numeric=hw:%s,%s card_id=%q usb=%s metadata=%q\n' \
+            "$card_number" "$device_number" "$card_id" "$usb_device" "$metadata" \
             >>"$ACTION_LOG"
 
-        # ALSA Loopback is an intentional capture transport, but it must
-        # never be selected as a physical playback destination.
-        if [[ "$metadata_lower" == *loopback* ||
-              "$sys_path" == *"/virtual/"* ]]; then
+        if [[ "$metadata_lower" == *loopback* || "$sys_path" == *"/virtual/"* ]]; then
             continue
         fi
 
         case "$wanted_type" in
             hyperx)
-                # Strong explicit match.
                 if [[ "$metadata_lower" == *hyperx* ||
                       "$metadata_lower" == *"cloud iii"* ||
                       "$metadata_lower" == *cloud_iii* ]]; then
-
-                    printf 'hw:%s,%s\n' \
-                        "$card_number" \
-                        "$device_number"
-
+                    if [[ "$card_id" =~ ^[A-Za-z0-9_-]+$ ]]; then
+                        printf 'hw:CARD=%s,DEV=%s\n' "$card_id" "$device_number"
+                    else
+                        printf 'hw:%s,%s\n' "$card_number" "$device_number"
+                    fi
                     return 0
                 fi
 
-                # Appliance fallback: the intended non-SOF USB playback
-                # endpoint is the HyperX USB DAC.
                 if (( usb_device )) &&
                    [[ "$metadata_lower" != *sof* &&
                       "$metadata_lower" != *pch* &&
                       "$metadata_lower" != *hdmi* &&
-                      "$metadata_lower" != *displayport* ]]; then
-
-                    printf 'hw:%s,%s\n' \
-                        "$card_number" \
-                        "$device_number"
-
-                    return 0
+                      "$metadata_lower" != *displayport* ]] &&
+                   [[ -z "$hyperx_fallback" ]]; then
+                    if [[ "$card_id" =~ ^[A-Za-z0-9_-]+$ ]]; then
+                        hyperx_fallback="hw:CARD=${card_id},DEV=${device_number}"
+                    else
+                        hyperx_fallback="hw:${card_number},${device_number}"
+                    fi
                 fi
                 ;;
 
             builtin)
                 (( usb_device == 0 )) || continue
-
-                if [[ "$metadata_lower" == *hdmi* ||
-                      "$metadata_lower" == *displayport* ]]; then
+                if [[ "$metadata_lower" == *hdmi* || "$metadata_lower" == *displayport* ]]; then
                     continue
                 fi
-
                 if [[ "$metadata_lower" == *sof* ||
                       "$metadata_lower" == *pch* ||
                       "$metadata_lower" == *hda* ||
                       "$metadata_lower" == *analog* ||
                       "$metadata_lower" == *headphone* ||
                       "$metadata_lower" == *speaker* ]]; then
-
-                    printf 'hw:%s,%s\n' \
-                        "$card_number" \
-                        "$device_number"
-
+                    printf 'hw:%s,%s\n' "$card_number" "$device_number"
                     return 0
                 fi
                 ;;
-
-            *)
-                return 1
-                ;;
+            *) return 1 ;;
         esac
     done
+
+    if [[ "$wanted_type" == "hyperx" && -n "$hyperx_fallback" ]]; then
+        printf 'using HyperX USB fallback: %s\n' "$hyperx_fallback" >>"$ACTION_LOG"
+        printf '%s\n' "$hyperx_fallback"
+        return 0
+    fi
 
     return 1
 }
@@ -1280,7 +1247,7 @@ if [[ "$SELECTED_CARD_VALUE" == "restart-airplay-stream" ]]; then
     fi
 
     rm -f "$SHAIRPORT_PID_FILE"
-    : >"$SHAIRPORT_LOG"
+    printf '\n[%s] shairport start name=%s\n' "$(date -Iseconds 2>/dev/null || date)" "$AIRPLAY_NAME" >>"$SHAIRPORT_LOG"
 
     if [[ ! -f "$SHAIRPORT_CONFIG" ]]; then
         echo
@@ -1295,7 +1262,7 @@ if [[ "$SELECTED_CARD_VALUE" == "restart-airplay-stream" ]]; then
     nohup shairport-sync \
         -a "$AIRPLAY_NAME" \
         -c "$SHAIRPORT_CONFIG" \
-        -vv \
+        -vvv \
         >>"$SHAIRPORT_LOG" 2>&1 &
 
     shairport_pid=$!
@@ -1472,12 +1439,12 @@ if [[ "$SELECTED_CARD_VALUE" == dual-* ]]; then
         fi
 
         if ! shairport_running; then
-            : >"$SHAIRPORT_LOG"
+            printf '\n[%s] shairport start name=%s\n' "$(date -Iseconds 2>/dev/null || date)" "$AIRPLAY_NAME" >>"$SHAIRPORT_LOG"
 
             nohup shairport-sync \
                 -a "$AIRPLAY_NAME" \
                 -c "$SHAIRPORT_CONFIG" \
-                -vv \
+                -vvv \
                 >>"$SHAIRPORT_LOG" 2>&1 &
 
             shairport_pid=$!
