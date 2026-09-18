@@ -2,9 +2,12 @@
 
 set -euo pipefail
 
-RESULT_FILE="/tmp/network-toggle-complete.$$"
-ACTION_LOG="/tmp/network-toggle-action.$$"
+STATE_DIR="/home/joel/.local/state/sway"
 
+RESULT_FILE="$STATE_DIR/network-toggle-complete.$$"
+ACTION_LOG="$STATE_DIR/network-toggle-action.$$"
+
+mkdir -p "$STATE_DIR"
 rm -f "$RESULT_FILE" "$ACTION_LOG"
 touch "$ACTION_LOG"
 

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 
-RESULT_FILE="/tmp/pixymon-update-complete.$$"
+RESULT_DIR="/home/joel/.local/state/sway/updaters"
+RESULT_FILE="$RESULT_DIR/pixymon-update-complete.$$"
+
+mkdir -p "$RESULT_DIR"
 rm -f "$RESULT_FILE"
 
 swaynag \

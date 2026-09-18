@@ -5,11 +5,11 @@ OUT="$(swaymsg -t get_outputs -r | jq -r '.[] | select(.focused) | .name')"
 
 ROTATOR="/home/joel/.config/sway/scripts/rotation/rotate-touchpad.py"
 TPDEV="/dev/input/touchpad-internal"
-LOG="/tmp/rotate-touchpad.log"
+LOG="/home/joel/.local/state/sway/rotation/rotate-touchpad.log"
 
 MOUSE_ROTATOR="/home/joel/.config/sway/scripts/rotation/rotate-mouse.py"
 MOUSE_DEV="/dev/input/mouse-internal"
-MOUSE_LOG="/tmp/rotate-mouse.log"
+MOUSE_LOG="/home/joel/.local/state/sway/rotation/rotate-mouse.log"
 
 PKILL="/run/current-system/sw/bin/pkill"
 SETSID="/run/current-system/sw/bin/setsid"

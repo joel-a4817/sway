@@ -21,6 +21,8 @@ set $termid foot
 set $menu wmenu-run
 seat * xcursor_theme Bibata-Modern-Amber 32
 
+exec solaar
+
 include /etc/sway/config.d/*
 
 # Clipboard https://github.com/savedra1/clipse?tab=readme-ov-file
@@ -332,6 +334,6 @@ bindsym --no-repeat $mod+r mode "resize"
      bindsym --locked $mod+Control+Shift+Escape systemctl suspend
 
      bindsym --locked $mod+Print exec bash -lc '/home/joel/.config/sway/scripts/audio/hotspot-toggle.sh'
-     bindsym --locked $mod+Shift+Print exec bash -lc '/home/joel/.config/sway/scripts/audio/hyperx-cloud3-toggle.sh'
-     bindsym --locked $mod+Control+Print exec bash -lc '/home/joel/.config/sway/scripts/audio/hyperx-earpods-toggle.sh'
+     bindsym --locked $mod+Shift+Print exec bash -lc '/home/joel/.config/sway/scripts/audio/hyperx-cloud3-select.sh'
+     bindsym --locked $mod+Control+Print exec bash -lc '/home/joel/.config/sway/scripts/audio/hyperx-earpods-select.sh'
      bindsym --locked $mod+Control+Shift+Print exec bash -lc '/home/joel/.config/sway/scripts/audio/suspend-display-toggle.sh'

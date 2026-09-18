@@ -2,7 +2,10 @@
 
 set -euo pipefail
 
-RESULT_FILE="/tmp/nixos-rebuild-complete.$$"
+RESULT_DIR="/home/joel/.local/state/sway/updaters"
+RESULT_FILE="$RESULT_DIR/nixos-rebuild-complete.$$"
+
+mkdir -p "$RESULT_DIR"
 rm -f "$RESULT_FILE"
 
 export RESULT_FILE

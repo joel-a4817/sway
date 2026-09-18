@@ -2,8 +2,10 @@
 
 set -euo pipefail
 
-RESULT_FILE="/tmp/mount-toggle-complete.$$"
-ACTION_LOG="/tmp/mount-toggle-action.$$"
+STATE_DIR="/home/joel/.local/state/sway/mount"
+RESULT_FILE="$STATE_DIR/mount-toggle-complete.$$"
+ACTION_LOG="$STATE_DIR/mount-toggle-action.$$"
+mkdir -p "$STATE_DIR"
 MOUNT_SCRIPT="/home/joel/.config/sway/scripts/mount/mount-script.sh"
 
 rm -f "$RESULT_FILE" "$ACTION_LOG"

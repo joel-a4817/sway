@@ -15,7 +15,7 @@ REENTRY_BACKOFF_SEC=90
 
 FORCE_OUTPUT="eDP-1"
 
-STATE_DIR="${HOME}/.local/state"
+STATE_DIR="${HOME}/.local/state/sway"
 LOG="${STATE_DIR}/battery-interval-swaynag.log"
 LOCKFILE="${STATE_DIR}/battery-watcher.lock"
 

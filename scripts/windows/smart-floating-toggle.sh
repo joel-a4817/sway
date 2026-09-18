@@ -1,7 +1,7 @@
 # The new bind for toggling floating on and off
 #!/usr/bin/env bash
 
-STATE_DIR="$HOME/.cache/sway-float"
+STATE_DIR="/home/joel/.local/state/sway/windows"
 mkdir -p "$STATE_DIR"
 LOCKFILE="$STATE_DIR/.lock"
 

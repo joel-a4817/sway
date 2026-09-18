@@ -2,7 +2,7 @@
 # Auto-tiling already manages what you need for tiling states. This is just to remember floating.
 #!/usr/bin/env bash
 
-STATE_DIR="$HOME/.cache/sway-float"
+STATE_DIR="/home/joel/.local/state/sway/windows"
 mkdir -p "$STATE_DIR"
 
 LOCKFILE="$STATE_DIR/.lock"
