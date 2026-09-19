@@ -53,7 +53,7 @@ for_window [app_id="$term" title="^$popup-f-hardware"] floating enable, resize s
 for_window [app_id="$term" title="^$popup-wifi-select"] floating enable, resize set 1000 1000, move position center
 for_window [app_id="$term" title="^$popup-wifi-toggle"] floating enable, resize set 1200 300, move position center
 for_window [app_id="$term" title="^$popup-wifi-status"] floating enable, resize set 1500 1000, move position center
-for_window [app_id="$term" title="^$popup-audio-select"] floating enable, resize set 750 900,  move position center
+for_window [app_id="$term" title="^$popup-audio-switch"] floating enable, resize set 800 900,  move position center
 
 for_window [app_id="yazi-nvim"] floating enable, move position center, resize set 1000 700, opacity 0.85
 
@@ -159,7 +159,7 @@ bindsym --no-repeat $mod+F5 exec bash -c '~/.config/sway/scripts/screen-capture.
 #screenshot
 
 #audio device output switch
-bindsym --locked --no-repeat $mod+F7 fullscreen disable; exec $term -T "$popup-audio-select" -e bash -c '~/.config/sway/scripts/audio/audio-switch.sh'
+bindsym --locked --no-repeat $mod+F7 fullscreen disable; exec $term -T "$popup-audio-switch" -e bash -c '~/.config/sway/scripts/audio/audio-switch.sh'
 
 #mount dev
 bindsym --no-repeat $mod+F8 fullscreen disable; exec $term -T "$popup-mount" -e bash -c '/home/joel/.config/sway/scripts/mount/mount-swaynag.sh'

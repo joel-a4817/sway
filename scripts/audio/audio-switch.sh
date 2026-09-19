@@ -81,7 +81,6 @@ function output_card(){if(card!=""){if(description=="")description=card;print ca
 /^[[:space:]]*Name:/{card=$0;sub(/^[[:space:]]*Name:[[:space:]]*/,"",card);next}
 /^[[:space:]]*device\.description[[:space:]]*=/{if(description==""){description=$0;sub(/^[[:space:]]*device\.description[[:space:]]*=[[:space:]]*/,"",description);gsub(/^"|"$/,"",description)}}
 END{output_card()}')
-((${#CARDS[@]})) || { echo "PipeWire is unavailable or no audio cards were found."; exit 1; }
 
 card_display_label() {
     local card="$1" description="$2" label="$2"
@@ -127,12 +126,27 @@ sink_display_label() {
 hotspot_active() { nmcli -t -f NAME connection show --active 2>/dev/null | grep -Fqx "$HOTSPOT_CONNECTION"; }
 
 ARGS=(-t warning -y overlay -m "Audio Device Select")
-ARGS+=( -z "Audio Restart" "touch '$ACTION_STARTED_FILE'; printf '%s\n' restart-audio >'$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
+
+ARGS+=(
+    -z "Audio Start"
+    "touch '$ACTION_STARTED_FILE'; printf '%s\n' start-audio >'$CARD_SELECTION_FILE'; touch '$RESULT_FILE'"
+
+    -z "Audio Stop"
+    "touch '$ACTION_STARTED_FILE'; printf '%s\n' stop-audio >'$CARD_SELECTION_FILE'; touch '$RESULT_FILE'"
+)
+
 if hotspot_active; then
-    ARGS+=( -z "Stop AirPlay Hotspot [active]" "touch '$ACTION_STARTED_FILE'; printf '%s\n' toggle-hotspot >'$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
+    ARGS+=(
+        -z "Stop AirPlay Hotspot [active]"
+        "touch '$ACTION_STARTED_FILE'; printf '%s\n' toggle-hotspot >'$CARD_SELECTION_FILE'; touch '$RESULT_FILE'"
+    )
 else
-    ARGS+=( -z "Start AirPlay Hotspot [inactive]" "touch '$ACTION_STARTED_FILE'; printf '%s\n' toggle-hotspot >'$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
+    ARGS+=(
+        -z "Start AirPlay Hotspot [inactive]"
+        "touch '$ACTION_STARTED_FILE'; printf '%s\n' toggle-hotspot >'$CARD_SELECTION_FILE'; touch '$RESULT_FILE'"
+    )
 fi
+
 for i in "${!CARDS[@]}"; do
     card="${CARDS[$i]%%|*}"; description="${CARDS[$i]#*|}"
     ARGS+=( -z "$(card_display_label "$card" "$description")" "touch '$ACTION_STARTED_FILE'; printf '%s\n' '$i' >'$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
@@ -152,27 +166,112 @@ wait "$SWAYNAG_PID" 2>/dev/null || true
 [[ -f "$CARD_SELECTION_FILE" ]] || { echo "No audio action was selected."; exit 1; }
 SELECTED_CARD_VALUE="$(cat "$CARD_SELECTION_FILE")"
 
-if [[ "$SELECTED_CARD_VALUE" == restart-audio ]]; then
-    systemctl --user restart pipewire.socket pipewire-pulse.socket pipewire.service pipewire-pulse.service wireplumber.service >>"$ACTION_LOG" 2>&1 || true
-    for _ in {1..100}; do pactl info >/dev/null 2>&1 && break; sleep 0.1; done
-    pactl info >/dev/null 2>&1 || { echo "PipeWire did not become ready."; exit 1; }
-    normalize_audio_volumes "$ORIGINAL_VOLUME" "$(pactl get-default-sink 2>/dev/null || true)"
-    # Restart the persistent AirPlay services after PipeWire is ready.
-    # NQPTP is restarted first because AirPlay 2 timing depends on it.
-    if ! sudo -n systemctl restart nqptp.service >>"$ACTION_LOG" 2>&1; then
-        echo "Failed to restart nqptp.service."
+if [[ "$SELECTED_CARD_VALUE" == start-audio ]]; then
+    echo "Starting PipeWire and WirePlumber..." | tee -a "$ACTION_LOG"
+
+    if ! systemctl --user start \
+        pipewire.socket \
+        pipewire-pulse.socket \
+        pipewire.service \
+        pipewire-pulse.service \
+        wireplumber.service \
+        >>"$ACTION_LOG" 2>&1; then
+        echo "Failed to start the user audio services."
         echo "See: $ACTION_LOG"
         exit 1
     fi
 
-    if ! sudo -n systemctl restart shairport-sync.service >>"$ACTION_LOG" 2>&1; then
-        echo "Failed to restart shairport-sync.service."
+    PIPEWIRE_READY=0
+
+    for _ in {1..100}; do
+        if pactl info >/dev/null 2>&1; then
+            PIPEWIRE_READY=1
+            break
+        fi
+
+        sleep 0.1
+    done
+
+    if (( ! PIPEWIRE_READY )); then
+        echo "PipeWire did not become ready."
         echo "See: $ACTION_LOG"
         exit 1
     fi
 
-    echo "Audio and AirPlay services restarted."; pause_before_close; exit 0
+    # Give WirePlumber a moment to create cards, hardware sinks,
+    # and all configured BRIR/HpCF filter-chain sinks.
+    for _ in {1..100}; do
+        if pactl list short sinks 2>/dev/null | grep -q .; then
+            break
+        fi
+
+        sleep 0.1
+    done
+
+    STARTED_SINK="$(pactl get-default-sink 2>/dev/null || true)"
+
+    # Set ALSA controls and every PipeWire sink to 100%, then restore
+    # the previously saved master/default-sink volume afterward.
+    normalize_audio_volumes "$ORIGINAL_VOLUME" "$STARTED_SINK"
+
+    # AirPlay 2 timing must be available before Shairport Sync starts.
+    if ! systemctl start nqptp.service >>"$ACTION_LOG" 2>&1; then
+        echo "Failed to start nqptp.service."
+        echo "See: $ACTION_LOG"
+        exit 1
+    fi
+
+    if ! systemctl start shairport-sync.service >>"$ACTION_LOG" 2>&1; then
+        echo "Failed to start shairport-sync.service."
+        echo "See: $ACTION_LOG"
+        exit 1
+    fi
+
+    echo "Audio and AirPlay services started."
+    echo
+    echo "All hardware controls and PipeWire sinks were normalized to 100%."
+
+    if [[ -n "$ORIGINAL_VOLUME" ]]; then
+        echo "Master volume restored to: $ORIGINAL_VOLUME"
+    fi
+
+    pause_before_close
+    exit 0
 fi
+
+if [[ "$SELECTED_CARD_VALUE" == stop-audio ]]; then
+    echo "Stopping AirPlay and audio services..." | tee -a "$ACTION_LOG"
+
+    # Stop signal-producing services before removing the PipeWire graph.
+    if ! systemctl stop shairport-sync.service >>"$ACTION_LOG" 2>&1; then
+        echo "Failed to stop shairport-sync.service."
+        echo "See: $ACTION_LOG"
+        exit 1
+    fi
+
+    if ! systemctl stop nqptp.service >>"$ACTION_LOG" 2>&1; then
+        echo "Failed to stop nqptp.service."
+        echo "See: $ACTION_LOG"
+        exit 1
+    fi
+
+    if ! systemctl --user stop \
+        wireplumber.service \
+        pipewire-pulse.service \
+        pipewire.service \
+        pipewire-pulse.socket \
+        pipewire.socket \
+        >>"$ACTION_LOG" 2>&1; then
+        echo "Failed to stop the user audio services."
+        echo "See: $ACTION_LOG"
+        exit 1
+    fi
+
+    echo "Audio and AirPlay services stopped."
+    pause_before_close
+    exit 0
+fi
+
 if [[ "$SELECTED_CARD_VALUE" == toggle-hotspot ]]; then
     if hotspot_active; then nmcli connection down "$HOTSPOT_CONNECTION" >>"$ACTION_LOG" 2>&1; echo "AirPlay hotspot stopped."
     else nmcli connection up "$HOTSPOT_CONNECTION" >>"$ACTION_LOG" 2>&1; echo "AirPlay hotspot started."; fi
@@ -230,17 +329,30 @@ CURRENT_DESC="Current Sink"; for entry in "${SINKS[@]}"; do [[ "${entry%%|*}" ==
 
 echo; echo "Available Audio Sinks"; echo; echo "[0] Keep current sink ($CURRENT_DESC)"
 for i in "${!SINKS[@]}"; do echo "[$((i+1))] ${SINKS[$i]#*|}"; done
-EARPOD_RANDOM=$((${#SINKS[@]}+1)); CLOUD3_RANDOM=$((${#SINKS[@]}+2)); echo "[$EARPOD_RANDOM] Random EarPods"; echo "[$CLOUD3_RANDOM] Random Cloud III"; echo
+ACOUSTIC_RANDOM=$((${#SINKS[@]} + 1))
+echo "[$ACOUSTIC_RANDOM] Random Acoustic Environment"
+echo
 read -rp "Select sink: " choice
 if [[ "$choice" != 0 ]]; then
     [[ "$choice" =~ ^[0-9]+$ ]] || { echo "Invalid selection."; exit 1; }
     sink=""
-    if [[ "$choice" == "$EARPOD_RANDOM" ]]; then
-        mapfile -t RANDOM_CANDIDATES < <(printf '%s\n' "${SINKS[@]}" | cut -d'|' -f1 | grep -E '^(earpods.*|alsa_output.*Headphones.*)$' || true)
-        ((${#RANDOM_CANDIDATES[@]})) || { echo "No EarPods sinks are currently available."; exit 1; }; sink="$(printf '%s\n' "${RANDOM_CANDIDATES[@]}" | shuf -n1)"; RANDOM_PICK=1; echo "Random EarPods sink selected."
-    elif [[ "$choice" == "$CLOUD3_RANDOM" ]]; then
-        mapfile -t RANDOM_CANDIDATES < <(printf '%s\n' "${SINKS[@]}" | cut -d'|' -f1 | grep -E '^(cloud3.*|alsa_output.*HyperX_Cloud_III.*)$' || true)
-        ((${#RANDOM_CANDIDATES[@]})) || { echo "No Cloud III sinks are currently available."; exit 1; }; sink="$(printf '%s\n' "${RANDOM_CANDIDATES[@]}" | shuf -n1)"; RANDOM_PICK=1; echo "Random Cloud III sink selected."
+    if [[ "$choice" == "$ACOUSTIC_RANDOM" ]]; then
+        mapfile -t RANDOM_CANDIDATES < <(
+            printf '%s\n' "${SINKS[@]}" |
+                cut -d'|' -f1 |
+                grep -E '^earpods_' |
+                grep -Ev '(^|[-_])anechoic([-_]|$)' ||
+                true
+        )
+
+        if ((${#RANDOM_CANDIDATES[@]} == 0)); then
+            echo "No non-anechoic acoustic-environment sinks are currently available."
+            exit 1
+        fi
+
+        sink="$(printf '%s\n' "${RANDOM_CANDIDATES[@]}" | shuf -n 1)"
+        RANDOM_PICK=1
+        echo "Random acoustic environment selected."
     else
         index=$((choice-1)); (( index >= 0 && index < ${#SINKS[@]} )) || { echo "Invalid selection."; exit 1; }; sink="${SINKS[$index]%%|*}"
     fi
