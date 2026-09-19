@@ -53,7 +53,7 @@ for_window [app_id="$term" title="^$popup-f-hardware"] floating enable, resize s
 for_window [app_id="$term" title="^$popup-wifi-select"] floating enable, resize set 1000 1000, move position center
 for_window [app_id="$term" title="^$popup-wifi-toggle"] floating enable, resize set 1200 300, move position center
 for_window [app_id="$term" title="^$popup-wifi-status"] floating enable, resize set 1500 1000, move position center
-for_window [app_id="$term" title="^$popup-audio-switch"] floating enable, resize set 800 900,  move position center
+for_window [app_id="$term" title="^$popup-audio-switch"] floating enable, resize set 1200 900,  move position center
 
 for_window [app_id="yazi-nvim"] floating enable, move position center, resize set 1000 700, opacity 0.85
 
@@ -116,6 +116,9 @@ bindsym --no-repeat $mod+Shift+p fullscreen disable; exec $term -T "$popup-updat
 bindsym --no-repeat $mod+Shift+d fullscreen disable; exec $term -T "$popup-update-dvd" -e bash -c '~/.config/sway/scripts/updaters/rewrite-dvd-playlist.sh'
 bindsym --no-repeat $mod+Shift+t fullscreen disable; exec $term -T "$popup-settime" -e bash -c '~/.config/sway/scripts/settime.sh; echo; read -n 1 -rsp "Press any key to close..."'
 bindsym --no-repeat $mod+shift+y fullscreen disable; exec $term -T "$popup-update-rebuild" -e bash -c '~/.config/sway/scripts/updaters/update-music.sh'
+bindsym --no-repeat $mod+shift+s fullscreen disable; exec $term -T "$popup-update-shuffle" -e bash -c 'python /home/joel/.config/sway/scripts/shuffle-favourites.py; read -n 1 -rsp "Press any key to close..."'
+bindsym --no-repeat $mod+shift+r fullscreen disable; exec bash -c 'mpv /home/joel/Downloads/Music/favourites-shuffled.m3u'
+bindsym --no-repeat $mod+shift+m fullscreen disable; exec bash -c 'mpv /home/joel/Downloads/Music/favourites.m3u'
 
 #keybinds app
 bindsym --no-repeat $mod+F2 fullscreen disable; exec $term -T "$popup-tuis" -e clipse
