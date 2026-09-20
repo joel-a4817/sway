@@ -47,8 +47,6 @@ trap 'exit 143' TERM
 trap 'exit 129' HUP
 trap 'exit 131' QUIT
 
-echo '{ "command": ["set_property", "pause", true] }' | socat - /tmp/mpvsocket >/dev/null 2>&1 || true
-
 normalize_audio_volumes() {
     local restore_volume="${1:-}" restore_sink="${2:-}" sof_card hyperx_card sink
     sof_card="$(aplay -l 2>/dev/null | awk -F': ' '/sof|SOF/ {print $1; exit}' | grep -o '[0-9]\+' || true)"
