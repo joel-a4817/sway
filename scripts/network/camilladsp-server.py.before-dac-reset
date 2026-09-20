@@ -15,7 +15,7 @@ PROFILE_DIRECTORY = Path(
     "/home/joel/Documents/prefs/audio/camilladsp"
 )
 
-CAMILLA_BINARY = "/run/current-system/sw/bin/camilladsp"
+CAMILLA_BINARY = "camilladsp"
 
 STATE_DIRECTORY = Path(
     "/home/joel/.local/state/camilladsp-webremote"
@@ -196,47 +196,6 @@ h1 {
   text-transform: uppercase;
 }
 
-.device-actions {
-  margin-bottom: 24px;
-}
-
-.device-action-button {
-  width: 100%;
-  min-height: 58px;
-  padding: 13px 17px;
-
-  border: 0;
-  border-radius: 19px;
-
-  color: white;
-
-  background:
-    linear-gradient(
-      135deg,
-      #e45534,
-      #b73f73
-    );
-
-  box-shadow:
-    inset 0 1px rgba(255, 255, 255, .18),
-    0 10px 28px rgba(0, 0, 0, .25);
-
-  font: inherit;
-  font-size: 15px;
-  font-weight: 750;
-  cursor: pointer;
-}
-
-.device-action-button:active {
-  transform: scale(.975);
-}
-
-.device-action-button:disabled {
-  opacity: .55;
-  cursor: default;
-  transform: none;
-}
-
 .profile-list {
   display: grid;
   gap: 11px;
@@ -337,16 +296,6 @@ h1 {
     <div id="active-state"></div>
   </div>
 
-  <div class="device-actions">
-    <button
-      id="reset-dac"
-      class="device-action-button"
-      type="button"
-    >
-      Reset HyperX DAC
-    </button>
-  </div>
-
   <div class="section-title">
     Profiles
   </div>
@@ -371,11 +320,6 @@ const activeState =
 
 const statusBox =
   document.querySelector("#status");
-
-const resetDACButton =
-  document.querySelector(
-    "#reset-dac"
-  );
 
 let switching = false;
 let statusTimer = null;
@@ -517,55 +461,6 @@ async function switchProfile(filename) {
 }
 
 
-async function resetDAC() {
-  if (switching) {
-    return;
-  }
-
-  switching = true;
-  resetDACButton.disabled = true;
-  setButtonsBusy(true);
-
-  setStatus(
-    "Resetting HyperX DAC…"
-  );
-
-  try {
-    const result =
-      await requestJSON(
-        "/api/reset-dac",
-        {
-          method: "POST"
-        }
-      );
-
-    if (result.profile) {
-      setStatus(
-        "DAC reset • Restarted "
-        + friendlyName(result.profile)
-      );
-    } else {
-      setStatus(
-        "DAC reset complete"
-      );
-    }
-
-    await loadProfiles();
-
-  } catch (error) {
-    setStatus(
-      error.message,
-      true
-    );
-
-  } finally {
-    switching = false;
-    resetDACButton.disabled = false;
-    setButtonsBusy(false);
-  }
-}
-
-
 async function loadProfiles() {
   try {
     const result =
@@ -645,11 +540,6 @@ async function loadProfiles() {
   }
 }
 
-
-resetDACButton.addEventListener(
-  "click",
-  resetDAC
-);
 
 loadProfiles();
 
@@ -758,7 +648,7 @@ def run_command(arguments, check=True):
         arguments,
         text=True,
         capture_output=True,
-        timeout=30,
+        timeout=15,
         check=check,
     )
 
@@ -838,64 +728,6 @@ def set_alsa_loopback_to_100():
             "Could not set ALSA Loopback PCM "
             f"to 100%: {error}"
         )
-
-
-def reset_dac():
-    with SWITCH_LOCK:
-        active_name = (
-            read_active_profile()
-        )
-
-        active_profile = None
-
-        if active_name:
-            active_profile = resolve_profile(
-                active_name
-            )
-
-        stop_existing_camilladsp()
-
-        result = run_command(
-            [
-                "sudo",
-                "-n",
-                "/run/current-system/sw/bin/"
-                "reset-hyperx-dac",
-            ],
-            check=False,
-        )
-
-        if result.returncode != 0:
-            error = (
-                result.stderr.strip()
-                or result.stdout.strip()
-                or "HyperX DAC reset failed"
-            )
-
-            raise RuntimeError(error)
-
-        restarted_profile = ""
-        pid = None
-
-        if active_profile is not None:
-            set_alsa_loopback_to_100()
-
-            pid = launch_camilladsp(
-                active_profile
-            )
-
-            restarted_profile = (
-                active_profile.name
-            )
-
-        return {
-            "profile":
-                restarted_profile,
-            "pid":
-                pid,
-            "output":
-                result.stdout.strip(),
-        }
 
 
 def switch_profile(filename):
@@ -1094,32 +926,21 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = self.path.split("?", 1)[0]
 
+        if path != "/api/select":
+            self.send_json(
+                404,
+                {
+                    "ok": False,
+                    "error": "Not found",
+                },
+            )
+            return
+
         try:
-            if path == "/api/select":
-                payload = (
-                    self.read_json_body()
-                )
+            payload = self.read_json_body()
+            filename = payload["profile"]
 
-                filename = payload[
-                    "profile"
-                ]
-
-                result = switch_profile(
-                    filename
-                )
-
-            elif path == "/api/reset-dac":
-                result = reset_dac()
-
-            else:
-                self.send_json(
-                    404,
-                    {
-                        "ok": False,
-                        "error": "Not found",
-                    },
-                )
-                return
+            result = switch_profile(filename)
 
             self.send_json(
                 200,
