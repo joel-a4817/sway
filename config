@@ -119,8 +119,8 @@ bindsym --no-repeat $mod+shift+y fullscreen disable; exec $term -T "$popup-updat
 bindsym --no-repeat $mod+shift+s fullscreen disable; exec $term -T "$popup-update-shuffle" -e bash -c 'python /home/joel/.config/sway/scripts/shuffle-favourites.py; read -n 1 -rsp "Press any key to close..."'
 bindsym --no-repeat $mod+shift+r fullscreen disable; exec bash -c 'mpv /home/joel/Downloads/Music/favourites-shuffled.m3u'
 bindsym --no-repeat $mod+shift+m fullscreen disable; exec bash -c 'mpv /home/joel/Downloads/Music/favourites.m3u'
-bindsym --no-repeat $mod+shift+a fullscreen disable; exec $term -T "$popup-update-a_music_server" -e bash -c '/home/joel/.config/sway/scripts/network/start-ipad-webremote.sh; read -n 1 -rsp "Press any key to close..."'
-bindsym --no-repeat $mod+shift+b fullscreen disable; exec $term -T "$popup-update-camilladsp_server" -e bash -c '/home/joel/.config/sway/scripts/network/camilladsp-server.py'; read -n 1 -rsp "Press any key to close..."'
+bindsym --no-repeat $mod+shift+a fullscreen disable; exec $term -T "$popup-update-a_music_server" -e bash -c '/home/joel/.config/sway/scripts/network/start-ipad-webremote.sh; echo; read -n 1 -rsp "Press any key to close..."'
+bindsym --no-repeat $mod+shift+b fullscreen disable; exec $term -T "$popup-update-camilladsp_server" -e bash -c '/home/joel/.config/sway/scripts/network/camilladsp-server.py; echo; read -n 1 -rsp "Press any key to close..."'
 
 #keybinds app
 bindsym --no-repeat $mod+F2 fullscreen disable; exec $term -T "$popup-tuis" -e clipse
