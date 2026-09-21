@@ -6,6 +6,7 @@ from urllib.parse import unquote
 import html
 import json
 import os
+import re
 import signal
 import subprocess
 import threading
@@ -16,6 +17,20 @@ PROFILE_DIRECTORY = Path(
 )
 
 CAMILLA_BINARY = "/run/current-system/sw/bin/camilladsp"
+SONOBUS_BINARY = "/run/current-system/sw/bin/sonobus"
+SONOBUS_GROUP = "rt4817-camilladsp"
+SONOBUS_USERNAME = "rt4817"
+SONOBUS_CONNECTION_SERVER = "aoo.sonobus.net:10998"
+SONOBUS_SETTINGS_FILE = Path(
+    "/home/joel/.config/sonobus/SonoBus.settings"
+)
+SONOBUS_AUDIO_SYSTEM = "ALSA"
+SONOBUS_INPUT_DEVICE = "CamillaDSP SonoBus"
+SONOBUS_OUTPUT_DEVICE = "SonoBus Silent Output"
+SONOBUS_SAMPLE_RATE = 96000.0
+SONOBUS_BUFFER_SIZE = 512
+SONOBUS_SEND_CHANNELS = 2.0
+SONOBUS_SEND_QUALITY = "128 kbps/channel Opus"
 
 STATE_DIRECTORY = Path(
     "/home/joel/.local/state/camilladsp-webremote"
@@ -24,6 +39,7 @@ STATE_DIRECTORY = Path(
 PID_FILE = STATE_DIRECTORY / "camilladsp.pid"
 ACTIVE_PROFILE_FILE = STATE_DIRECTORY / "active-profile"
 LOG_FILE = STATE_DIRECTORY / "camilladsp.log"
+SONOBUS_LOG_FILE = STATE_DIRECTORY / "sonobus.log"
 
 LISTEN_ADDRESS = "0.0.0.0"
 LISTEN_PORT = 8766
@@ -341,11 +357,11 @@ h1 {
 
   <div class="device-actions">
     <button
-      id="reset-dac"
+      id="restart-sonobus"
       class="device-action-button"
       type="button"
     >
-      Reset HyperX DAC
+      Restart SonoBus
     </button>
 
     <button
@@ -382,9 +398,9 @@ const activeState =
 const statusBox =
   document.querySelector("#status");
 
-const resetDACButton =
+const restartSonoBusButton =
   document.querySelector(
-    "#reset-dac"
+    "#restart-sonobus"
   );
 
 const restartAirPlayButton =
@@ -532,54 +548,37 @@ async function switchProfile(filename) {
 }
 
 
-async function resetDAC() {
+async function restartSonoBus() {
   if (switching) {
     return;
   }
-
   switching = true;
-  resetDACButton.disabled = true;
+  restartSonoBusButton.disabled = true;
   setButtonsBusy(true);
-
   setStatus(
-    "Resetting HyperX DAC…"
+    "Restarting SonoBus…"
   );
-
   try {
-    const result =
-      await requestJSON(
-        "/api/reset-dac",
-        {
-          method: "POST"
-        }
-      );
-
-    if (result.profile) {
-      setStatus(
-        "DAC reset • Restarted "
-        + friendlyName(result.profile)
-      );
-    } else {
-      setStatus(
-        "DAC reset complete"
-      );
-    }
-
-    await loadProfiles();
-
+    await requestJSON(
+      "/api/restart-sonobus",
+      {
+        method: "POST"
+      }
+    );
+    setStatus(
+      "SonoBus restarted and connected"
+    );
   } catch (error) {
     setStatus(
       error.message,
       true
     );
-
   } finally {
     switching = false;
-    resetDACButton.disabled = false;
+    restartSonoBusButton.disabled = false;
     setButtonsBusy(false);
   }
 }
-
 async function restartAirPlay() {
   if (switching) {
     return;
@@ -696,9 +695,9 @@ async function loadProfiles() {
 }
 
 
-resetDACButton.addEventListener(
+restartSonoBusButton.addEventListener(
   "click",
-  resetDAC
+  restartSonoBus
 );
 
 restartAirPlayButton.addEventListener(
@@ -895,61 +894,199 @@ def set_alsa_loopback_to_100():
         )
 
 
-def reset_dac():
-    with SWITCH_LOCK:
-        active_name = (
-            read_active_profile()
+def replace_xml_attribute(tag, attribute, value):
+    pattern = re.compile(
+        rf'(<{tag}\b[^>]*\b{attribute}=")[^"]*(")',
+        re.DOTALL,
+    )
+
+    def replace(match):
+        return match.group(1) + str(value) + match.group(2)
+
+    return pattern, replace
+
+
+def configure_sonobus_settings():
+    if not SONOBUS_SETTINGS_FILE.is_file():
+        raise RuntimeError(
+            "SonoBus settings file does not exist: "
+            f"{SONOBUS_SETTINGS_FILE}. Start SonoBus once and "
+            "select the ALSA devices before using the server."
         )
 
-        active_profile = None
+    text = SONOBUS_SETTINGS_FILE.read_text(
+        encoding="utf-8"
+    )
+    original = text
 
-        if active_name:
-            active_profile = resolve_profile(
-                active_name
+    required_attributes = {
+        "deviceType": SONOBUS_AUDIO_SYSTEM,
+        "audioOutputDeviceName": SONOBUS_OUTPUT_DEVICE,
+        "audioInputDeviceName": SONOBUS_INPUT_DEVICE,
+        "audioDeviceRate": f"{SONOBUS_SAMPLE_RATE:.1f}",
+        "audioDeviceBufferSize": str(SONOBUS_BUFFER_SIZE),
+    }
+
+    for attribute, value in required_attributes.items():
+        pattern, replacement = replace_xml_attribute(
+            "DEVICESETUP",
+            attribute,
+            value,
+        )
+        text, count = pattern.subn(
+            replacement,
+            text,
+            count=1,
+        )
+        if count != 1:
+            raise RuntimeError(
+                "Could not set SonoBus DEVICESETUP attribute "
+                f"{attribute!r} in {SONOBUS_SETTINGS_FILE}"
             )
 
-        stop_existing_camilladsp()
+    send_channels_pattern = re.compile(
+        r'(<PARAM\s+id="sendchannels"\s+value=")[^"]*("\s*/>)'
+    )
+    text, count = send_channels_pattern.subn(
+        rf'\g<1>{SONOBUS_SEND_CHANNELS:.1f}\g<2>',
+        text,
+        count=1,
+    )
+    if count != 1:
+        raise RuntimeError(
+            "Could not set SonoBus stereo sendchannels in "
+            f"{SONOBUS_SETTINGS_FILE}"
+        )
 
-        result = run_command(
-            [
-                "sudo",
-                "-n",
-                "/run/current-system/sw/bin/"
-                "reset-hyperx-dac",
-            ],
+    if text != original:
+        backup = SONOBUS_SETTINGS_FILE.with_suffix(
+            SONOBUS_SETTINGS_FILE.suffix + ".before-webremote"
+        )
+        if not backup.exists():
+            backup.write_text(
+                original,
+                encoding="utf-8",
+            )
+
+        temporary = SONOBUS_SETTINGS_FILE.with_suffix(
+            SONOBUS_SETTINGS_FILE.suffix + ".tmp"
+        )
+        temporary.write_text(
+            text,
+            encoding="utf-8",
+        )
+        temporary.replace(SONOBUS_SETTINGS_FILE)
+
+
+def sonobus_pids():
+    pids = set()
+    for process_name in ("sonobus", "SonoBus"):
+        result = subprocess.run(
+            ["pgrep", "-x", process_name],
+            text=True,
+            capture_output=True,
             check=False,
         )
+        for value in result.stdout.split():
+            try:
+                pids.add(int(value))
+            except ValueError:
+                pass
+    return sorted(pids)
 
-        if result.returncode != 0:
-            error = (
-                result.stderr.strip()
-                or result.stdout.strip()
-                or "HyperX DAC reset failed"
+
+def stop_sonobus():
+    for pid in sonobus_pids():
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+    for _ in range(30):
+        if not sonobus_pids():
+            return
+        time.sleep(0.1)
+
+    for pid in sonobus_pids():
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    for _ in range(10):
+        if not sonobus_pids():
+            return
+        time.sleep(0.1)
+
+    remaining = sonobus_pids()
+    if remaining:
+        raise RuntimeError(
+            "Could not stop previous SonoBus instance(s): "
+            + ", ".join(str(pid) for pid in remaining)
+        )
+
+
+def restart_sonobus():
+    with SWITCH_LOCK:
+        stop_sonobus()
+        time.sleep(0.5)
+
+        set_alsa_loopback_to_100()
+        configure_sonobus_settings()
+
+        if not Path(SONOBUS_BINARY).is_file():
+            raise RuntimeError(
+                f"SonoBus binary not found: {SONOBUS_BINARY}"
             )
 
-            raise RuntimeError(error)
-
-        restarted_profile = ""
-        pid = None
-
-        if active_profile is not None:
-            set_alsa_loopback_to_100()
-
-            pid = launch_camilladsp(
-                active_profile
+        ensure_state_directory()
+        log_handle = SONOBUS_LOG_FILE.open(
+            "ab",
+            buffering=0,
+        )
+        try:
+            process = subprocess.Popen(
+                [
+                    SONOBUS_BINARY,
+                    f"--group={SONOBUS_GROUP}",
+                    f"--username={SONOBUS_USERNAME}",
+                    (
+                        "--connectionserver="
+                        f"{SONOBUS_CONNECTION_SERVER}"
+                    ),
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                close_fds=True,
             )
+        finally:
+            log_handle.close()
 
-            restarted_profile = (
-                active_profile.name
+        time.sleep(1)
+        return_code = process.poll()
+        if return_code is not None:
+            try:
+                log_tail = SONOBUS_LOG_FILE.read_text(
+                    errors="replace"
+                )[-4000:]
+            except OSError:
+                log_tail = ""
+            raise RuntimeError(
+                "SonoBus failed to start.\n"
+                + log_tail
             )
 
         return {
-            "profile":
-                restarted_profile,
-            "pid":
-                pid,
-            "output":
-                result.stdout.strip(),
+            "pid": process.pid,
+            "audio_system": SONOBUS_AUDIO_SYSTEM,
+            "input_device": SONOBUS_INPUT_DEVICE,
+            "output_device": SONOBUS_OUTPUT_DEVICE,
+            "sample_rate": SONOBUS_SAMPLE_RATE,
+            "buffer_size": SONOBUS_BUFFER_SIZE,
+            "send_channels": int(SONOBUS_SEND_CHANNELS),
+            "send_quality": SONOBUS_SEND_QUALITY,
         }
 
 def restart_airplay():
@@ -1186,8 +1323,8 @@ class Handler(BaseHTTPRequestHandler):
                     filename
                 )
 
-            elif path == "/api/reset-dac":
-                result = reset_dac()
+            elif path == "/api/restart-sonobus":
+                result = restart_sonobus()
             elif path == "/api/restart-airplay":
                 result = restart_airplay()
             else:
@@ -1231,6 +1368,12 @@ class ReusableThreadingHTTPServer(
 
 ensure_state_directory()
 kill_previous_web_servers()
+stop_system_audio()
+sonobus_start = restart_sonobus()
+print(
+    f"SonoBus started with PID {sonobus_start['pid']}",
+    flush=True,
+)
 
 server = ReusableThreadingHTTPServer(
     (LISTEN_ADDRESS, LISTEN_PORT),
@@ -1271,3 +1414,5 @@ finally:
         SERVER_PID_FILE.unlink(
             missing_ok=True
         )
+
+
