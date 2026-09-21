@@ -357,6 +357,13 @@ h1 {
 
   <div class="device-actions">
     <button
+      id="restart-camilladsp"
+      class="device-action-button"
+      type="button"
+    >
+      Restart CamillaDSP
+    </button>
+    <button
       id="restart-sonobus"
       class="device-action-button"
       type="button"
@@ -398,6 +405,10 @@ const activeState =
 const statusBox =
   document.querySelector("#status");
 
+const restartCamillaDSPButton =
+  document.querySelector(
+    "#restart-camilladsp"
+  );
 const restartSonoBusButton =
   document.querySelector(
     "#restart-sonobus"
@@ -548,6 +559,40 @@ async function switchProfile(filename) {
 }
 
 
+async function restartCamillaDSP() {
+  if (switching) {
+    return;
+  }
+  switching = true;
+  restartCamillaDSPButton.disabled = true;
+  setButtonsBusy(true);
+  setStatus(
+    "Restarting CamillaDSP…"
+  );
+  try {
+    const result = await requestJSON(
+      "/api/restart-camilladsp",
+      {
+        method: "POST"
+      }
+    );
+    setStatus(
+      "Restarted " +
+      friendlyName(result.profile)
+    );
+    await loadProfiles();
+  } catch (error) {
+    setStatus(
+      error.message,
+      true
+    );
+  } finally {
+    switching = false;
+    restartCamillaDSPButton.disabled = false;
+    setButtonsBusy(false);
+  }
+}
+
 async function restartSonoBus() {
   if (switching) {
     return;
@@ -695,6 +740,10 @@ async function loadProfiles() {
 }
 
 
+restartCamillaDSPButton.addEventListener(
+  "click",
+  restartCamillaDSP
+);
 restartSonoBusButton.addEventListener(
   "click",
   restartSonoBus
@@ -1089,6 +1138,29 @@ def restart_sonobus():
             "send_quality": SONOBUS_SEND_QUALITY,
         }
 
+def restart_camilladsp():
+    with SWITCH_LOCK:
+        active_profile = read_active_profile()
+        if not active_profile:
+            raise RuntimeError(
+                "No active CamillaDSP profile to restart"
+            )
+        profile = resolve_profile(active_profile)
+        stop_existing_camilladsp()
+        set_alsa_loopback_to_100()
+        try:
+            pid = launch_camilladsp(profile)
+        except Exception:
+            ACTIVE_PROFILE_FILE.unlink(
+                missing_ok=True
+            )
+            raise
+        return {
+            "profile": profile.name,
+            "pid": pid,
+        }
+
+
 def restart_airplay():
     with SWITCH_LOCK:
         result = run_command(
@@ -1323,6 +1395,8 @@ class Handler(BaseHTTPRequestHandler):
                     filename
                 )
 
+            elif path == "/api/restart-camilladsp":
+                result = restart_camilladsp()
             elif path == "/api/restart-sonobus":
                 result = restart_sonobus()
             elif path == "/api/restart-airplay":
