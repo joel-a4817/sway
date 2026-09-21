@@ -113,7 +113,7 @@ input "1386:20983:Wacom_Pen_and_multitouch_sensor_Finger" {
 bindsym --no-repeat $mod+shift+u fullscreen disable; exec $term -T "$popup-update-rebuild" -e bash -c '~/.config/sway/scripts/updaters/nixos-rebuild.sh'
 bindsym --no-repeat $mod+Shift+e fullscreen disable; exec $term -T "$popup-update-clean" -e bash -c '~/.config/sway/scripts/updaters/nixos-clean.sh'
 bindsym --no-repeat $mod+Shift+p fullscreen disable; exec $term -T "$popup-update-pixymon" -e bash -c '~/.config/sway/scripts/updaters/update-pixymon.sh'
-bindsym --no-repeat $mod+Shift+d fullscreen disable; exec $term -T "$popup-update-dvd" -e bash -c '~/.config/sway/scripts/updaters/rewrite-dvd-playlist.sh'
+bindsym --no-repeat $mod+Shift+v fullscreen disable; exec $term -T "$popup-update-dvd" -e bash -c '~/.config/sway/scripts/updaters/rewrite-dvd-playlist.sh'
 bindsym --no-repeat $mod+Shift+t fullscreen disable; exec $term -T "$popup-settime" -e bash -c '~/.config/sway/scripts/settime.sh; echo; read -n 1 -rsp "Press any key to close..."'
 bindsym --no-repeat $mod+shift+y fullscreen disable; exec $term -T "$popup-update-rebuild" -e bash -c '~/.config/sway/scripts/updaters/update-music.sh'
 bindsym --no-repeat $mod+shift+s fullscreen disable; exec $term -T "$popup-update-shuffle" -e bash -c 'python /home/joel/.config/sway/scripts/shuffle-favourites.py; read -n 1 -rsp "Press any key to close..."'
@@ -121,6 +121,7 @@ bindsym --no-repeat $mod+shift+r fullscreen disable; exec bash -c 'mpv /home/joe
 bindsym --no-repeat $mod+shift+m fullscreen disable; exec bash -c 'mpv /home/joel/Downloads/Music/favourites.m3u'
 bindsym --no-repeat $mod+shift+a fullscreen disable; exec $term -T "$popup-update-a_music_server" -e bash -c 'trap "" INT; (trap - INT; /home/joel/.config/sway/scripts/network/start-ipad-webremote.sh); echo; read -n 1 -rsp "Press any key to close..."'
 bindsym --no-repeat $mod+shift+b fullscreen disable; exec $term -T "$popup-update-camilladsp_server" -e bash -c 'trap "" INT; (trap - INT; python3 /home/joel/.config/sway/scripts/network/camilladsp-server-sonobus.py); echo; echo "Stopping SonoBus"; pkill -x sonobus 2>/dev/null || true; pkill -x SonoBus 2>/dev/null || true; echo "Restarting audio services"; systemctl --user start pipewire.socket pipewire.service wireplumber.service pipewire-pulse.socket pipewire-pulse.service; read -n 1 -rsp "Press any key to close..."'
+bindsym --no-repeat $mod+shift+d fullscreen disable; exec $term -T "$popup-update-a_profiles" -e bash -c 'python3 /home/joel/.config/sway/scripts/updaters/rebuild_pipewire_camilla.py; echo; read -n 1 -rsp "Press any key to close..."'
 
 #keybinds app
 bindsym --no-repeat $mod+F2 fullscreen disable; exec $term -T "$popup-tuis" -e clipse
