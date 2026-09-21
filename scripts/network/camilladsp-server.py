@@ -197,6 +197,8 @@ h1 {
 }
 
 .device-actions {
+  display: grid;
+  gap: 11px;
   margin-bottom: 24px;
 }
 
@@ -345,6 +347,14 @@ h1 {
     >
       Reset HyperX DAC
     </button>
+
+    <button
+      id="restart-airplay"
+      class="device-action-button"
+      type="button"
+    >
+      Restart AirPlay Receiver
+    </button>
   </div>
 
   <div class="section-title">
@@ -375,6 +385,11 @@ const statusBox =
 const resetDACButton =
   document.querySelector(
     "#reset-dac"
+  );
+
+const restartAirPlayButton =
+  document.querySelector(
+    "#restart-airplay"
   );
 
 let switching = false;
@@ -565,6 +580,41 @@ async function resetDAC() {
   }
 }
 
+async function restartAirPlay() {
+  if (switching) {
+    return;
+  }
+
+  switching = true;
+  restartAirPlayButton.disabled = true;
+  setButtonsBusy(true);
+
+  setStatus(
+    "Restarting AirPlay receiver…"
+  );
+
+  try {
+    await requestJSON(
+      "/api/restart-airplay",
+      {
+        method: "POST"
+      }
+    );
+
+    setStatus(
+      "AirPlay receiver restarted"
+    );
+  } catch (error) {
+    setStatus(
+      error.message,
+      true
+    );
+  } finally {
+    switching = false;
+    restartAirPlayButton.disabled = false;
+    setButtonsBusy(false);
+  }
+}
 
 async function loadProfiles() {
   try {
@@ -649,6 +699,11 @@ async function loadProfiles() {
 resetDACButton.addEventListener(
   "click",
   resetDAC
+);
+
+restartAirPlayButton.addEventListener(
+  "click",
+  restartAirPlay
 );
 
 loadProfiles();
@@ -897,6 +952,29 @@ def reset_dac():
                 result.stdout.strip(),
         }
 
+def restart_airplay():
+    with SWITCH_LOCK:
+        result = run_command(
+            [
+                "systemctl",
+                "restart",
+                "nqptp.service",
+                "shairport-sync.service",
+            ],
+            check=False,
+        )
+
+        if result.returncode != 0:
+            error = (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or "Failed to restart AirPlay services"
+            )
+            raise RuntimeError(error)
+
+        return {
+            "output": result.stdout.strip(),
+        }
 
 def switch_profile(filename):
     with SWITCH_LOCK:
@@ -1110,8 +1188,10 @@ class Handler(BaseHTTPRequestHandler):
 
             elif path == "/api/reset-dac":
                 result = reset_dac()
-
+            elif path == "/api/restart-airplay":
+                result = restart_airplay()
             else:
+
                 self.send_json(
                     404,
                     {
