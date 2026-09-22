@@ -1,14 +1,6 @@
 #!/usr/bin/env bash
 set -u
 
-# Prevent overlapping selectors from changing profiles/sinks at the same time.
-LOCK_FILE="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/audio-switch.lock"
-exec 9>"$LOCK_FILE"
-if ! flock -n 9; then
-    echo "Audio switch is already running."
-    exit 0
-fi
-
 HOME_DIR="/home/joel"
 STATE_DIR="$HOME_DIR/.local/state/sway/audio"
 ACTION_LOG="$STATE_DIR/audio-switch.log"
@@ -257,18 +249,12 @@ sink_is_excluded_physical_target() {
 
     description="$(custom_sink_description "$sink")"
 
-    # Custom DSP sinks are inputs to the selected processing graph, not its
-    # final physical destination.
     is_custom_sink "$sink" && return 0
 
-    # Exclude the built-in speaker and display outputs from automatic custom
-    # routing. They remain directly selectable in the normal sink menu.
     [[ "$sink" == *Speaker* || "$description" == *Speaker* ]] && return 0
     [[ "$sink" == *HDMI* || "$sink" == *hdmi* ||
        "$description" == *HDMI* || "$description" == *DisplayPort* ]] && return 0
 
-    # ALSA Loopback is a valid selectable PipeWire sink, but it is not a
-    # physical listening device and must never be auto-selected here.
     [[ "$sink" == *snd_aloop* || "$sink" == *Loopback* ||
        "$description" == *Loopback* ]] && return 0
 
@@ -279,9 +265,6 @@ preferred_physical_sink() {
     local sink
     local -a candidates=()
 
-    # Highest priority: any currently available dedicated Headphones sink.
-    # This is role-based and does not depend on a card, vendor, USB ID, or
-    # machine-specific PipeWire node name.
     while read -r sink; do
         [[ -n "$sink" ]] || continue
         if sink_is_headphones "$sink"; then
@@ -293,10 +276,6 @@ preferred_physical_sink() {
         awk '{print $2}'
     )
 
-    # Otherwise select an additional real ALSA hardware sink. Exclude custom
-    # filters, Speaker, HDMI/DisplayPort, and ALSA Loopback. This generically
-    # catches an external DAC without hardcoding its make, model, card path,
-    # USB identifier, profile name, or sink name.
     while read -r sink; do
         [[ -n "$sink" ]] || continue
 
@@ -314,8 +293,6 @@ preferred_physical_sink() {
         return 0
     fi
 
-    # If multiple non-excluded hardware sinks exist, prefer the current
-    # default only when it is one of those valid physical candidates.
     sink="$(pactl get-default-sink 2>/dev/null || true)"
     if [[ -n "$sink" ]]; then
         local candidate
@@ -327,7 +304,6 @@ preferred_physical_sink() {
         done
     fi
 
-    # Deterministic fallback when several extra physical outputs remain.
     if ((${#candidates[@]} > 0)); then
         printf '%s\n' "${candidates[0]}"
         return 0
@@ -427,16 +403,10 @@ set_default_sink_stable() {
     [[ "$(pactl get-default-sink 2>/dev/null || true)" == "$wanted" ]] || return 1
 
     if is_custom_sink "$wanted"; then
-        # Applications enter the selected BRIR/HpCF sink. Filter outputs are
-        # excluded so they are never fed back into the selected custom sink.
         move_application_inputs_to "$wanted"
 
-        # Only the selected custom sink's own output is moved onward to the
-        # preferred physical destination.
         route_selected_custom_output "$wanted" "$physical_sink" || return 1
     else
-        # Direct physical playback bypasses every custom filter. Move only
-        # application streams, then remove all filter-output links.
         move_application_inputs_to "$wanted"
         disconnect_all_filter_outputs || return 1
     fi
@@ -448,8 +418,9 @@ pause_active_media() {
     local service
     local paused_any=0
 
-    if [[ -S /tmp/mpvsocket ]]; then
-        printf 'set pause yes\n' | socat - /tmp/mpvsocket >/dev/null 2>&1 || true
+    if [[ -S /tmp/mpvsocket ]] && command -v socat >/dev/null 2>&1; then
+        printf 'set pause yes\n' |
+            socat - /tmp/mpvsocket >>"$ACTION_LOG" 2>&1 || true
     fi
 
     if command -v busctl >/dev/null 2>&1; then
@@ -471,10 +442,6 @@ pause_active_media() {
             busctl --user --no-pager --no-legend list 2>/dev/null |
             awk '$1 ~ /^org\.mpris\.MediaPlayer2\./ {print $1}'
         )
-    fi
-
-    if command -v playerctl >/dev/null 2>&1; then
-        playerctl --all-players pause >>"$ACTION_LOG" 2>&1 || true
     fi
 }
 
@@ -566,10 +533,8 @@ sink_display_label() {
 close_mpv_windows() {
     local _
 
-    # Ask every actual mpv process to exit cleanly.
     pkill -TERM -x mpv >>"$ACTION_LOG" 2>&1 || true
 
-    # Allow normal shutdown.
     for _ in {1..30}; do
         if ! pgrep -x mpv >/dev/null 2>&1; then
             return 0
@@ -577,7 +542,6 @@ close_mpv_windows() {
         sleep 0.1
     done
 
-    # Force-close only remaining mpv processes.
     pkill -KILL -x mpv >>"$ACTION_LOG" 2>&1 || true
 
     for _ in {1..20}; do
@@ -668,8 +632,6 @@ if [[ "$SELECTED_CARD_VALUE" == start-audio ]]; then
         exit 1
     fi
 
-    # Give WirePlumber a moment to create cards, hardware sinks,
-    # and all configured BRIR/HpCF filter-chain sinks.
     for _ in {1..100}; do
         if pactl list short sinks 2>/dev/null | grep -q .; then
             break
@@ -680,11 +642,8 @@ if [[ "$SELECTED_CARD_VALUE" == start-audio ]]; then
 
     STARTED_SINK="$(pactl get-default-sink 2>/dev/null || true)"
 
-    # Set ALSA controls and every PipeWire sink to 100%, then restore
-    # the previously saved master/default-sink volume afterward.
     normalize_audio_volumes "$ORIGINAL_VOLUME" "$STARTED_SINK"
 
-    # AirPlay 2 timing must be available before Shairport Sync starts.
     if ! systemctl start nqptp.service >>"$ACTION_LOG" 2>&1; then
         echo "Failed to start nqptp.service."
         echo "See: $ACTION_LOG"
@@ -712,10 +671,8 @@ fi
 if [[ "$SELECTED_CARD_VALUE" == stop-audio ]]; then
     echo "Stopping AirPlay and audio services..." | tee -a "$ACTION_LOG"
 
-    # Close playback windows while the audio server is still available.
     close_mpv_windows || true
 
-    # Stop signal-producing services before removing the PipeWire graph.
     systemctl stop shairport-sync.service \
         >>"$ACTION_LOG" 2>&1 || true
 
@@ -750,7 +707,6 @@ SELECTED_CARD="${CARDS[$SELECTED_CARD_VALUE]%%|*}"
 SELECTED_CARD_DESCRIPTION="${CARDS[$SELECTED_CARD_VALUE]#*|}"
 SELECTED_CARD_LABEL="$(card_display_label "$SELECTED_CARD" "$SELECTED_CARD_DESCRIPTION")"
 
-# Normalize after card selection, before profile discovery/selection.
 CURRENT_SINK="$(pactl get-default-sink 2>/dev/null || true)"
 normalize_audio_volumes "$ORIGINAL_VOLUME" "$CURRENT_SINK"
 
@@ -786,7 +742,6 @@ if [[ "$profile_choice" != 0 ]]; then
     (( PROFILE_OK )) || { echo "Warning: profile did not settle as '$SELECTED_PROFILE'." >>"$ACTION_LOG"; echo "Warning: profile switch did not settle. See: $ACTION_LOG"; }
 fi
 
-# Normalize after profile selection, before sink discovery/selection.
 CURRENT_SINK="$(pactl get-default-sink 2>/dev/null || true)"
 for _ in {1..50}; do [[ -n "$CURRENT_SINK" ]] && pactl list short sinks | awk '{print $2}' | grep -Fqx "$CURRENT_SINK" && break; sleep 0.1; CURRENT_SINK="$(pactl get-default-sink 2>/dev/null || true)"; done
 normalize_audio_volumes "$ORIGINAL_VOLUME" "$CURRENT_SINK"
@@ -836,7 +791,6 @@ else
     echo "Keeping current sink."
 fi
 
-# Final normalization after sink selection, including keep-current.
 FINAL_SINK="$(pactl get-default-sink 2>/dev/null || true)"
 normalize_audio_volumes "$ORIGINAL_VOLUME" "$FINAL_SINK"
 
