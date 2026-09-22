@@ -33,7 +33,7 @@ SONOBUS_SEND_CHANNELS = 2.0
 SONOBUS_SEND_QUALITY = "128 kbps/channel Opus"
 
 STATE_DIRECTORY = Path(
-    "/home/joel/.local/state/camilladsp-webremote"
+    "/home/joel/.local/state/sway/audio/camilladsp-webremote"
 )
 
 PID_FILE = STATE_DIRECTORY / "camilladsp.pid"

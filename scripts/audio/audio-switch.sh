@@ -265,6 +265,12 @@ if [[ "$SELECTED_CARD_VALUE" == stop-audio ]]; then
         exit 1
     fi
 
+    if ! pkill mpv >>"$ACTION_LOG" 2>&1; then
+      echo "Failed to kill mpv."
+      echo "See: $ACTION_LOG"
+      exit 1
+    fi
+
     echo "Audio and AirPlay services stopped."
     pause_before_close
     exit 0

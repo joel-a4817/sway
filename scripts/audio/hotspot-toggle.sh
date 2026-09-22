@@ -7,7 +7,7 @@ PATH="/run/wrappers/bin:/home/joel/.nix-profile/bin:/etc/profiles/per-user/joel/
 export PATH
 
 HOME_DIR="/home/joel"
-STATE_DIR="$HOME_DIR/.local/state/audio-suspend-toggle"
+STATE_DIR="$HOME_DIR/.local/state/sway/audio/audio-hotspot"
 
 HOTSPOT_CONNECTION="AirPlay Direct"
 PREVIOUS_WIFI_FILE="$STATE_DIR/previous-wifi-connection"
