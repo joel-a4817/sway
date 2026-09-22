@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -u
 
+# Prevent overlapping selectors from changing profiles/sinks at the same time.
+LOCK_FILE="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/audio-switch.lock"
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+    echo "Audio switch is already running."
+    exit 0
+fi
+
 HOME_DIR="/home/joel"
 STATE_DIR="$HOME_DIR/.local/state/sway/audio"
 ACTION_LOG="$STATE_DIR/audio-switch.log"
@@ -46,6 +54,78 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
 trap 'exit 131' QUIT
+
+pulse_ready() {
+    pactl info >/dev/null 2>&1
+}
+
+wait_for_pulse() {
+    local _
+    for _ in {1..100}; do
+        pulse_ready && return 0
+        sleep 0.1
+    done
+    return 1
+}
+
+sink_exists() {
+    local wanted="$1"
+    pactl list short sinks 2>/dev/null | awk '{print $2}' | grep -Fqx "$wanted"
+}
+
+wait_for_sink() {
+    local wanted="$1" _
+    for _ in {1..100}; do
+        sink_exists "$wanted" && return 0
+        sleep 0.1
+    done
+    return 1
+}
+
+set_card_profile_stable() {
+    local card="$1" profile="$2" _
+    for _ in {1..30}; do
+        wait_for_pulse || continue
+        if pactl set-card-profile "$card" "$profile" >>"$ACTION_LOG" 2>&1; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    return 1
+}
+
+set_default_sink_stable() {
+    local wanted="$1" current _
+
+    wait_for_pulse || return 1
+    wait_for_sink "$wanted" || return 1
+
+    # Setting the default may trigger route/profile relinking. Retry through
+    # transient Pulse disconnects instead of treating the first one as final.
+    for _ in {1..50}; do
+        if pulse_ready && sink_exists "$wanted"; then
+            pactl set-default-sink "$wanted" >>"$ACTION_LOG" 2>&1 || true
+            current="$(pactl get-default-sink 2>/dev/null || true)"
+            [[ "$current" == "$wanted" ]] && break
+        fi
+        sleep 0.1
+    done
+
+    [[ "$(pactl get-default-sink 2>/dev/null || true)" == "$wanted" ]] || return 1
+
+    # Sink-input IDs are ephemeral during relinking. Re-enumerate them on each
+    # pass and ignore IDs that disappear between list and move.
+    for _ in {1..20}; do
+        pulse_ready || { sleep 0.1; continue; }
+        while read -r id _; do
+            [[ -n "$id" ]] || continue
+            pactl move-sink-input "$id" "$wanted" >>"$ACTION_LOG" 2>&1 || true
+        done < <(pactl list short sink-inputs 2>/dev/null || true)
+        sleep 0.1
+    done
+
+    return 0
+}
 
 normalize_audio_volumes() {
     local restore_volume="${1:-}" restore_sink="${2:-}" sof_card hyperx_card sink
@@ -121,6 +201,35 @@ sink_display_label() {
     esac
     printf '%s\n' "$label"
 }
+close_mpv_windows() {
+    local _
+
+    # Ask every actual mpv process to exit cleanly.
+    pkill -TERM -x mpv >>"$ACTION_LOG" 2>&1 || true
+
+    # Allow normal shutdown.
+    for _ in {1..30}; do
+        if ! pgrep -x mpv >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.1
+    done
+
+    # Force-close only remaining mpv processes.
+    pkill -KILL -x mpv >>"$ACTION_LOG" 2>&1 || true
+
+    for _ in {1..20}; do
+        if ! pgrep -x mpv >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.1
+    done
+
+    echo "Warning: one or more mpv processes are still running." \
+        >>"$ACTION_LOG"
+
+    return 1
+}
 hotspot_active() { nmcli -t -f NAME connection show --active 2>/dev/null | grep -Fqx "$HOTSPOT_CONNECTION"; }
 
 ARGS=(-t warning -y overlay -m "Audio Device Select")
@@ -167,6 +276,7 @@ SELECTED_CARD_VALUE="$(cat "$CARD_SELECTION_FILE")"
 if [[ "$SELECTED_CARD_VALUE" == start-audio ]]; then
     echo "Starting PipeWire and WirePlumber..." | tee -a "$ACTION_LOG"
 
+    systemctl --user reset-failed pipewire.socket pipewire.service pipewire-pulse.socket pipewire-pulse.service wireplumber.service >>"$ACTION_LOG" 2>&1 || true
     if ! systemctl --user start \
         pipewire.socket \
         pipewire-pulse.socket \
@@ -240,18 +350,15 @@ fi
 if [[ "$SELECTED_CARD_VALUE" == stop-audio ]]; then
     echo "Stopping AirPlay and audio services..." | tee -a "$ACTION_LOG"
 
-    # Stop signal-producing services before removing the PipeWire graph.
-    if ! systemctl stop shairport-sync.service >>"$ACTION_LOG" 2>&1; then
-        echo "Failed to stop shairport-sync.service."
-        echo "See: $ACTION_LOG"
-        exit 1
-    fi
+    # Close playback windows while the audio server is still available.
+    close_mpv_windows || true
 
-    if ! systemctl stop nqptp.service >>"$ACTION_LOG" 2>&1; then
-        echo "Failed to stop nqptp.service."
-        echo "See: $ACTION_LOG"
-        exit 1
-    fi
+    # Stop signal-producing services before removing the PipeWire graph.
+    systemctl stop shairport-sync.service \
+        >>"$ACTION_LOG" 2>&1 || true
+
+    systemctl stop nqptp.service \
+        >>"$ACTION_LOG" 2>&1 || true
 
     if ! systemctl --user stop \
         wireplumber.service \
@@ -263,12 +370,6 @@ if [[ "$SELECTED_CARD_VALUE" == stop-audio ]]; then
         echo "Failed to stop the user audio services."
         echo "See: $ACTION_LOG"
         exit 1
-    fi
-
-    if ! pkill mpv >>"$ACTION_LOG" 2>&1; then
-      echo "Failed to kill mpv."
-      echo "See: $ACTION_LOG"
-      exit 1
     fi
 
     echo "Audio and AirPlay services stopped."
@@ -317,7 +418,7 @@ if [[ "$profile_choice" != 0 ]]; then
     profile_entry="${PROFILES[$profile_index]}"; SELECTED_PROFILE="${profile_entry%%|*}"; remainder="${profile_entry#*|}"; description="${remainder%%|*}"; availability="${remainder##*|}"
     [[ "$availability" != no ]] || { echo "That profile is currently marked unavailable by PipeWire."; exit 1; }
     SELECTED_PROFILE_LABEL="$(profile_display_label "$SELECTED_CARD" "$SELECTED_PROFILE" "$description")"
-    pactl set-card-profile "$SELECTED_CARD" "$SELECTED_PROFILE" >>"$ACTION_LOG" 2>&1 || { echo "Failed to set profile '$SELECTED_PROFILE'. See: $ACTION_LOG"; exit 1; }
+    set_card_profile_stable "$SELECTED_CARD" "$SELECTED_PROFILE" || { echo "Failed to set profile '$SELECTED_PROFILE'. See: $ACTION_LOG"; exit 1; }
     printf '%s\n' "$SELECTED_PROFILE_LABEL" >"$PROFILE_SELECTION_FILE"
     PROFILE_OK=0; for _ in {1..50}; do [[ "$(get_active_profile)" == "$SELECTED_PROFILE" ]] && { PROFILE_OK=1; break; }; sleep 0.1; done
     (( PROFILE_OK )) || { echo "Warning: profile did not settle as '$SELECTED_PROFILE'." >>"$ACTION_LOG"; echo "Warning: profile switch did not settle. See: $ACTION_LOG"; }
@@ -360,11 +461,15 @@ if [[ "$choice" != 0 ]]; then
     else
         index=$((choice-1)); (( index >= 0 && index < ${#SINKS[@]} )) || { echo "Invalid selection."; exit 1; }; sink="${SINKS[$index]%%|*}"
     fi
-    pactl list short sinks | awk '{print $2}' | grep -Fqx "$sink" || { echo "Selected sink is no longer available: $sink"; exit 1; }
-    pactl set-default-sink "$sink" >>"$ACTION_LOG" 2>&1 || { echo "Failed to set default sink '$sink'. See: $ACTION_LOG"; exit 1; }
-    while read -r id; do [[ -n "$id" ]] && pactl move-sink-input "$id" "$sink" >>"$ACTION_LOG" 2>&1 || true; done < <(pactl list short sink-inputs | awk '{print $1}')
-    SWITCH_OK=0; for _ in {1..50}; do [[ "$(pactl get-default-sink 2>/dev/null || true)" == "$sink" ]] && { SWITCH_OK=1; break; }; sleep 0.1; done
-    (( SWITCH_OK )) && normalize_audio_volumes "$ORIGINAL_VOLUME" "$sink" || { echo "Warning: failed to switch to sink '$sink'." >>"$ACTION_LOG"; echo "Warning: sink switch did not settle. See: $ACTION_LOG"; }
+    wait_for_sink "$sink" || { echo "Selected sink is no longer available: $sink"; exit 1; }
+    if set_default_sink_stable "$sink"; then
+        SWITCH_OK=1
+        normalize_audio_volumes "$ORIGINAL_VOLUME" "$sink"
+    else
+        SWITCH_OK=0
+        echo "Warning: failed to switch to sink '$sink'." >>"$ACTION_LOG"
+        echo "Warning: sink switch did not settle. See: $ACTION_LOG"
+    fi
 else
     echo "Keeping current sink."
 fi
