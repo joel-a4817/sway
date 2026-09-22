@@ -47,13 +47,13 @@ for_window [app_id="$term" title="^$popup-f-system"] floating enable, resize set
 for_window [app_id="$term" title="^$popup-f-devices"] floating enable, resize set 750 650,  move position center
 for_window [app_id="$term" title="^$popup-f-wifi"] floating enable, resize set 1450 450, move position center
 for_window [app_id="$term" title="^$popup-f-info"] floating enable, resize set 1150 800, move position center
-for_window [app_id="$term" title="^$popup-f-main"] floating enable, resize set 1800 400, move position center
+for_window [app_id="$term" title="^$popup-f-main"] floating enable, resize set 1800 450, move position center
 for_window [app_id="$term" title="^$popup-f-hardware"] floating enable, resize set 1150 700, move position center
 
 for_window [app_id="$term" title="^$popup-wifi-select"] floating enable, resize set 1000 1000, move position center
 for_window [app_id="$term" title="^$popup-wifi-toggle"] floating enable, resize set 1200 300, move position center
 for_window [app_id="$term" title="^$popup-wifi-status"] floating enable, resize set 1500 1000, move position center
-for_window [app_id="$term" title="^$popup-audio-switch"] floating enable, resize set 1200 900,  move position center
+for_window [app_id="$term" title="^$popup-audio-switch"] floating enable, resize set 1200 950,  move position center
 
 for_window [app_id="yazi-nvim"] floating enable, move position center, resize set 1000 700, opacity 0.85
 
