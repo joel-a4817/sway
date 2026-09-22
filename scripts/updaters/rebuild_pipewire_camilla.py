@@ -324,6 +324,7 @@ def make_module(index, folder_name, hf):
             "playback.props" = {{
               "node.autoconnect" = false;
               "node.dont-fallback" = true;
+              "stream.dont-remix" = true;
               "audio.channels" = 2;
               "audio.position" = [ "FL" "FR" ];
               "audio.rate" = {SAMPLE_RATE};
@@ -622,8 +623,10 @@ def verify_output(text):
         raise SystemExit(
             'Output verification failed: node.dont-fallback=true count mismatch'
         )
-    if 'stream.dont-remix' in text:
-        raise SystemExit('Output verification failed: stream.dont-remix found')
+    if text.count('"stream.dont-remix" = true;') != expected_modules:
+        raise SystemExit(
+            'Output verification failed: stream.dont-remix=true count mismatch'
+        )
     if '"node.passive" = true;' in text:
         raise SystemExit('Output verification failed: node.passive found')
     if text.count('Apple_EarPods_Ahastyle_Covers_Custom_Average_A+B.wav') != earpods_count * 2:
@@ -898,4 +901,3 @@ def verify_camilladsp_profiles(paths):
 
 if __name__ == "__main__":
     main()
-

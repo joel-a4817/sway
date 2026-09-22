@@ -3,6 +3,15 @@ set -u
 
 HOME_DIR="/home/joel"
 STATE_DIR="$HOME_DIR/.local/state/sway/audio"
+
+# Prevent overlapping selectors from changing the graph concurrently.
+LOCK_FILE="$STATE_DIR/audio-switch.lock"
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+    echo "Audio switch is already running."
+    exit 0
+fi
+
 ACTION_LOG="$STATE_DIR/audio-switch.log"
 HOTSPOT_CONNECTION="AirPlay Direct"
 RESULT_FILE="$STATE_DIR/audio-toggle-complete.$$"
@@ -10,6 +19,8 @@ ACTION_STARTED_FILE="$STATE_DIR/audio-toggle-started.$$"
 CARD_SELECTION_FILE="$STATE_DIR/audio-card-selected.$$"
 PROFILE_SELECTION_FILE="$STATE_DIR/audio-profile-selected.$$"
 SWAYNAG_LOG="$STATE_DIR/audio-switch-swaynag.$$"
+MEDIA_RESUME_FILE="$STATE_DIR/audio-media-resume.$$"
+MEDIA_CAPTURED_FILE="$STATE_DIR/audio-media-captured.$$"
 
 mkdir -p "$STATE_DIR"
 chmod 700 "$STATE_DIR" 2>/dev/null || true
@@ -17,7 +28,7 @@ printf '\n[%s] audio-switch pid=%s\n' "$(date -Iseconds 2>/dev/null || date)" "$
 FINAL_PAUSE_REACHED=0
 EXIT_HANDLER_RUNNING=0
 
-cleanup() { rm -f "$RESULT_FILE" "$ACTION_STARTED_FILE" "$CARD_SELECTION_FILE" "$PROFILE_SELECTION_FILE" "$SWAYNAG_LOG"; }
+cleanup() { rm -f "$RESULT_FILE" "$ACTION_STARTED_FILE" "$CARD_SELECTION_FILE" "$PROFILE_SELECTION_FILE" "$SWAYNAG_LOG" "$MEDIA_RESUME_FILE" "$MEDIA_CAPTURED_FILE"; }
 pause_before_close() {
     FINAL_PAUSE_REACHED=1
     echo
@@ -312,6 +323,68 @@ preferred_physical_sink() {
     return 1
 }
 
+startup_physical_sink() {
+    local sink
+
+    # Reuse the normal physical-output policy first:
+    # Headphones, then an eligible extra ALSA hardware output.
+    sink="$(preferred_physical_sink || true)"
+    if [[ -n "$sink" ]]; then
+        printf '%s\n' "$sink"
+        return 0
+    fi
+
+    # Last resort: the built-in Speaker sink.
+    while read -r sink; do
+        [[ -n "$sink" ]] || continue
+        if [[ "$sink" == *Speaker* ]] ||
+           [[ "$(custom_sink_description "$sink")" == *Speaker* ]]; then
+            printf '%s\n' "$sink"
+            return 0
+        fi
+    done < <(
+        pactl list short sinks 2>/dev/null |
+        awk '{print $2}'
+    )
+
+    return 1
+}
+
+switch_to_startup_physical_sink() {
+    local target="$1"
+    local current
+    local _
+
+    [[ -n "$target" ]] || return 1
+    wait_for_pulse || return 1
+    wait_for_sink "$target" || return 1
+
+    for _ in {1..50}; do
+        if pactl set-default-sink "$target" >>"$ACTION_LOG" 2>&1; then
+            current="$(pactl get-default-sink 2>/dev/null || true)"
+            [[ "$current" == "$target" ]] && break
+        fi
+        sleep 0.1
+    done
+
+    current="$(pactl get-default-sink 2>/dev/null || true)"
+    if [[ "$current" != "$target" ]]; then
+        printf 'Warning: post-profile physical sink did not settle: %s\n' \
+            "$target" >>"$ACTION_LOG"
+        return 1
+    fi
+
+    move_application_inputs_to "$target"
+    disconnect_all_filter_outputs || {
+        printf 'Warning: filter outputs remained linked during post-profile routing.\n' \
+            >>"$ACTION_LOG"
+        return 1
+    }
+
+    printf 'Post-profile physical sink: %s\n' "$target" >>"$ACTION_LOG"
+    return 0
+}
+
 route_selected_custom_output() {
     local custom_sink="$1"
     local physical_sink="$2"
@@ -374,7 +447,6 @@ set_default_sink_stable() {
     local wanted="$1"
     local current
     local physical_sink=""
-    local id
     local _
 
     wait_for_pulse || return 1
@@ -414,9 +486,67 @@ set_default_sink_stable() {
     return 0
 }
 
+mpris_playback_status() {
+    local service="$1"
+
+    busctl --user get-property \
+        "$service" \
+        /org/mpris/MediaPlayer2 \
+        org.mpris.MediaPlayer2.Player \
+        PlaybackStatus \
+        2>/dev/null |
+    awk -F'"' 'NF >= 2 {print $2; exit}'
+}
+
+mpv_is_playing() {
+    local reply
+
+    [[ -S /tmp/mpvsocket ]] || return 1
+    command -v socat >/dev/null 2>&1 || return 1
+
+    reply="$(
+        printf '%s\n' '{"command":["get_property","pause"]}' |
+            socat -T 1 - /tmp/mpvsocket 2>/dev/null |
+            head -n1
+    )"
+
+    grep -Eq '"data"[[:space:]]*:[[:space:]]*false' <<<"$reply"
+}
+
+capture_media_resume_state() {
+    local service
+    local status
+
+    [[ -e "$MEDIA_CAPTURED_FILE" ]] && return 0
+
+    : >"$MEDIA_RESUME_FILE"
+
+    if mpv_is_playing; then
+        printf '%s\n' '__MPV__' >>"$MEDIA_RESUME_FILE"
+    fi
+
+    if command -v busctl >/dev/null 2>&1; then
+        while read -r service; do
+            [[ -n "$service" ]] || continue
+            status="$(mpris_playback_status "$service" || true)"
+            if [[ "$status" == "Playing" ]]; then
+                printf '%s\n' "$service" >>"$MEDIA_RESUME_FILE"
+            fi
+        done < <(
+            busctl --user --no-pager --no-legend list 2>/dev/null |
+            awk '$1 ~ /^org\.mpris\.MediaPlayer2\./ {print $1}'
+        )
+    fi
+
+    touch "$MEDIA_CAPTURED_FILE"
+}
+
 pause_active_media() {
     local service
-    local paused_any=0
+
+    # Capture only once, before the first normalization. Later normalization
+    # passes keep media paused without changing what will be resumed.
+    capture_media_resume_state
 
     if [[ -S /tmp/mpvsocket ]] && command -v socat >/dev/null 2>&1; then
         printf 'set pause yes\n' |
@@ -434,7 +564,6 @@ pause_active_media() {
                 Pause \
                 >>"$ACTION_LOG" 2>&1; then
                 printf 'Paused MPRIS player: %s\n' "$service" >>"$ACTION_LOG"
-                paused_any=1
             else
                 printf 'Failed to pause MPRIS player: %s\n' "$service" >>"$ACTION_LOG"
             fi
@@ -443,6 +572,40 @@ pause_active_media() {
             awk '$1 ~ /^org\.mpris\.MediaPlayer2\./ {print $1}'
         )
     fi
+}
+
+resume_previously_playing_media() {
+    local entry
+
+    [[ -r "$MEDIA_RESUME_FILE" ]] || return 0
+
+    while IFS= read -r entry; do
+        [[ -n "$entry" ]] || continue
+
+        if [[ "$entry" == '__MPV__' ]]; then
+            if [[ -S /tmp/mpvsocket ]] && command -v socat >/dev/null 2>&1; then
+                printf 'set pause no\n' |
+                    socat - /tmp/mpvsocket >>"$ACTION_LOG" 2>&1 || true
+            fi
+            continue
+        fi
+
+        if command -v busctl >/dev/null 2>&1; then
+            if busctl --user call \
+                "$entry" \
+                /org/mpris/MediaPlayer2 \
+                org.mpris.MediaPlayer2.Player \
+                Play \
+                >>"$ACTION_LOG" 2>&1; then
+                printf 'Resumed MPRIS player: %s\n' "$entry" >>"$ACTION_LOG"
+            else
+                printf 'Warning: failed to resume MPRIS player: %s\n' \
+                    "$entry" >>"$ACTION_LOG"
+            fi
+        fi
+    done <"$MEDIA_RESUME_FILE"
+
+    rm -f "$MEDIA_RESUME_FILE" "$MEDIA_CAPTURED_FILE"
 }
 
 normalize_audio_volumes() {
@@ -462,15 +625,16 @@ normalize_audio_volumes() {
         pactl set-sink-volume "$restore_sink" "$restore_volume" >/dev/null 2>&1 || true
     fi
 }
-export -f pause_active_media normalize_audio_volumes
+export -f mpris_playback_status mpv_is_playing capture_media_resume_state pause_active_media resume_previously_playing_media normalize_audio_volumes
 
 ORIGINAL_SINK="$(pactl get-default-sink 2>/dev/null || true)"
 ORIGINAL_VOLUME=""
 if [[ -n "$ORIGINAL_SINK" ]] && pactl list short sinks 2>/dev/null | awk '{print $2}' | grep -Fqx "$ORIGINAL_SINK"; then
     ORIGINAL_VOLUME="$(pactl get-sink-volume "$ORIGINAL_SINK" 2>/dev/null | grep -Po '[0-9]+%' | head -n1)"
 fi
+
 normalize_audio_volumes "$ORIGINAL_VOLUME" "$ORIGINAL_SINK"
-export RESULT_FILE ACTION_STARTED_FILE ACTION_LOG CARD_SELECTION_FILE PROFILE_SELECTION_FILE ORIGINAL_VOLUME ORIGINAL_SINK
+export RESULT_FILE ACTION_STARTED_FILE ACTION_LOG CARD_SELECTION_FILE PROFILE_SELECTION_FILE MEDIA_RESUME_FILE MEDIA_CAPTURED_FILE ORIGINAL_VOLUME ORIGINAL_SINK
 
 mapfile -t CARDS < <(pactl list cards 2>/dev/null | awk '
 function output_card(){if(card!=""){if(description=="")description=card;print card "|" description}}
@@ -742,6 +906,26 @@ if [[ "$profile_choice" != 0 ]]; then
     (( PROFILE_OK )) || { echo "Warning: profile did not settle as '$SELECTED_PROFILE'." >>"$ACTION_LOG"; echo "Warning: profile switch did not settle. See: $ACTION_LOG"; }
 fi
 
+# The selected profile determines which physical sink nodes exist. Start from
+# hardware only after that graph has settled:
+# Headphones -> eligible extra ALSA hardware sink -> Speaker.
+PROFILE_PHYSICAL_SINK=""
+for _ in {1..50}; do
+    PROFILE_PHYSICAL_SINK="$(startup_physical_sink || true)"
+    [[ -n "$PROFILE_PHYSICAL_SINK" ]] && break
+    sleep 0.1
+done
+
+if [[ -n "$PROFILE_PHYSICAL_SINK" ]]; then
+    if switch_to_startup_physical_sink "$PROFILE_PHYSICAL_SINK"; then
+        ORIGINAL_SINK="$PROFILE_PHYSICAL_SINK"
+    else
+        echo "Warning: post-profile physical-sink switch failed. See: $ACTION_LOG"
+    fi
+else
+    echo 'Warning: no Headphones, extra physical output, or Speaker sink was found after profile selection.'         >>"$ACTION_LOG"
+fi
+
 CURRENT_SINK="$(pactl get-default-sink 2>/dev/null || true)"
 for _ in {1..50}; do [[ -n "$CURRENT_SINK" ]] && pactl list short sinks | awk '{print $2}' | grep -Fqx "$CURRENT_SINK" && break; sleep 0.1; CURRENT_SINK="$(pactl get-default-sink 2>/dev/null || true)"; done
 normalize_audio_volumes "$ORIGINAL_VOLUME" "$CURRENT_SINK"
@@ -793,6 +977,7 @@ fi
 
 FINAL_SINK="$(pactl get-default-sink 2>/dev/null || true)"
 normalize_audio_volumes "$ORIGINAL_VOLUME" "$FINAL_SINK"
+resume_previously_playing_media
 
 echo
 if (( RANDOM_PICK )); then echo "The sink is a secret!"; else
