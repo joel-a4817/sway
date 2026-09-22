@@ -319,14 +319,12 @@ def make_module(index, folder_name, hf):
               "audio.channels" = 2;
               "audio.position" = [ "FL" "FR" ];
               "audio.rate" = {SAMPLE_RATE};
-              "stream.dont-remix" = true;
             }};
 
             "playback.props" = {{
               "audio.channels" = 2;
               "audio.position" = [ "FL" "FR" ];
               "audio.rate" = {SAMPLE_RATE};
-              "stream.dont-remix" = true;
             }};
           }};
         }}
@@ -886,3 +884,4 @@ def verify_camilladsp_profiles(paths):
 
 if __name__ == "__main__":
     main()
+
