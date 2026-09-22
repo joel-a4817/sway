@@ -616,13 +616,11 @@ def verify_output(text):
         )
     if text.count('"node.autoconnect" = false;') != expected_modules:
         raise SystemExit(
-            'Output verification failed: expected node.autoconnect=false '
-            f'on all {expected_modules} playback streams'
+            'Output verification failed: node.autoconnect=false count mismatch'
         )
     if text.count('"node.dont-fallback" = true;') != expected_modules:
         raise SystemExit(
-            'Output verification failed: expected node.dont-fallback=true '
-            f'on all {expected_modules} playback streams'
+            'Output verification failed: node.dont-fallback=true count mismatch'
         )
     if 'stream.dont-remix' in text:
         raise SystemExit('Output verification failed: stream.dont-remix found')

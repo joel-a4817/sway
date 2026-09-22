@@ -94,41 +94,393 @@ set_card_profile_stable() {
     return 1
 }
 
+is_custom_sink() {
+    case "$1" in
+        earpods_*|cloud3_*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+selected_filter_output_node() {
+    local custom_sink="$1"
+
+    pw-dump 2>/dev/null |
+    jq -r --arg sink "$custom_sink" '
+        [
+            .[] |
+            select(.type == "PipeWire:Interface:Node") |
+            {
+                name: .info.props."node.name",
+                class: .info.props."media.class",
+                group: .info.props."node.link-group"
+            }
+        ] as $nodes |
+        ($nodes[] |
+            select(.name == $sink and .class == "Audio/Sink") |
+            .group
+        ) as $group |
+        $nodes[] |
+        select(
+            .class == "Stream/Output/Audio" and
+            .group == $group and
+            (.name | startswith("output.filter-chain-"))
+        ) |
+        .name
+    ' |
+    head -n1
+}
+
+filter_link_ids() {
+    pw-dump 2>/dev/null |
+    jq -r '
+        [
+            .[] |
+            select(.type == "PipeWire:Interface:Node") |
+            .info.props as $p |
+            select(
+                $p."media.class" == "Stream/Output/Audio" and
+                (($p."node.name" // "") | startswith("output.filter-chain-"))
+            ) |
+            .id
+        ] as $filter_ids |
+        .[] |
+        select(.type == "PipeWire:Interface:Link") |
+        select(.info."output-node-id" as $id | $filter_ids | index($id)) |
+        .id
+    '
+}
+
+disconnect_all_filter_outputs() {
+    local link_id
+    local _
+    local -a links=()
+
+    for _ in {1..20}; do
+        mapfile -t links < <(filter_link_ids)
+        ((${#links[@]} == 0)) && return 0
+
+        for link_id in "${links[@]}"; do
+            [[ -n "$link_id" ]] || continue
+            pw-link -d "$link_id" >>"$ACTION_LOG" 2>&1 || true
+        done
+        sleep 0.1
+    done
+
+    mapfile -t links < <(filter_link_ids)
+    if ((${#links[@]} != 0)); then
+        printf 'Warning: %s filter links remained after cleanup.\n' \
+            "${#links[@]}" >>"$ACTION_LOG"
+        return 1
+    fi
+    return 0
+}
+
+move_application_inputs_to() {
+    local wanted="$1"
+    local id
+    local block
+
+    while read -r id _; do
+        [[ -n "$id" ]] || continue
+        block="$(pactl list sink-inputs 2>/dev/null | awk -v wanted="$id" '
+            /^Sink Input #[0-9]+/ {
+                current=$3
+                sub(/^#/, "", current)
+                selected=(current==wanted)
+            }
+            selected { print }
+        ')"
+        grep -Eq 'node.name = "output\.filter-chain-|media.name = ".* output"' \
+            <<<"$block" && continue
+        pactl move-sink-input "$id" "$wanted" \
+            >>"$ACTION_LOG" 2>&1 || true
+    done < <(pactl list short sink-inputs 2>/dev/null || true)
+}
+
+selected_filter_link_count() {
+    local output_node="$1"
+    local physical_sink="$2"
+
+    pw-dump 2>/dev/null |
+    jq -r --arg out "$output_node" --arg input "$physical_sink" '
+        [
+            .[] |
+            select(.type == "PipeWire:Interface:Node") |
+            {id: .id, name: .info.props."node.name"}
+        ] as $nodes |
+        ($nodes[] | select(.name == $out) | .id) as $out_id |
+        ($nodes[] | select(.name == $input) | .id) as $in_id |
+        [
+            .[] |
+            select(.type == "PipeWire:Interface:Link") |
+            select(
+                .info."output-node-id" == $out_id and
+                .info."input-node-id" == $in_id
+            )
+        ] |
+        length
+    '
+}
+
+custom_sink_description() {
+    local wanted="$1"
+
+    pactl list sinks 2>/dev/null |
+    awk -v wanted="$wanted" '
+        /^[[:space:]]*Name:/ {
+            name = $0
+            sub(/^[[:space:]]*Name:[[:space:]]*/, "", name)
+            selected = (name == wanted)
+            next
+        }
+        selected && /^[[:space:]]*Description:/ {
+            value = $0
+            sub(/^[[:space:]]*Description:[[:space:]]*/, "", value)
+            print value
+            exit
+        }
+    '
+}
+
+sink_is_headphones() {
+    local sink="$1"
+    local description
+
+    description="$(custom_sink_description "$sink")"
+
+    [[ "$sink" == *Headphones* || "$description" == *Headphones* ]]
+}
+
+sink_is_excluded_physical_target() {
+    local sink="$1"
+    local description
+
+    description="$(custom_sink_description "$sink")"
+
+    # Custom DSP sinks are inputs to the selected processing graph, not its
+    # final physical destination.
+    is_custom_sink "$sink" && return 0
+
+    # Exclude the built-in speaker and display outputs from automatic custom
+    # routing. They remain directly selectable in the normal sink menu.
+    [[ "$sink" == *Speaker* || "$description" == *Speaker* ]] && return 0
+    [[ "$sink" == *HDMI* || "$sink" == *hdmi* ||
+       "$description" == *HDMI* || "$description" == *DisplayPort* ]] && return 0
+
+    # ALSA Loopback is a valid selectable PipeWire sink, but it is not a
+    # physical listening device and must never be auto-selected here.
+    [[ "$sink" == *snd_aloop* || "$sink" == *Loopback* ||
+       "$description" == *Loopback* ]] && return 0
+
+    return 1
+}
+
+preferred_physical_sink() {
+    local sink
+    local -a candidates=()
+
+    # Highest priority: any currently available dedicated Headphones sink.
+    # This is role-based and does not depend on a card, vendor, USB ID, or
+    # machine-specific PipeWire node name.
+    while read -r sink; do
+        [[ -n "$sink" ]] || continue
+        if sink_is_headphones "$sink"; then
+            printf '%s\n' "$sink"
+            return 0
+        fi
+    done < <(
+        pactl list short sinks 2>/dev/null |
+        awk '{print $2}'
+    )
+
+    # Otherwise select an additional real ALSA hardware sink. Exclude custom
+    # filters, Speaker, HDMI/DisplayPort, and ALSA Loopback. This generically
+    # catches an external DAC without hardcoding its make, model, card path,
+    # USB identifier, profile name, or sink name.
+    while read -r sink; do
+        [[ -n "$sink" ]] || continue
+
+        [[ "$sink" == alsa_output.* ]] || continue
+        sink_is_excluded_physical_target "$sink" && continue
+
+        candidates+=("$sink")
+    done < <(
+        pactl list short sinks 2>/dev/null |
+        awk '{print $2}'
+    )
+
+    if ((${#candidates[@]} == 1)); then
+        printf '%s\n' "${candidates[0]}"
+        return 0
+    fi
+
+    # If multiple non-excluded hardware sinks exist, prefer the current
+    # default only when it is one of those valid physical candidates.
+    sink="$(pactl get-default-sink 2>/dev/null || true)"
+    if [[ -n "$sink" ]]; then
+        local candidate
+        for candidate in "${candidates[@]}"; do
+            if [[ "$candidate" == "$sink" ]]; then
+                printf '%s\n' "$candidate"
+                return 0
+            fi
+        done
+    fi
+
+    # Deterministic fallback when several extra physical outputs remain.
+    if ((${#candidates[@]} > 0)); then
+        printf '%s\n' "${candidates[0]}"
+        return 0
+    fi
+
+    return 1
+}
+
+route_selected_custom_output() {
+    local custom_sink="$1"
+    local physical_sink="$2"
+    local output_node=""
+    local link_count
+    local total_filter_links
+    local _
+
+    for _ in {1..50}; do
+        output_node="$(selected_filter_output_node "$custom_sink" || true)"
+        [[ -n "$output_node" ]] && break
+        sleep 0.1
+    done
+
+    if [[ -z "$output_node" ]]; then
+        printf 'Warning: could not resolve filter output for %s.\n' \
+            "$custom_sink" >>"$ACTION_LOG"
+        return 1
+    fi
+
+    disconnect_all_filter_outputs || return 1
+
+    if ! pw-link "$output_node:output_FL" "$physical_sink:playback_FL" \
+        >>"$ACTION_LOG" 2>&1; then
+        printf 'Warning: failed FL link: %s -> %s\n' \
+            "$output_node" "$physical_sink" >>"$ACTION_LOG"
+        return 1
+    fi
+
+    if ! pw-link "$output_node:output_FR" "$physical_sink:playback_FR" \
+        >>"$ACTION_LOG" 2>&1; then
+        pw-link -d "$output_node:output_FL" "$physical_sink:playback_FL" \
+            >>"$ACTION_LOG" 2>&1 || true
+        printf 'Warning: failed FR link: %s -> %s\n' \
+            "$output_node" "$physical_sink" >>"$ACTION_LOG"
+        return 1
+    fi
+
+    for _ in {1..30}; do
+        link_count="$(selected_filter_link_count "$output_node" "$physical_sink" || true)"
+        total_filter_links="$(filter_link_ids | wc -l)"
+
+        if [[ "$link_count" == "2" && "$total_filter_links" -eq 2 ]]; then
+            printf 'Custom route settled: %s (%s) -> %s\n' \
+                "$custom_sink" "$output_node" "$physical_sink" \
+                >>"$ACTION_LOG"
+            return 0
+        fi
+        sleep 0.1
+    done
+
+    printf 'Warning: custom route did not settle: %s (%s) -> %s; selected_links=%s total_filter_links=%s\n' \
+        "$custom_sink" "$output_node" "$physical_sink" \
+        "${link_count:-unknown}" "${total_filter_links:-unknown}" \
+        >>"$ACTION_LOG"
+    return 1
+}
+
 set_default_sink_stable() {
-    local wanted="$1" current _
+    local wanted="$1"
+    local current
+    local physical_sink=""
+    local id
+    local _
 
     wait_for_pulse || return 1
     wait_for_sink "$wanted" || return 1
 
-    # Setting the default may trigger route/profile relinking. Retry through
-    # transient Pulse disconnects instead of treating the first one as final.
+    if is_custom_sink "$wanted"; then
+        physical_sink="$(preferred_physical_sink || true)"
+        if [[ -z "$physical_sink" ]]; then
+            echo "No eligible Headphones or extra physical sink is available." \
+                >>"$ACTION_LOG"
+            return 1
+        fi
+    fi
+
     for _ in {1..50}; do
         if pulse_ready && sink_exists "$wanted"; then
-            pactl set-default-sink "$wanted" >>"$ACTION_LOG" 2>&1 || true
-            current="$(pactl get-default-sink 2>/dev/null || true)"
-            [[ "$current" == "$wanted" ]] && break
+            if pactl set-default-sink "$wanted" \
+                >>"$ACTION_LOG" 2>&1; then
+                current="$(pactl get-default-sink 2>/dev/null || true)"
+                [[ "$current" == "$wanted" ]] && break
+            fi
         fi
         sleep 0.1
     done
 
     [[ "$(pactl get-default-sink 2>/dev/null || true)" == "$wanted" ]] || return 1
 
-    # Sink-input IDs are ephemeral during relinking. Re-enumerate them on each
-    # pass and ignore IDs that disappear between list and move.
-    for _ in {1..20}; do
-        pulse_ready || { sleep 0.1; continue; }
-        while read -r id _; do
-            [[ -n "$id" ]] || continue
-            pactl move-sink-input "$id" "$wanted" >>"$ACTION_LOG" 2>&1 || true
-        done < <(pactl list short sink-inputs 2>/dev/null || true)
-        sleep 0.1
-    done
+    if is_custom_sink "$wanted"; then
+        # Applications enter the selected BRIR/HpCF sink. Filter outputs are
+        # excluded so they are never fed back into the selected custom sink.
+        move_application_inputs_to "$wanted"
+
+        # Only the selected custom sink's own output is moved onward to the
+        # preferred physical destination.
+        route_selected_custom_output "$wanted" "$physical_sink" || return 1
+    else
+        # Direct physical playback bypasses every custom filter. Move only
+        # application streams, then remove all filter-output links.
+        move_application_inputs_to "$wanted"
+        disconnect_all_filter_outputs || return 1
+    fi
 
     return 0
 }
 
+pause_active_media() {
+    local service
+    local paused_any=0
+
+    if [[ -S /tmp/mpvsocket ]]; then
+        printf 'set pause yes\n' | socat - /tmp/mpvsocket >/dev/null 2>&1 || true
+    fi
+
+    if command -v busctl >/dev/null 2>&1; then
+        while read -r service; do
+            [[ -n "$service" ]] || continue
+
+            if busctl --user call \
+                "$service" \
+                /org/mpris/MediaPlayer2 \
+                org.mpris.MediaPlayer2.Player \
+                Pause \
+                >>"$ACTION_LOG" 2>&1; then
+                printf 'Paused MPRIS player: %s\n' "$service" >>"$ACTION_LOG"
+                paused_any=1
+            else
+                printf 'Failed to pause MPRIS player: %s\n' "$service" >>"$ACTION_LOG"
+            fi
+        done < <(
+            busctl --user --no-pager --no-legend list 2>/dev/null |
+            awk '$1 ~ /^org\.mpris\.MediaPlayer2\./ {print $1}'
+        )
+    fi
+
+    if command -v playerctl >/dev/null 2>&1; then
+        playerctl --all-players pause >>"$ACTION_LOG" 2>&1 || true
+    fi
+}
+
 normalize_audio_volumes() {
     local restore_volume="${1:-}" restore_sink="${2:-}" sof_card hyperx_card sink
+    pause_active_media
     sof_card="$(aplay -l 2>/dev/null | awk -F': ' '/sof|SOF/ {print $1; exit}' | grep -o '[0-9]\+' || true)"
     [[ -n "$sof_card" ]] && amixer -c "$sof_card" sset Headphone 100% >/dev/null 2>&1 || true
     hyperx_card="$(aplay -l 2>/dev/null | awk -F': ' '/HyperX Cloud III/ {print $1; exit}' | grep -o '[0-9]\+' || true)"
@@ -143,7 +495,7 @@ normalize_audio_volumes() {
         pactl set-sink-volume "$restore_sink" "$restore_volume" >/dev/null 2>&1 || true
     fi
 }
-export -f normalize_audio_volumes
+export -f pause_active_media normalize_audio_volumes
 
 ORIGINAL_SINK="$(pactl get-default-sink 2>/dev/null || true)"
 ORIGINAL_VOLUME=""
@@ -194,13 +546,23 @@ profile_display_label() {
 }
 sink_display_label() {
     local sink="$1" label="$1"
+
     case "$sink" in
-        *HDMI1*) label="HDMI 1" ;; *HDMI2*) label="HDMI 2" ;; *HDMI3*) label="HDMI 3" ;;
-        *pro-output-[0-9]*) label="${sink##*.}" ;; *HyperX_Cloud_III*) label="Cloud III USB" ;;
-        *Headphones*) label="Headphones" ;; *Speaker*) label="Speaker" ;; *analog*) label="analog-stereo" ;; *hdmi*) label="HDMI" ;;
+        *usb-HP__Inc_HyperX_Cloud_III*.analog-stereo) label="Cloud III Analog" ;;
+        *usb-HP__Inc_HyperX_Cloud_III*.iec958-stereo) label="Cloud III Digital" ;;
+        *platform-snd_aloop.0.analog-stereo) label="ALSA Loopback" ;;
+        *HiFi__Headphones__sink*) label="Headphones" ;;
+        *HiFi__Speaker__sink*) label="Speaker" ;;
+        *HiFi__HDMI1__sink*) label="HDMI 1" ;;
+        *HiFi__HDMI2__sink*) label="HDMI 2" ;;
+        *HiFi__HDMI3__sink*) label="HDMI 3" ;;
+        *pro-output-[0-9]*) label="${sink##*.}" ;;
+        *hdmi*) label="HDMI" ;;
     esac
+
     printf '%s\n' "$label"
 }
+
 close_mpv_windows() {
     local _
 
