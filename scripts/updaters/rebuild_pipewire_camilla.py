@@ -322,6 +322,8 @@ def make_module(index, folder_name, hf):
             }};
 
             "playback.props" = {{
+              "node.autoconnect" = false;
+              "node.dont-fallback" = true;
               "audio.channels" = 2;
               "audio.position" = [ "FL" "FR" ];
               "audio.rate" = {SAMPLE_RATE};
@@ -612,6 +614,20 @@ def verify_output(text):
             f'Output verification failed: expected {expected_modules} sink modules, '
             f'found {len(ranges)}'
         )
+    if text.count('"node.autoconnect" = false;') != expected_modules:
+        raise SystemExit(
+            'Output verification failed: expected node.autoconnect=false '
+            f'on all {expected_modules} playback streams'
+        )
+    if text.count('"node.dont-fallback" = true;') != expected_modules:
+        raise SystemExit(
+            'Output verification failed: expected node.dont-fallback=true '
+            f'on all {expected_modules} playback streams'
+        )
+    if 'stream.dont-remix' in text:
+        raise SystemExit('Output verification failed: stream.dont-remix found')
+    if '"node.passive" = true;' in text:
+        raise SystemExit('Output verification failed: node.passive found')
     if text.count('Apple_EarPods_Ahastyle_Covers_Custom_Average_A+B.wav') != earpods_count * 2:
         raise SystemExit('Output verification failed: incorrect EarPods HpCF reference count')
     if text.count('HyperX_Cloud_III_Average.wav') != cloud3_count * 2:
