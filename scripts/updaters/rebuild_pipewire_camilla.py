@@ -735,8 +735,11 @@ def write_camilladsp_profiles(report):
 
         expected_paths.add(output_path)
 
-    # CMF Buds Pro 2 profiles for every available BRIR.
+    # CMF Buds Pro 2 profiles for every BRIR except the OE profile.
     for index, folder_name in enumerate(PROFILES):
+        if folder_name == "(0000ms) Anechoic (OE)":
+            continue
+
         brir = (
             BRIR_ROOT
             / folder_name
@@ -825,7 +828,10 @@ def verify_camilladsp_profiles(paths):
         len(PROFILES) - expected_cloud3
     )
 
-    expected_cmf = len(PROFILES)
+    expected_cmf = sum(
+        folder != "(0000ms) Anechoic (OE)"
+        for folder in PROFILES
+    )
 
     expected_total = (
         expected_cloud3
