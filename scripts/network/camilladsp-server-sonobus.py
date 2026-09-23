@@ -212,6 +212,21 @@ h1 {
   text-transform: uppercase;
 }
 
+.profile-group-title {
+  margin: 24px 3px 11px;
+
+  color: #c5c1ce;
+
+  font-size: 14px;
+  font-weight: 760;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.profile-group-title:first-child {
+  margin-top: 0;
+}
+
 .device-actions {
   display: grid;
   gap: 11px;
@@ -481,19 +496,45 @@ function friendlyName(filename) {
     .replace(/^\d+-/, "")
     .replace(/^earpods-/, "")
     .replace(/^cloud3-/, "")
+    .replace(/^cmf-buds-pro-2-/, "")
     .replace(/-/g, " ")
-    .replace(/\b\w/g, value => value.toUpperCase());
+    .replace(
+      /\b\w/g,
+      value => value.toUpperCase()
+    );
 }
-
 
 function deviceName(filename) {
   if (filename.includes("-cloud3-")) {
     return "HyperX Cloud III";
   }
 
+  if (
+    filename.includes(
+      "-cmf-buds-pro-2-"
+    )
+  ) {
+    return "CMF Buds Pro 2";
+  }
+
   return "Apple EarPods";
 }
 
+function profileDeviceKey(filename) {
+  if (filename.includes("-cloud3-")) {
+    return "cloud3";
+  }
+
+  if (
+    filename.includes(
+      "-cmf-buds-pro-2-"
+    )
+  ) {
+    return "cmf-buds-pro-2";
+  }
+
+  return "earpods";
+}
 
 function setButtonsBusy(value) {
   for (
@@ -689,47 +730,86 @@ async function loadProfiles() {
       activeState.textContent = "";
     }
 
-    for (const filename of result.profiles) {
-      const button =
-        document.createElement("button");
+const profileGroups = [
+  {
+    key: "earpods",
+    title: "Apple EarPods"
+  },
+  {
+    key: "cloud3",
+    title: "HyperX Cloud III"
+  },
+  {
+    key: "cmf-buds-pro-2",
+    title: "CMF Buds Pro 2"
+  }
+];
 
-      button.className =
-        "profile-button";
+for (const group of profileGroups) {
+  const filenames =
+    result.profiles.filter(
+      filename =>
+        profileDeviceKey(filename)
+        === group.key
+    );
 
-      if (
-        result.running &&
-        filename === result.active
-      ) {
-        button.classList.add("active");
-      }
+  if (filenames.length === 0) {
+    continue;
+  }
 
-      const name =
-        document.createElement("span");
+  const heading =
+    document.createElement("div");
 
-      name.className =
-        "profile-name";
+  heading.className =
+    "profile-group-title";
 
-      name.textContent =
-        friendlyName(filename);
+  heading.textContent =
+    group.title;
 
-      const device =
-        document.createElement("span");
+  profileList.appendChild(heading);
 
-      device.className =
-        "profile-device";
+  for (const filename of filenames) {
+    const button =
+      document.createElement("button");
 
-      device.textContent =
-        deviceName(filename);
+    button.className =
+      "profile-button";
 
-      button.append(name, device);
-
-      button.addEventListener(
-        "click",
-        () => switchProfile(filename)
-      );
-
-      profileList.appendChild(button);
+    if (
+      result.running &&
+      filename === result.active
+    ) {
+      button.classList.add("active");
     }
+
+    const name =
+      document.createElement("span");
+
+    name.className =
+      "profile-name";
+
+    name.textContent =
+      friendlyName(filename);
+
+    const device =
+      document.createElement("span");
+
+    device.className =
+      "profile-device";
+
+    device.textContent =
+      deviceName(filename);
+
+    button.append(name, device);
+
+    button.addEventListener(
+      "click",
+      () => switchProfile(filename)
+    );
+
+    profileList.appendChild(button);
+  }
+}
 
   } catch (error) {
     setStatus(

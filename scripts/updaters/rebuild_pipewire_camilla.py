@@ -14,6 +14,10 @@ PIPEWIRE_NIX = Path('/home/joel/nixos/rt4817/pipewire.nix')
 BRIR_ROOT = Path('/home/joel/Documents/prefs/audio/BRIRs')
 EARPODS_HPCF = Path('/home/joel/Documents/prefs/audio/Apple_EarPods_Ahastyle_Covers_Custom_Average_A+B.wav')
 CLOUD3_HPCF = Path('/home/joel/Documents/prefs/audio/HyperX_Cloud_III_Average.wav')
+CMF_BUDS_PRO_2_HPCF = Path(
+    "/home/joel/Documents/prefs/audio/"
+    "CMF_by_Nothing_Buds_Pro_2_Sample_A.wav"
+)
 CAMILLA_ROOT = Path(
     "/home/joel/Documents/prefs/audio/camilladsp"
 )
@@ -325,6 +329,7 @@ def make_module(index, folder_name, hf):
               "node.autoconnect" = false;
               "node.dont-fallback" = true;
               "stream.dont-remix" = true;
+              "state.restore-target" = false;
               "audio.channels" = 2;
               "audio.position" = [ "FL" "FR" ];
               "audio.rate" = {SAMPLE_RATE};
@@ -343,23 +348,16 @@ def yaml_string(value):
     value = value.replace('"', '\\"')
     return f'"{value}"'
 
-
 def make_camilladsp_profile(
     index,
     folder_name,
     gain,
     brir,
     hpcf,
+    device,
+    title_device,
 ):
-    cloud3 = folder_name == "(0000ms) Anechoic (OE)"
-    device = "cloud3" if cloud3 else "earpods"
     slug = slugify(folder_name)
-
-    title_device = (
-        "Cloud III"
-        if cloud3
-        else "EarPods"
-    )
 
     filename = (
         f"{index:02d}-{device}-{slug}.yml"
@@ -545,7 +543,6 @@ pipeline:
 
     return output_path, config
 
-
 def matching_brace(text, open_index):
     depth = 0
     in_string = False
@@ -627,6 +624,10 @@ def verify_output(text):
         raise SystemExit(
             'Output verification failed: stream.dont-remix=true count mismatch'
         )
+    if text.count('"state.restore-target" = false;') != expected_modules:
+        raise SystemExit(
+            'Output verification failed: state.restore-target=false count mismatch'
+        )
     if '"node.passive" = true;' in text:
         raise SystemExit('Output verification failed: node.passive found')
     if text.count('Apple_EarPods_Ahastyle_Covers_Custom_Average_A+B.wav') != earpods_count * 2:
@@ -679,8 +680,16 @@ def write_camilladsp_profiles(report):
         exist_ok=True,
     )
 
+    if not CMF_BUDS_PRO_2_HPCF.is_file():
+        raise SystemExit(
+            f"Missing CMF Buds Pro 2 HpCF: "
+            f"{CMF_BUDS_PRO_2_HPCF}"
+        )
+
+    hf = load_required_ash_helpers()
     expected_paths = set()
 
+    # Existing EarPods and Cloud III CamillaDSP profiles.
     for (
         index,
         (
@@ -695,23 +704,84 @@ def write_camilladsp_profiles(report):
         ),
     ) in enumerate(report):
         folder_name = PROFILES[index]
+        cloud3 = folder_name == "(0000ms) Anechoic (OE)"
 
-        output_path, config = (
-            make_camilladsp_profile(
-                index=index,
-                folder_name=folder_name,
-                gain=gain,
-                brir=brir,
-                hpcf=hpcf,
-            )
+        device = (
+            "cloud3"
+            if cloud3
+            else "earpods"
         )
 
-        output_path.write_text(config)
+        title_device = (
+            "HyperX Cloud III"
+            if cloud3
+            else "Apple EarPods"
+        )
+
+        output_path, config = make_camilladsp_profile(
+            index=index,
+            folder_name=folder_name,
+            gain=gain,
+            brir=brir,
+            hpcf=hpcf,
+            device=device,
+            title_device=title_device,
+        )
+
+        output_path.write_text(
+            config,
+            encoding="utf-8",
+        )
+
         expected_paths.add(output_path)
 
-    # Remove only stale files created by this generator.
+    # CMF Buds Pro 2 profiles for every available BRIR.
+    for index, folder_name in enumerate(PROFILES):
+        brir = (
+            BRIR_ROOT
+            / folder_name
+            / "BRIR_True_Stereo.wav"
+        )
+
+        if not brir.is_file():
+            raise SystemExit(
+                f"Missing BRIR: {brir}"
+            )
+
+        (
+            left,
+            right,
+            peak,
+            preamp,
+            gain,
+        ) = calculate_gain(
+            brir,
+            CMF_BUDS_PRO_2_HPCF,
+            hf,
+        )
+
+        output_path, config = make_camilladsp_profile(
+            index=index,
+            folder_name=folder_name,
+            gain=gain,
+            brir=brir,
+            hpcf=CMF_BUDS_PRO_2_HPCF,
+            device="cmf-buds-pro-2",
+            title_device="CMF Buds Pro 2",
+        )
+
+        output_path.write_text(
+            config,
+            encoding="utf-8",
+        )
+
+        expected_paths.add(output_path)
+
+    # Remove only stale profiles managed by this generator.
     managed_pattern = re.compile(
-        r"^[0-9]{2}-(earpods|cloud3)-.*\\.yml$"
+        r"^[0-9]{2}-"
+        r"(earpods|cloud3|cmf-buds-pro-2)-"
+        r".*\.yml$"
     )
 
     for existing in CAMILLA_ROOT.glob("*.yml"):
@@ -727,15 +797,7 @@ def write_camilladsp_profiles(report):
 
     return sorted(expected_paths)
 
-
 def verify_camilladsp_profiles(paths):
-    if len(paths) != len(PROFILES):
-        raise SystemExit(
-            "CamillaDSP verification failed: "
-            f"expected {len(PROFILES)} profiles, "
-            f"got {len(paths)}"
-        )
-
     cloud3_profiles = [
         profile_path
         for profile_path in paths
@@ -748,19 +810,55 @@ def verify_camilladsp_profiles(paths):
         if "-earpods-" in profile_path.name
     ]
 
-    if len(cloud3_profiles) != 1:
+    cmf_profiles = [
+        profile_path
+        for profile_path in paths
+        if "-cmf-buds-pro-2-" in profile_path.name
+    ]
+
+    expected_cloud3 = sum(
+        folder == "(0000ms) Anechoic (OE)"
+        for folder in PROFILES
+    )
+
+    expected_earpods = (
+        len(PROFILES) - expected_cloud3
+    )
+
+    expected_cmf = len(PROFILES)
+
+    expected_total = (
+        expected_cloud3
+        + expected_earpods
+        + expected_cmf
+    )
+
+    if len(paths) != expected_total:
         raise SystemExit(
             "CamillaDSP verification failed: "
-            "expected exactly one Cloud III profile, "
+            f"expected {expected_total} profiles, "
+            f"got {len(paths)}"
+        )
+
+    if len(cloud3_profiles) != expected_cloud3:
+        raise SystemExit(
+            "CamillaDSP verification failed: "
+            f"expected {expected_cloud3} Cloud III profile, "
             f"got {len(cloud3_profiles)}"
         )
 
-    expected_earpods = len(PROFILES) - len(cloud3_profiles)
     if len(earpods_profiles) != expected_earpods:
         raise SystemExit(
             "CamillaDSP verification failed: "
-            f"expected exactly {expected_earpods} EarPods profiles, "
+            f"expected {expected_earpods} EarPods profiles, "
             f"got {len(earpods_profiles)}"
+        )
+
+    if len(cmf_profiles) != expected_cmf:
+        raise SystemExit(
+            "CamillaDSP verification failed: "
+            f"expected {expected_cmf} CMF Buds Pro 2 profiles, "
+            f"got {len(cmf_profiles)}"
         )
 
     capture_block = """  capture:
@@ -834,11 +932,14 @@ def verify_camilladsp_profiles(paths):
                 "filename entries"
             )
 
-        expected_hpcf = (
-            CLOUD3_HPCF
-            if "-cloud3-" in profile_path.name
-            else EARPODS_HPCF
-        )
+        if "-cloud3-" in profile_path.name:
+            expected_hpcf = CLOUD3_HPCF
+
+        elif "-cmf-buds-pro-2-" in profile_path.name:
+            expected_hpcf = CMF_BUDS_PRO_2_HPCF
+
+        else:
+            expected_hpcf = EARPODS_HPCF
 
         if profile_text.count(str(expected_hpcf)) != 2:
             raise SystemExit(
@@ -870,7 +971,9 @@ def verify_camilladsp_profiles(paths):
                 f"{profile_path}: missing pipeline section"
             )
 
-        pipeline_text = profile_text[pipeline_start:]
+        pipeline_text = profile_text[
+            pipeline_start:
+        ]
 
         positions = []
 
@@ -896,7 +999,6 @@ def verify_camilladsp_profiles(paths):
                 f"{profile_path}: expected eight linear "
                 "mixer source mappings"
             )
-
 
 
 if __name__ == "__main__":
