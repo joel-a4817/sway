@@ -2,8 +2,6 @@
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote
-import html
 import json
 import os
 import re
@@ -46,28 +44,16 @@ LISTEN_PORT = 8766
 
 SWITCH_LOCK = threading.Lock()
 
-SERVER_SCRIPT = Path(__file__).resolve()
 SERVER_PID_FILE = STATE_DIRECTORY / "web-server.pid"
 
 
 def kill_previous_web_servers():
-    # Stop any existing CamillaDSP instance.
-    subprocess.run(
-        [
-            "pkill",
-            "-x",
-            "camilladsp",
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-
-    # Kill whichever process currently owns port 8766.
+    # Ask the current listener to shut down cleanly.
     subprocess.run(
         [
             "fuser",
             "-k",
+            "-TERM",
             f"{LISTEN_PORT}/tcp",
         ],
         stdout=subprocess.DEVNULL,
@@ -75,8 +61,63 @@ def kill_previous_web_servers():
         check=False,
     )
 
-    # Allow the previous listener to release the port.
-    time.sleep(0.5)
+    # Wait until both the TCP listener and its lifecycle
+    # PID file are gone. The PID file is removed only after
+    # CamillaDSP/SonoBus cleanup and audio restoration finish.
+    for _ in range(100):
+        listener = subprocess.run(
+            [
+                "fuser",
+                f"{LISTEN_PORT}/tcp",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+
+        try:
+            previous_pid = int(
+                SERVER_PID_FILE.read_text(
+                    encoding="utf-8"
+                ).strip()
+            )
+        except (
+            FileNotFoundError,
+            ValueError,
+            OSError,
+        ):
+            previous_pid = None
+
+        previous_running = False
+
+        if previous_pid is not None:
+            try:
+                os.kill(
+                    previous_pid,
+                    0,
+                )
+                previous_running = True
+            except (
+                ProcessLookupError,
+                PermissionError,
+            ):
+                previous_running = False
+
+        if (
+            listener.returncode != 0
+            and not previous_running
+        ):
+            SERVER_PID_FILE.unlink(
+                missing_ok=True
+            )
+            return
+
+        time.sleep(0.1)
+
+    raise RuntimeError(
+        "Previous web server did not finish "
+        "its shutdown and cleanup"
+    )
 
 
 PAGE = r"""<!doctype html>
@@ -270,6 +311,52 @@ h1 {
   transform: none;
 }
 
+.profile-search {
+  width: 100%;
+  min-height: 52px;
+  margin-bottom: 17px;
+  padding: 0 17px;
+
+  border: 1px solid rgba(255, 255, 255, .12);
+  border-radius: 17px;
+  outline: none;
+
+  color: white;
+  background: rgba(255, 255, 255, .10);
+
+  box-shadow:
+    inset 0 1px rgba(255, 255, 255, .12),
+    0 8px 24px rgba(0, 0, 0, .18);
+
+  font: inherit;
+  font-size: 16px;
+
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.profile-search::placeholder {
+  color: #9f9baa;
+}
+
+.profile-search:focus {
+  border-color: rgba(162, 100, 255, .85);
+  background: rgba(255, 255, 255, .14);
+
+  box-shadow:
+    0 0 0 3px rgba(114, 76, 255, .22),
+    inset 0 1px rgba(255, 255, 255, .15);
+}
+
+.profile-empty {
+  padding: 22px 12px;
+
+  color: #aaa7b4;
+
+  text-align: center;
+  font-size: 14px;
+}
+
 .profile-list {
   display: grid;
   gap: 11px;
@@ -399,6 +486,17 @@ h1 {
     Profiles
   </div>
 
+  <input
+    id="profile-search"
+    class="profile-search"
+    type="search"
+    placeholder="Search profiles…"
+    autocomplete="off"
+    autocapitalize="none"
+    spellcheck="false"
+    aria-label="Search CamillaDSP profiles"
+  >
+
   <div
     id="profile-list"
     class="profile-list"
@@ -410,6 +508,13 @@ h1 {
 <script>
 const profileList =
   document.querySelector("#profile-list");
+
+const profileSearch =
+  document.querySelector("#profile-search");
+
+let cachedProfiles = [];
+let cachedActiveProfile = "";
+let cachedRunning = false;
 
 const activeProfile =
   document.querySelector("#active-profile");
@@ -504,36 +609,41 @@ function friendlyName(filename) {
     );
 }
 
-function deviceName(filename) {
-  if (filename.includes("-cloud3-")) {
-    return "HyperX Cloud III";
-  }
+function profileDeviceKey(filename) {
+  const normalized =
+    filename.toLowerCase();
 
   if (
-    filename.includes(
-      "-cmf-buds-pro-2-"
-    )
+    /(^|-)cloud3-/.test(normalized)
   ) {
-    return "CMF Buds Pro 2";
-  }
-
-  return "Apple EarPods";
-}
-
-function profileDeviceKey(filename) {
-  if (filename.includes("-cloud3-")) {
     return "cloud3";
   }
 
   if (
-    filename.includes(
-      "-cmf-buds-pro-2-"
+    /(^|-)cmf-buds-pro-2-/.test(
+      normalized
     )
   ) {
     return "cmf-buds-pro-2";
   }
 
   return "earpods";
+}
+
+
+function deviceName(filename) {
+  const key =
+    profileDeviceKey(filename);
+
+  if (key === "cloud3") {
+    return "HyperX Cloud III";
+  }
+
+  if (key === "cmf-buds-pro-2") {
+    return "CMF Buds Pro 2";
+  }
+
+  return "Apple EarPods";
 }
 
 function setButtonsBusy(value) {
@@ -701,24 +811,173 @@ async function restartAirPlay() {
   }
 }
 
+function searchText(filename) {
+  return [
+    filename,
+    friendlyName(filename),
+    deviceName(filename)
+  ]
+    .join(" ")
+    .toLowerCase();
+}
+
+
+function renderProfiles() {
+  profileList.replaceChildren();
+
+  const query =
+    profileSearch.value
+      .trim()
+      .toLowerCase();
+
+  const filteredProfiles =
+    cachedProfiles.filter(
+      filename =>
+        searchText(filename).includes(query)
+    );
+
+  if (filteredProfiles.length === 0) {
+    const empty =
+      document.createElement("div");
+
+    empty.className =
+      "profile-empty";
+
+    empty.textContent =
+      query
+        ? "No matching profiles"
+        : "No CamillaDSP profiles found";
+
+    profileList.appendChild(empty);
+    return;
+  }
+
+  const profileGroups = [
+    {
+      key: "earpods",
+      title: "Apple EarPods"
+    },
+    {
+      key: "cloud3",
+      title: "HyperX Cloud III"
+    },
+    {
+      key: "cmf-buds-pro-2",
+      title: "CMF Buds Pro 2"
+    }
+  ];
+
+  for (const group of profileGroups) {
+    const filenames =
+      filteredProfiles.filter(
+        filename =>
+          profileDeviceKey(filename)
+          === group.key
+      );
+
+    if (filenames.length === 0) {
+      continue;
+    }
+
+    const heading =
+      document.createElement("div");
+
+    heading.className =
+      "profile-group-title";
+
+    heading.textContent =
+      group.title;
+
+    profileList.appendChild(heading);
+
+    for (const filename of filenames) {
+      const button =
+        document.createElement("button");
+
+      button.type = "button";
+      button.className =
+        "profile-button";
+
+      button.dataset.profile =
+        filename;
+
+      if (
+        cachedRunning &&
+        filename === cachedActiveProfile
+      ) {
+        button.classList.add("active");
+      }
+
+      if (switching) {
+        button.classList.add("busy");
+      }
+
+      const name =
+        document.createElement("span");
+
+      name.className =
+        "profile-name";
+
+      name.textContent =
+        friendlyName(filename);
+
+      const device =
+        document.createElement("span");
+
+      device.className =
+        "profile-device";
+
+      device.textContent =
+        deviceName(filename);
+
+      button.append(name, device);
+
+      button.addEventListener(
+        "click",
+        () => switchProfile(filename)
+      );
+
+      profileList.appendChild(button);
+    }
+  }
+}
+
+
 async function loadProfiles() {
   try {
     const result =
       await requestJSON("/api/profiles");
 
-    profileList.innerHTML = "";
+    cachedProfiles =
+      Array.isArray(result.profiles)
+        ? result.profiles
+        : [];
 
-    if (result.running && result.active) {
+    cachedActiveProfile =
+      result.active || "";
+
+    cachedRunning =
+      Boolean(result.running);
+
+    if (
+      cachedRunning &&
+      cachedActiveProfile
+    ) {
       activeProfile.textContent =
-        friendlyName(result.active);
+        friendlyName(
+          cachedActiveProfile
+        );
 
       activeState.textContent =
-        deviceName(result.active) +
-        " • Running";
+        deviceName(
+          cachedActiveProfile
+        ) + " • Running";
 
-    } else if (result.active) {
+    } else if (cachedActiveProfile) {
       activeProfile.textContent =
-        friendlyName(result.active);
+        friendlyName(
+          cachedActiveProfile
+        );
 
       activeState.textContent =
         "Process is not running";
@@ -730,86 +989,7 @@ async function loadProfiles() {
       activeState.textContent = "";
     }
 
-const profileGroups = [
-  {
-    key: "earpods",
-    title: "Apple EarPods"
-  },
-  {
-    key: "cloud3",
-    title: "HyperX Cloud III"
-  },
-  {
-    key: "cmf-buds-pro-2",
-    title: "CMF Buds Pro 2"
-  }
-];
-
-for (const group of profileGroups) {
-  const filenames =
-    result.profiles.filter(
-      filename =>
-        profileDeviceKey(filename)
-        === group.key
-    );
-
-  if (filenames.length === 0) {
-    continue;
-  }
-
-  const heading =
-    document.createElement("div");
-
-  heading.className =
-    "profile-group-title";
-
-  heading.textContent =
-    group.title;
-
-  profileList.appendChild(heading);
-
-  for (const filename of filenames) {
-    const button =
-      document.createElement("button");
-
-    button.className =
-      "profile-button";
-
-    if (
-      result.running &&
-      filename === result.active
-    ) {
-      button.classList.add("active");
-    }
-
-    const name =
-      document.createElement("span");
-
-    name.className =
-      "profile-name";
-
-    name.textContent =
-      friendlyName(filename);
-
-    const device =
-      document.createElement("span");
-
-    device.className =
-      "profile-device";
-
-    device.textContent =
-      deviceName(filename);
-
-    button.append(name, device);
-
-    button.addEventListener(
-      "click",
-      () => switchProfile(filename)
-    );
-
-    profileList.appendChild(button);
-  }
-}
+    renderProfiles();
 
   } catch (error) {
     setStatus(
@@ -832,6 +1012,11 @@ restartSonoBusButton.addEventListener(
 restartAirPlayButton.addEventListener(
   "click",
   restartAirPlay
+);
+
+profileSearch.addEventListener(
+  "input",
+  renderProfiles
 );
 
 loadProfiles();
@@ -921,12 +1106,21 @@ def process_exists(pid):
         return False
 
     try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
+        command_name = Path(
+            f"/proc/{pid}/comm"
+        ).read_text(
+            encoding="utf-8"
+        ).strip()
+
+        return command_name == "camilladsp"
+
+    except (
+        FileNotFoundError,
+        ProcessLookupError,
+        PermissionError,
+        OSError,
+    ):
         return False
-    except PermissionError:
-        return True
 
 
 def read_active_profile():
@@ -1221,20 +1415,23 @@ def restart_sonobus():
 def restart_camilladsp():
     with SWITCH_LOCK:
         active_profile = read_active_profile()
+
         if not active_profile:
             raise RuntimeError(
                 "No active CamillaDSP profile to restart"
             )
-        profile = resolve_profile(active_profile)
+
+        profile = resolve_profile(
+            active_profile
+        )
+
         stop_existing_camilladsp()
         set_alsa_loopback_to_100()
-        try:
-            pid = launch_camilladsp(profile)
-        except Exception:
-            ACTIVE_PROFILE_FILE.unlink(
-                missing_ok=True
-            )
-            raise
+
+        pid = launch_camilladsp(
+            profile
+        )
+
         return {
             "profile": profile.name,
             "pid": pid,
@@ -1267,20 +1464,17 @@ def restart_airplay():
 
 def switch_profile(filename):
     with SWITCH_LOCK:
-        profile = resolve_profile(filename)
+        profile = resolve_profile(
+            filename
+        )
 
         stop_system_audio()
         stop_existing_camilladsp()
         set_alsa_loopback_to_100()
 
-        try:
-            pid = launch_camilladsp(profile)
-
-        except Exception:
-            ACTIVE_PROFILE_FILE.unlink(
-                missing_ok=True
-            )
-            raise
+        pid = launch_camilladsp(
+            profile
+        )
 
         return {
             "profile": profile.name,
@@ -1291,31 +1485,35 @@ def switch_profile(filename):
 def launch_camilladsp(profile):
     ensure_state_directory()
 
+    if not Path(CAMILLA_BINARY).is_file():
+        raise RuntimeError(
+            f"CamillaDSP binary not found: "
+            f"{CAMILLA_BINARY}"
+        )
+
     log_handle = LOG_FILE.open(
         "ab",
         buffering=0,
     )
 
-    process = subprocess.Popen(
-        [
-            CAMILLA_BINARY,
-            str(profile),
-        ],
-        stdin=subprocess.DEVNULL,
-        stdout=log_handle,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-        close_fds=True,
-    )
-
-    log_handle.close()
+    try:
+        process = subprocess.Popen(
+            [
+                CAMILLA_BINARY,
+                str(profile),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+        )
+    finally:
+        log_handle.close()
 
     PID_FILE.write_text(
-        f"{process.pid}\n"
-    )
-
-    ACTIVE_PROFILE_FILE.write_text(
-        f"{profile.name}\n"
+        f"{process.pid}\n",
+        encoding="utf-8",
     )
 
     time.sleep(1)
@@ -1339,7 +1537,157 @@ def launch_camilladsp(profile):
             + log_tail
         )
 
+    ACTIVE_PROFILE_FILE.write_text(
+        f"{profile.name}\n",
+        encoding="utf-8",
+    )
+
     return process.pid
+
+
+def start_system_audio():
+    run_command(
+        [
+            "systemctl",
+            "--user",
+            "start",
+            "pipewire.socket",
+            "pipewire.service",
+            "wireplumber.service",
+            "pipewire-pulse.socket",
+            "pipewire-pulse.service",
+        ],
+        check=False,
+    )
+
+
+def start_runtime():
+    stop_system_audio()
+
+    try:
+        sonobus_result = restart_sonobus()
+
+        print(
+            "SonoBus started with PID "
+            f"{sonobus_result['pid']}",
+            flush=True,
+        )
+
+        active_profile = read_active_profile()
+
+        if not active_profile:
+            print(
+                "No saved CamillaDSP profile. "
+                "CamillaDSP was not started.",
+                flush=True,
+            )
+            return
+
+        profile = resolve_profile(
+            active_profile
+        )
+
+        stop_existing_camilladsp()
+        set_alsa_loopback_to_100()
+
+        camilladsp_pid = launch_camilladsp(
+            profile
+        )
+
+        print(
+            "CamillaDSP started with PID "
+            f"{camilladsp_pid} using "
+            f"{profile.name}",
+            flush=True,
+        )
+
+    except Exception:
+        print(
+            "Runtime startup failed. "
+            "Restoring normal audio services.",
+            flush=True,
+        )
+
+        try:
+            stop_existing_camilladsp()
+        except Exception as error:
+            print(
+                "CamillaDSP startup cleanup failed: "
+                f"{error}",
+                flush=True,
+            )
+
+        try:
+            stop_sonobus()
+        except Exception as error:
+            print(
+                "SonoBus startup cleanup failed: "
+                f"{error}",
+                flush=True,
+            )
+
+        start_system_audio()
+        raise
+
+
+def cleanup_runtime():
+    with SWITCH_LOCK:
+        print(
+            "Stopping CamillaDSP",
+            flush=True,
+        )
+
+        try:
+            stop_existing_camilladsp()
+        except Exception as error:
+            print(
+                "Could not stop CamillaDSP cleanly: "
+                f"{error}",
+                flush=True,
+            )
+
+        print(
+            "Stopping SonoBus",
+            flush=True,
+        )
+
+        try:
+            stop_sonobus()
+        except Exception as error:
+            print(
+                "Could not stop SonoBus cleanly: "
+                f"{error}",
+                flush=True,
+            )
+
+        print(
+            "Restarting normal audio services",
+            flush=True,
+        )
+
+        try:
+            start_system_audio()
+        except Exception as error:
+            print(
+                "Could not restart audio services: "
+                f"{error}",
+                flush=True,
+            )
+
+def handle_shutdown_signal(
+    signum,
+    frame,
+):
+    signal_name = signal.Signals(
+        signum
+    ).name
+
+    print(
+        f"Received {signal_name}; shutting down",
+        flush=True,
+    )
+
+    raise KeyboardInterrupt
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1391,19 +1739,41 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def read_json_body(self):
-        length = int(
-            self.headers.get(
-                "Content-Length",
-                "0",
-            )
+        raw_length = self.headers.get(
+            "Content-Length",
+            "0",
         )
+
+        try:
+            length = int(raw_length)
+        except ValueError as error:
+            raise ValueError(
+                "Invalid Content-Length"
+            ) from error
 
         if length <= 0:
             return {}
 
-        return json.loads(
-            self.rfile.read(length)
-        )
+        if length > 64 * 1024:
+            raise ValueError(
+                "Request body is too large"
+            )
+
+        raw_body = self.rfile.read(length)
+
+        try:
+            payload = json.loads(raw_body)
+        except json.JSONDecodeError as error:
+            raise ValueError(
+                "Invalid JSON request body"
+            ) from error
+
+        if not isinstance(payload, dict):
+            raise ValueError(
+                "JSON request body must be an object"
+            )
+
+        return payload
 
     def do_GET(self):
         if self.path.split("?", 1)[0] == "/":
@@ -1463,13 +1833,19 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             if path == "/api/select":
-                payload = (
-                    self.read_json_body()
+                payload = self.read_json_body()
+
+                filename = payload.get(
+                    "profile"
                 )
 
-                filename = payload[
-                    "profile"
-                ]
+                if not isinstance(
+                    filename,
+                    str,
+                ) or not filename:
+                    raise ValueError(
+                        "Missing profile name"
+                    )
 
                 result = switch_profile(
                     filename
@@ -1477,12 +1853,14 @@ class Handler(BaseHTTPRequestHandler):
 
             elif path == "/api/restart-camilladsp":
                 result = restart_camilladsp()
+
             elif path == "/api/restart-sonobus":
                 result = restart_sonobus()
+
             elif path == "/api/restart-airplay":
                 result = restart_airplay()
-            else:
 
+            else:
                 self.send_json(
                     404,
                     {
@@ -1497,6 +1875,19 @@ class Handler(BaseHTTPRequestHandler):
                 {
                     "ok": True,
                     **result,
+                },
+            )
+
+        except (
+            ValueError,
+            KeyError,
+            FileNotFoundError,
+        ) as error:
+            self.send_json(
+                400,
+                {
+                    "ok": False,
+                    "error": str(error),
                 },
             )
 
@@ -1520,53 +1911,91 @@ class ReusableThreadingHTTPServer(
     daemon_threads = True
 
 
-ensure_state_directory()
-kill_previous_web_servers()
-stop_system_audio()
-sonobus_start = restart_sonobus()
-print(
-    f"SonoBus started with PID {sonobus_start['pid']}",
-    flush=True,
-)
+def main():
+    ensure_state_directory()
 
-server = ReusableThreadingHTTPServer(
-    (LISTEN_ADDRESS, LISTEN_PORT),
-    Handler,
-)
+    signal.signal(
+        signal.SIGTERM,
+        handle_shutdown_signal,
+    )
 
-SERVER_PID_FILE.write_text(
-    f"{os.getpid()}\\n",
-    encoding="utf-8",
-)
+    signal.signal(
+        signal.SIGHUP,
+        handle_shutdown_signal,
+    )
 
-print(
-    f"CamillaDSP web remote listening on "
-    f"{LISTEN_ADDRESS}:{LISTEN_PORT}",
-    flush=True,
-)
-
-try:
-    server.serve_forever()
-
-finally:
-    server.server_close()
+    server = None
+    runtime_started = False
+    exit_status = 0
 
     try:
-        saved_pid = int(
-            SERVER_PID_FILE
-            .read_text(encoding="utf-8")
-            .strip()
-        )
-    except (
-        FileNotFoundError,
-        ValueError,
-        OSError,
-    ):
-        saved_pid = None
+        kill_previous_web_servers()
 
-    if saved_pid == os.getpid():
-        SERVER_PID_FILE.unlink(
-            missing_ok=True
+        start_runtime()
+        runtime_started = True
+
+        server = ReusableThreadingHTTPServer(
+            (
+                LISTEN_ADDRESS,
+                LISTEN_PORT,
+            ),
+            Handler,
         )
 
+        SERVER_PID_FILE.write_text(
+            f"{os.getpid()}\n",
+            encoding="utf-8",
+        )
 
+        print(
+            "CamillaDSP web remote listening on "
+            f"{LISTEN_ADDRESS}:{LISTEN_PORT}",
+            flush=True,
+        )
+
+        server.serve_forever()
+
+    except KeyboardInterrupt:
+        print(
+            "Server shutdown requested",
+            flush=True,
+        )
+
+    except Exception as error:
+        exit_status = 1
+
+        print(
+            f"Server failed: {error}",
+            flush=True,
+        )
+
+    finally:
+        if server is not None:
+            server.server_close()
+
+        if runtime_started:
+            cleanup_runtime()
+
+        try:
+            saved_pid = int(
+                SERVER_PID_FILE.read_text(
+                    encoding="utf-8"
+                ).strip()
+            )
+        except (
+            FileNotFoundError,
+            ValueError,
+            OSError,
+        ):
+            saved_pid = None
+
+        if saved_pid == os.getpid():
+            SERVER_PID_FILE.unlink(
+                missing_ok=True
+            )
+
+    return exit_status
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
