@@ -647,7 +647,7 @@ card_display_label() {
     local card="$1" description="$2" label="$2"
     case "$card $description" in
         *HyperX_Cloud_III*|*"HyperX Cloud III"*) label="HyperX Cloud III" ;;
-        *sof*|*SOF*|*"sof-hda-dsp"*|*"Built-in Audio"*) label="Built-in Audio" ;;
+        *sof*|*SOF*|*"sof-hda-dsp"*|*"Built-in Audio"*|*Chipset*) label="Built-in Audio" ;;
         *HDMI*|*hdmi*) [[ "$description" == *HDMI* ]] || label="$description HDMI" ;;
     esac
     printf '%s\n' "$label"
