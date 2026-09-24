@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# CamillaDSP + SonoBus + PC Music web remote.
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -11,14 +10,16 @@ CAMILLA=Path('/run/current-system/sw/bin/camilladsp'); SONOBUS=Path('/run/curren
 SONOSET=HOME/'.config/sonobus/SonoBus.settings'; EXTS={'.m4a','.aac','.mp3','.flac','.wav','.ogg','.opus'}
 CAMPID=STATE/'camilladsp.pid'; ACTIVE=STATE/'active-profile'; SERVERPID=STATE/'web-server.pid'
 MPVPID=STATE/'mpv.pid'; MPVSOCK=STATE/'mpv.sock'; MPVLOG=STATE/'mpv.log'; MODE=STATE/'mode'
-LOCK=threading.RLock(); PLAYERLOCK=threading.RLock(); PLAYLISTLOCK=threading.RLock()
+LOCK=threading.RLock(); PLAYERLOCK=threading.RLock(); PLAYLISTLOCK=threading.RLock(); MPRISLOCK=threading.RLock(); LAST_MPRIS=None
+SYSTEM_AUDIO_SERVICE='camilladsp-system-audio.service'
 
 def exe(*names):
     for n in names:
-        for p in (Path('/run/current-system/sw/bin')/n, HOME/'.nix-profile/bin'/n, Path(shutil.which(n) or '/nonexistent')):
+        for p in (Path('/run/current-system/sw/bin')/n,HOME/'.nix-profile/bin'/n,Path(shutil.which(n) or '/nonexistent')):
             if p.is_file() and os.access(p,os.X_OK): return str(p)
     raise FileNotFoundError('Executable not found: '+', '.join(names))
 def run(a,check=True,timeout=30,env=None): return subprocess.run(a,text=True,capture_output=True,check=check,timeout=timeout,env=env)
+def ensure(): STATE.mkdir(parents=True,exist_ok=True); MUSIC.mkdir(parents=True,exist_ok=True)
 def rpid(p):
     try:return int(p.read_text().strip())
     except (OSError,ValueError):return None
@@ -32,336 +33,73 @@ def killpidfile(path,name=None):
     pid=rpid(path)
     if alive(pid,name):
         try:os.killpg(pid,signal.SIGTERM)
-        except (OSError,PermissionError):
+        except OSError:
             try:os.kill(pid,signal.SIGTERM)
             except OSError:pass
-        for _ in range(30):
-            if not alive(pid):break
-            time.sleep(.1)
+        deadline=time.monotonic()+3
+        while alive(pid) and time.monotonic()<deadline:time.sleep(.05)
         if alive(pid):
             try:os.killpg(pid,signal.SIGKILL)
             except OSError:pass
     path.unlink(missing_ok=True)
-def ensure(): STATE.mkdir(parents=True,exist_ok=True); MUSIC.mkdir(parents=True,exist_ok=True)
-def stop_system_audio():
-    # PipeWire must remain running because it carries desktop audio.
-    return None
-def start_system_audio():
-    return set_source_mode("system")
+def media_env():
+    env=os.environ.copy(); runtime=f'/run/user/{os.getuid()}'
+    env.setdefault('XDG_RUNTIME_DIR',runtime); env.setdefault('DBUS_SESSION_BUS_ADDRESS',f'unix:path={runtime}/bus')
+    return env
+def user_service(action,name):
+    r=run(['systemctl','--user',action,name],False,30)
+    if r.returncode:raise RuntimeError(r.stderr.strip() or r.stdout.strip() or f'Could not {action} {name}')
 def airplay(start):
     action='restart' if start else 'stop'; r=run(['systemctl',action,'nqptp.service','shairport-sync.service'],False)
-    if r.returncode: raise RuntimeError(r.stderr.strip() or 'Could not change AirPlay service state')
-
-SYSTEM_AUDIO_SERVICE = "camilladsp-system-audio.service"
-
-def user_service(action, name):
-    result = run(["systemctl", "--user", action, name], False, 30)
-    if result.returncode:
-        raise RuntimeError(
-            result.stderr.strip()
-            or result.stdout.strip()
-            or f"Could not {action} {name}"
-        )
-    return result
-
+    if r.returncode:raise RuntimeError(r.stderr.strip() or 'Could not change AirPlay services')
 def audio_mode():
-    try:
-        mode = MODE.read_text(encoding="utf-8").strip()
-    except OSError:
-        mode = "airplay"
-    return mode if mode in {"airplay", "system"} else "airplay"
-
-def apply_source_mode(mode):
-    if mode == "system":
-        airplay(False)
-        user_service("restart", SYSTEM_AUDIO_SERVICE)
-        MODE.write_text("system\n", encoding="utf-8")
-    elif mode == "airplay":
-        user_service("stop", SYSTEM_AUDIO_SERVICE)
-        stop_mpv()
-        airplay(True)
-        MODE.write_text("airplay\n", encoding="utf-8")
-    else:
-        raise ValueError("Invalid audio source mode")
-    return {"mode": mode}
-
-def set_source_mode(mode):
+    try:m=MODE.read_text().strip()
+    except OSError:m='airplay'
+    return m if m in {'airplay','system'} else 'airplay'
+def apply_mode(mode):
+    if mode=='system':airplay(False);user_service('restart',SYSTEM_AUDIO_SERVICE)
+    elif mode=='airplay':user_service('stop',SYSTEM_AUDIO_SERVICE);stop_mpv();airplay(True)
+    else:raise ValueError('Invalid audio mode')
+    MODE.write_text(mode+'\n');return {'mode':mode,'sonobus':bool(sonopids())}
+def set_mode(mode):
     with LOCK:
-        if not alive(rpid(CAMPID), "camilladsp"):
-            restart_camilla()
-        result = apply_source_mode(mode)
-        result["sonobus"] = bool(sonopids())
-        return result
+        if not alive(rpid(CAMPID),'camilladsp'):restart_camilla()
+        return apply_mode(mode)
+def restart_vnc():user_service('restart','camilladsp-wayvnc.service');return {'restarted':True}
 
-def restart_vnc_service():
-    result = run(
-        ["systemctl", "--user", "restart", "camilladsp-wayvnc.service"],
-        False,
-        30,
-    )
-    if result.returncode:
-        raise RuntimeError(
-            result.stderr.strip()
-            or result.stdout.strip()
-            or "Could not restart WayVNC service"
-        )
-    return {"restarted": True}
-
-def media_session_env():
-    env = os.environ.copy()
-    runtime = f"/run/user/{os.getuid()}"
-    env.setdefault("XDG_RUNTIME_DIR", runtime)
-    env.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path={runtime}/bus")
-    return env
-
-
-def mpris_players():
-    result = run([exe("playerctl"), "--list-all"], False, 10, media_session_env())
-    if result.returncode:
-        return []
-    seen = set()
-    players = []
-    for line in result.stdout.splitlines():
-        name = line.strip()
-        if name and name != "playerctld" and name not in seen:
-            seen.add(name)
-            players.append(name)
-    return players
-
-
-def mpris_status(player):
-    result = run(
-        [exe("playerctl"), "--player", player, "status"],
-        False,
-        5,
-        media_session_env(),
-    )
-    return result.stdout.strip() if result.returncode == 0 else ""
-
-
-def active_mpris_player():
-    players = mpris_players()
-    if not players:
-        return None
-    return min(
-        players,
-        key=lambda player: {
-            "Playing": 0,
-            "Paused": 1,
-            "Stopped": 2,
-        }.get(mpris_status(player), 3),
-    )
-
-
-def playerctl_value(player, *arguments, default=""):
-    result = run(
-        [exe("playerctl"), "--player", player, *arguments],
-        False,
-        5,
-        media_session_env(),
-    )
-    return result.stdout.strip() if result.returncode == 0 else default
-
-
-def system_volume_state():
-    result = run(
-        [exe("pactl"), "get-sink-volume", "@DEFAULT_SINK@"],
-        False,
-        5,
-        media_session_env(),
-    )
-    match = re.search(r"(\d+)%", result.stdout)
-    return int(match.group(1)) if match else 100
-
-
-def set_system_volume(percent):
-    value = max(0, min(100, float(percent)))
-    result = run(
-        [exe("pactl"), "set-sink-volume", "@DEFAULT_SINK@", f"{value:.2f}%"],
-        False,
-        5,
-        media_session_env(),
-    )
-    if result.returncode:
-        raise RuntimeError(result.stderr.strip() or "Could not set system volume")
-    return {"volume": value}
-
-
-def system_media_state():
-    player = active_mpris_player()
-    state = {
-        "available": False,
-        "player": "",
-        "status": "Stopped",
-        "playing": False,
-        "title": "No system media",
-        "artist": "",
-        "position": 0.0,
-        "duration": 0.0,
-        "seekable": False,
-        "volume": system_volume_state(),
-    }
-    if not player:
-        return state
-    status = mpris_status(player) or "Stopped"
-    try:
-        position = float(playerctl_value(player, "position", default="0") or 0)
-    except ValueError:
-        position = 0.0
-    try:
-        duration = float(playerctl_value(player, "metadata", "mpris:length", default="0") or 0) / 1_000_000
-    except ValueError:
-        duration = 0.0
-    state.update({
-        "available": True,
-        "player": player,
-        "status": status,
-        "playing": status == "Playing",
-        "title": playerctl_value(player, "metadata", "xesam:title", default=player),
-        "artist": playerctl_value(player, "metadata", "xesam:artist", default=""),
-        "position": max(0.0, position),
-        "duration": max(0.0, duration),
-        "seekable": duration > 0,
-    })
-    return state
-
-
-def system_media(command):
-    commands = {
-        "previous": "previous",
-        "toggle": "play-pause",
-        "next": "next",
-    }
-    playerctl_command = commands.get(command)
-    if playerctl_command is None:
-        raise ValueError("Invalid system media command")
-    player = active_mpris_player()
-    if player:
-        result = run(
-            [exe("playerctl"), "--player", player, playerctl_command],
-            False,
-            10,
-            media_session_env(),
-        )
-        if result.returncode == 0:
-            return {"command": command, "backend": "mpris", "player": player}
-    if alive(rpid(MPVPID), "mpv") and MPVSOCK.exists() and prop("path", ""):
-        mpv_commands = {
-            "previous": ["playlist-prev", "force"],
-            "toggle": ["cycle", "pause"],
-            "next": ["playlist-next", "force"],
-        }
-        mpv(mpv_commands[command])
-        return {"command": command, "backend": "mpv-ipc", "player": "PC Music"}
-    raise RuntimeError("No controllable system media player is available")
-
-
-def system_media_seek(seconds):
-    player = active_mpris_player()
-    if not player:
-        raise RuntimeError("No controllable system media player is available")
-    value = max(0.0, float(seconds))
-    result = run(
-        [exe("playerctl"), "--player", player, "position", f"{value:.3f}"],
-        False,
-        10,
-        media_session_env(),
-    )
-    if result.returncode:
-        raise RuntimeError(result.stderr.strip() or "This player does not support seeking")
-    return {"player": player, "position": value}
-
-
-def alsa100():
-    r=run(['amixer','-c','Loopback','sset','PCM','100%'],False)
-    if r.returncode:raise RuntimeError(r.stderr.strip() or r.stdout.strip() or 'Could not set Loopback PCM')
-def profiles():
-    return sorted([p for pat in ('*.yml','*.yaml') for p in PROFILES.glob(pat) if p.is_file()],key=lambda p:p.name.lower())
+def profiles():return sorted([p for pat in ('*.yml','*.yaml') for p in PROFILES.glob(pat) if p.is_file()],key=lambda p:p.name.lower())
 def profile(name):
-    if not isinstance(name,str) or Path(name).name!=name:raise ValueError('Invalid profile name')
+    if not isinstance(name,str) or Path(name).name!=name:raise ValueError('Invalid profile')
     p=(PROFILES/name).resolve()
     if p.parent!=PROFILES.resolve() or p.suffix.lower() not in {'.yml','.yaml'} or not p.is_file():raise FileNotFoundError(name)
     return p
 def active():
     try:return ACTIVE.read_text().strip()
     except OSError:return ''
-def stop_camilla():
-    killpidfile(CAMPID,'camilladsp'); subprocess.run(['pkill','-x','camilladsp'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=False)
-
+def stop_camilla():killpidfile(CAMPID,'camilladsp');subprocess.run(['pkill','-x','camilladsp'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=False)
 def start_camilla(p):
-    log_path = STATE / "camilladsp.log"
-
-    log = log_path.open(
-        "ab",
-        buffering=0,
-    )
-
-    try:
-        process = subprocess.Popen(
-            [
-                str(CAMILLA),
-                str(p),
-            ],
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-
-    finally:
-        log.close()
-
-    CAMPID.write_text(
-        f"{process.pid}\n"
-    )
-
-    # Verify that CamillaDSP remains alive through its
-    # initial ALSA-device setup. This is readiness polling,
-    # not an arbitrary fixed delay.
-    for _ in range(20):
-        return_code = process.poll()
-
-        if return_code is not None:
-            try:
-                log_tail = log_path.read_text(
-                    encoding="utf-8",
-                    errors="replace",
-                )[-2000:].strip()
-
-            except OSError:
-                log_tail = ""
-
-            CAMPID.unlink(
-                missing_ok=True
-            )
-
-            raise RuntimeError(
-                "CamillaDSP exited during startup"
-                + (
-                    f" with status {return_code}"
-                    if return_code is not None
-                    else ""
-                )
-                + (
-                    ": " + log_tail
-                    if log_tail
-                    else ""
-                )
-            )
-
-        time.sleep(0.1)
-
-    ACTIVE.write_text(
-        p.name + "\n"
-    )
-
-    return process.pid
+    logpath=STATE/'camilladsp.log'; log=logpath.open('ab',buffering=0)
+    try:q=subprocess.Popen([str(CAMILLA),str(p)],stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
+    finally:log.close()
+    CAMPID.write_text(f'{q.pid}\n');deadline=time.monotonic()+2
+    while time.monotonic()<deadline:
+        if q.poll() is not None:
+            CAMPID.unlink(missing_ok=True)
+            try:tail=logpath.read_text(errors='replace')[-2000:]
+            except OSError:tail=''
+            raise RuntimeError('CamillaDSP failed to start: '+tail)
+        time.sleep(.05)
+    ACTIVE.write_text(p.name+'\n');return q.pid
 def switch_profile(name):
     with LOCK:
-        p=profile(name); stop_system_audio(); stop_camilla(); alsa100(); return {'profile':p.name,'pid':start_camilla(p)}
+        p=profile(name);stop_camilla();alsa100();return {'profile':p.name,'pid':start_camilla(p)}
 def restart_camilla():
     if not active():raise RuntimeError('No active profile')
     return switch_profile(active())
+def alsa100():
+    r=run(['amixer','-c','Loopback','sset','PCM','100%'],False)
+    if r.returncode:raise RuntimeError(r.stderr.strip() or r.stdout.strip() or 'Could not set Loopback PCM')
+
 def sonopids():
     out=set()
     for n in ('sonobus','SonoBus'):
@@ -374,9 +112,8 @@ def stop_sonobus():
     for p in sonopids():
         try:os.kill(p,signal.SIGTERM)
         except OSError:pass
-    for _ in range(30):
-        if not sonopids():return
-        time.sleep(.1)
+    deadline=time.monotonic()+3
+    while sonopids() and time.monotonic()<deadline:time.sleep(.05)
     for p in sonopids():
         try:os.kill(p,signal.SIGKILL)
         except OSError:pass
@@ -384,93 +121,51 @@ def configure_sonobus():
     if not SONOSET.is_file():raise FileNotFoundError(SONOSET)
     t=SONOSET.read_text(); attrs={'deviceType':'ALSA','audioOutputDeviceName':'SonoBus Silent Output','audioInputDeviceName':'CamillaDSP SonoBus','audioDeviceRate':'96000.0','audioDeviceBufferSize':'512'}
     for k,v in attrs.items():
-        t,n=re.subn(rf'(<DEVICESETUP\b[^>]*\b{k}=\")[^\"]*(\")',rf'\g<1>{v}\g<2>',t,count=1)
+        t,n=re.subn(rf'(<DEVICESETUP\b[^>]*\b{k}=")[^"]*(")',rf'\g<1>{v}\g<2>',t,count=1)
         if n!=1:raise RuntimeError(f'Could not set SonoBus {k}')
-    t,n=re.subn(r'(<PARAM\s+id=\"sendchannels\"\s+value=\")[^\"]*(\"\s*/>)',r'\g<1>2.0\g<2>',t,count=1)
+    t,n=re.subn(r'(<PARAM\s+id="sendchannels"\s+value=")[^"]*("\s*/>)',r'\g<1>2.0\g<2>',t,count=1)
     if n!=1:raise RuntimeError('Could not set SonoBus sendchannels')
-    tmp=SONOSET.with_suffix('.tmp'); tmp.write_text(t); tmp.replace(SONOSET)
+    tmp=SONOSET.with_suffix('.tmp');tmp.write_text(t);tmp.replace(SONOSET)
 def restart_sonobus():
     with LOCK:
-        stop_sonobus()
-        alsa100()
-        configure_sonobus()
-        log = (STATE / "sonobus.log").open("ab", buffering=0)
-        try:
-            process = subprocess.Popen(
-                [str(SONOBUS), "--group=rt4817-camilladsp", "--username=rt4817", "--connectionserver=aoo.sonobus.net:10998"],
-                stdin=subprocess.DEVNULL,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
-        finally:
-            log.close()
-        # SonoBus has no readiness socket here. Require the process to
-        # survive a bounded startup window before reporting success.
-        deadline = time.monotonic() + 1.0
-        while time.monotonic() < deadline:
-            if process.poll() is not None:
-                raise RuntimeError("SonoBus failed to start; check " + str(STATE / "sonobus.log"))
-            time.sleep(0.05)
-        return {"pid": process.pid}
+        stop_sonobus();alsa100();configure_sonobus();log=(STATE/'sonobus.log').open('ab',buffering=0)
+        try:q=subprocess.Popen([str(SONOBUS),'--group=rt4817-camilladsp','--username=rt4817','--connectionserver=aoo.sonobus.net:10998'],stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
+        finally:log.close()
+        deadline=time.monotonic()+1
+        while time.monotonic()<deadline:
+            if q.poll() is not None:raise RuntimeError('SonoBus failed to start')
+            time.sleep(.05)
+        return {'pid':q.pid}
 
-def stop_mpv():
-    killpidfile(MPVPID,'mpv'); MPVSOCK.unlink(missing_ok=True)
+def stop_mpv():killpidfile(MPVPID,'mpv');MPVSOCK.unlink(missing_ok=True)
 def ensure_mpv():
-    if alive(rpid(MPVPID), "mpv") and MPVSOCK.exists():
-        return
-
-    stop_mpv()
-    log = MPVLOG.open("ab", buffering=0)
-    command = [
-        exe("mpv"),
-        "--idle=yes",
-        "--no-video",
-        "--no-terminal",
-        "--keep-open=no",
-        "--ao=alsa",
-        "--audio-device=alsa/camilladsp_input",
-        "--audio-samplerate=96000",
-        "--audio-channels=stereo",
-        "--audio-format=s32",
-        f"--input-ipc-server={MPVSOCK}",
-        "--volume=100",
-        "--volume-max=100",
-    ]
-    try:
-        process = subprocess.Popen(
-            command,
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-    finally:
-        log.close()
-
-    MPVPID.write_text(f"{process.pid}\n")
-    for _ in range(50):
-        if MPVSOCK.exists() and process.poll() is None:
-            return
-        time.sleep(0.1)
-
-    raise RuntimeError("mpv failed to start; check " + str(MPVLOG))
+    if alive(rpid(MPVPID),'mpv') and MPVSOCK.exists():return
+    stop_mpv();log=MPVLOG.open('ab',buffering=0)
+    cmd=[exe('mpv'),'--idle=yes','--no-video','--no-terminal','--keep-open=no','--ao=alsa','--audio-device=alsa/camilladsp_input','--audio-samplerate=96000','--audio-channels=stereo','--audio-format=s32',f'--input-ipc-server={MPVSOCK}','--volume=100','--volume-max=100']
+    try:q=subprocess.Popen(cmd,stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
+    finally:log.close()
+    MPVPID.write_text(f'{q.pid}\n');deadline=time.monotonic()+5
+    while time.monotonic()<deadline:
+        if MPVSOCK.exists() and q.poll() is None:return
+        if q.poll() is not None:break
+        time.sleep(.05)
+    raise RuntimeError('mpv failed to start; check '+str(MPVLOG))
 def mpv(command):
     with PLAYERLOCK:
-        ensure_mpv(); data=b''
+        ensure_mpv();data=b''
         with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as c:
-            c.settimeout(3); c.connect(str(MPVSOCK)); c.sendall((json.dumps({'command':command})+'\n').encode())
+            c.settimeout(3);c.connect(str(MPVSOCK));c.sendall((json.dumps({'command':command})+'\n').encode())
             while b'\n' not in data:
                 x=c.recv(65536)
                 if not x:break
                 data+=x
         if not data:raise RuntimeError('mpv returned no response')
         r=json.loads(data.splitlines()[0])
-        if r.get('error')!='success':raise RuntimeError(r.get('error','mpv command failed'))
+        if r.get('error')!='success':raise RuntimeError(r.get('error','mpv failed'))
         return r.get('data')
 def prop(name,default=None):
     try:
-        v=mpv(['get_property',name]); return default if v is None else v
+        v=mpv(['get_property',name]);return default if v is None else v
     except Exception:return default
 def repeat_mode():
     if prop('loop-file','no') not in ('no',False,None,0):return 'one'
@@ -478,32 +173,77 @@ def repeat_mode():
     return 'off'
 def set_repeat(m):
     if m not in ('off','all','one'):raise ValueError('Invalid repeat mode')
-    mpv(['set_property','loop-file','inf' if m=='one' else 'no']); mpv(['set_property','loop-playlist','inf' if m=='all' else 'no']); return m
+    mpv(['set_property','loop-file','inf' if m=='one' else 'no']);mpv(['set_property','loop-playlist','inf' if m=='all' else 'no']);return m
 def player_state():
-    p=prop('path','')
-    return {'available':bool(p),'playing':bool(p) and not bool(prop('pause',True)),'title':prop('media-title','') or (Path(p).stem if p else ''),'path':p or '','currentTime':float(prop('time-pos',0) or 0),'duration':float(prop('duration',0) or 0),'volume':float(prop('volume',100) or 0),'repeat':repeat_mode()}
-def enter_pc():
-    with LOCK:
-        result = set_source_mode("system")
-        ensure_mpv()
-        result["player"] = "mpv"
-        return result
-def return_airplay():
-    with LOCK:
-        stop_mpv()
-        return set_source_mode("airplay")
+    p=prop('path','');t=prop('playback-time',None);d=prop('duration',None)
+    return {'available':bool(p),'playing':bool(p) and not bool(prop('pause',True)),'title':prop('media-title','') or (Path(p).stem if p else ''),'path':p or '','currentTime':None if t is None else float(t),'duration':None if d is None else float(d),'volume':float(prop('volume',100) or 0),'repeat':repeat_mode()}
+
+def mpris_players():
+    r=run([exe('playerctl'),'--list-all'],False,5,media_env());return [x.strip() for x in r.stdout.splitlines() if x.strip() and x.strip()!='playerctld']
+def mpris_status(p):
+    r=run([exe('playerctl'),'--player',p,'status'],False,5,media_env());return r.stdout.strip() if r.returncode==0 else ''
+def active_mpris():
+    global LAST_MPRIS
+    with MPRISLOCK:
+        players=mpris_players()
+        if not players:
+            LAST_MPRIS=None
+            return None
+        statuses={player:mpris_status(player) for player in players}
+        playing=[player for player in players if statuses[player]=='Playing']
+        if playing:
+            LAST_MPRIS=LAST_MPRIS if LAST_MPRIS in playing else playing[0]
+        elif LAST_MPRIS not in players:
+            LAST_MPRIS=min(players,key=lambda player:{'Paused':0,'Stopped':1}.get(statuses[player],2))
+        return LAST_MPRIS
+def pctl(p,*args,default=''):
+    r=run([exe('playerctl'),'--player',p,*args],False,5,media_env());return r.stdout.strip() if r.returncode==0 else default
+def system_volume():
+    r=run([exe('pactl'),'get-sink-volume','@DEFAULT_SINK@'],False,5,media_env());m=re.search(r'(\d+)%',r.stdout);return int(m.group(1)) if m else 100
+def set_system_volume(v):
+    v=max(0,min(100,float(v)));r=run([exe('pactl'),'set-sink-volume','@DEFAULT_SINK@',f'{v:.2f}%'],False,5,media_env())
+    if r.returncode:raise RuntimeError(r.stderr.strip() or 'Could not set system volume')
+    return {'volume':v}
+def system_state():
+    p=active_mpris();base={'available':False,'player':'','status':'Stopped','playing':False,'title':'No system media','artist':'','position':0.0,'duration':0.0,'seekable':False,'volume':system_volume()}
+    if not p:return base
+    def num(v):
+        try:return float(v or 0)
+        except ValueError:return 0.0
+    pos=num(pctl(p,'position'));dur=num(pctl(p,'metadata','mpris:length'))/1_000_000;status=mpris_status(p) or 'Stopped'
+    base.update(available=True,player=p,status=status,playing=status=='Playing',title=pctl(p,'metadata','xesam:title',default=p),artist=pctl(p,'metadata','xesam:artist'),position=max(0,pos),duration=max(0,dur),seekable=dur>0)
+    return base
+def system_media(command):
+    cmd={'previous':'previous','toggle':'play-pause','next':'next'}.get(command)
+    if not cmd:raise ValueError('Invalid media command')
+    p=active_mpris()
+    if p:
+        r=run([exe('playerctl'),'--player',p,cmd],False,10,media_env())
+        if r.returncode==0:return {'player':p,'command':command}
+    if alive(rpid(MPVPID),'mpv') and MPVSOCK.exists() and prop('path',''):
+        mpv({'previous':['playlist-prev','force'],'toggle':['cycle','pause'],'next':['playlist-next','force']}[command]);return {'player':'PC Music','command':command}
+    raise RuntimeError('No controllable media player')
+def system_seek(v):
+    global LAST_MPRIS
+    player=active_mpris()
+    if not player:raise RuntimeError('No controllable media player')
+    value=max(0,float(v))
+    result=run([exe('playerctl'),'--player',player,'position',f'{value:.3f}'],False,10,media_env())
+    if result.returncode:raise RuntimeError(result.stderr.strip() or 'Player does not support seeking')
+    with MPRISLOCK:LAST_MPRIS=player
+    return {'player':player,'position':value}
 
 def pname(n):
-    if not isinstance(n,str):raise ValueError('Invalid playlist name')
+    if not isinstance(n,str):raise ValueError('Invalid playlist')
     n=n.strip()
-    if not n or n in ('.','..') or '/' in n or '\\' in n or '\0' in n:raise ValueError('Invalid playlist name')
+    if not n or n in ('.','..') or '/' in n or '\\' in n or '\0' in n:raise ValueError('Invalid playlist')
     return n
 def pdir(n):
     p=(MUSIC/pname(n)).resolve()
     if p.parent!=MUSIC.resolve():raise ValueError('Invalid playlist path')
     return p
 def files(root=None):
-    root=root or MUSIC; found={}
+    root=root or MUSIC;found={}
     if not root.exists():return []
     for p in root.rglob('*'):
         try:
@@ -516,64 +256,26 @@ def sobj(p):
     return {'id':str(p.resolve()),'title':p.stem,'path':str(p.resolve()),'relative':r}
 def lists():return [{'name':d.name,'count':len(files(d))} for d in sorted([p for p in MUSIC.iterdir() if p.is_dir() and not p.name.startswith('.')],key=lambda p:p.name.casefold())]
 def atomic(path,text):
-    t=path.with_name('.'+path.name+'.'+uuid.uuid4().hex); t.write_text(text,encoding='utf-8'); os.replace(t,path)
+    t=path.with_name('.'+path.name+'.'+uuid.uuid4().hex);t.write_text(text);os.replace(t,path)
 def rebuild(n):
-    d=pdir(n); d.mkdir(parents=True,exist_ok=True); entries=[os.path.relpath(str(x.resolve()),MUSIC) for x in files(d)]
-    atomic(MUSIC/f'{n}.m3u','#EXTM3U\n'+'\n'.join(entries)+('\n' if entries else ''))
-    sh=entries[:]; random.SystemRandom().shuffle(sh); atomic(MUSIC/f'{n}-shuffled.m3u','#EXTM3U\n'+'\n'.join(sh)+('\n' if sh else ''))
-    return {'name':n,'count':len(entries)}
+    d=pdir(n);d.mkdir(parents=True,exist_ok=True);e=[os.path.relpath(str(x.resolve()),MUSIC) for x in files(d)];atomic(MUSIC/f'{n}.m3u','#EXTM3U\n'+'\n'.join(e)+('\n' if e else ''));s=e[:];random.SystemRandom().shuffle(s);atomic(MUSIC/f'{n}-shuffled.m3u','#EXTM3U\n'+'\n'.join(s)+('\n' if s else ''));return {'name':n,'count':len(e)}
 def create_list(n):
-    with PLAYLISTLOCK:
-        d=pdir(n); existed=d.exists(); d.mkdir(parents=True,exist_ok=True); r=rebuild(n); r.update(created=not existed,changed=not existed); return r
-def unique(p):
-    if not p.exists() and not p.is_symlink():return p
-    for i in range(2,10000):
-        q=p.with_name(f'{p.stem} ({i}){p.suffix}')
-        if not q.exists() and not q.is_symlink():return q
-    raise RuntimeError('Could not create unique filename')
-def remove_list(n):
-    with PLAYLISTLOCK:
-        d=pdir(n)
-        if not d.exists():return {'name':n,'removed':True,'changed':False,'songsPreserved':True}
-        keep=MUSIC/'Unsorted'; keep.mkdir(exist_ok=True)
-        for x in list(d.iterdir()):
-            if x.is_symlink():x.unlink()
-            elif x.is_file() and x.suffix.lower() in EXTS:x.replace(unique(keep/x.name))
-            elif x.is_file():x.unlink()
-        shutil.rmtree(d); (MUSIC/f'{n}.m3u').unlink(missing_ok=True); (MUSIC/f'{n}-shuffled.m3u').unlink(missing_ok=True)
-        return {'name':n,'removed':True,'changed':True,'songsPreserved':True}
+    d=pdir(n);exists=d.exists();d.mkdir(parents=True,exist_ok=True);r=rebuild(n);r.update(created=not exists);return r
 def song(v):
-    if not isinstance(v,str):raise ValueError('Invalid song')
     p=Path(v).resolve()
-    if MUSIC.resolve() not in p.parents or not p.is_file() or p.suffix.lower() not in EXTS:raise ValueError('Song is outside library or unsupported')
+    if MUSIC.resolve() not in p.parents or not p.is_file() or p.suffix.lower() not in EXTS:raise ValueError('Unsupported song')
     return p
-def add_to_list(n,paths):
-    if not isinstance(paths,list) or not paths:raise ValueError('Select at least one song')
-    with PLAYLISTLOCK:
-        d=pdir(n); d.mkdir(parents=True,exist_ok=True); added=0
-        for v in paths:
-            s=song(v); t=d/s.name
-            if t.exists() or t.is_symlink():
-                if t.resolve()==s:continue
-                t=unique(t)
-            t.symlink_to(s); added+=1
-        r=rebuild(n);r['added']=added;return r
 def play_list(n,shuffle=False):
-    rebuild(n); p=MUSIC/(f'{n}-shuffled.m3u' if shuffle else f'{n}.m3u');mpv(['loadlist',str(p),'replace']);mpv(['set_property','pause',False]);return {'playlist':n,'shuffled':shuffle}
+    rebuild(n);p=MUSIC/(f'{n}-shuffled.m3u' if shuffle else f'{n}.m3u');mpv(['loadlist',str(p),'replace']);mpv(['set_property','pause',False]);return {'playlist':n,'shuffled':shuffle}
 
-
-
-
-PAGE = '<!doctype html>\n<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#090a12"><title>CamillaDSP Studio</title>\n<style>\n:root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display",Inter,sans-serif;--violet:#825dff;--blue:#3e8dff;--mint:#35d6a0;--rose:#ef537d;--text:#fff;--muted:#aaa7b7}\n*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}html,body{width:100%;max-width:100%;overflow-x:hidden}body{margin:0;min-height:100svh;padding:max(21px,env(safe-area-inset-top)) 17px max(30px,env(safe-area-inset-bottom));color:#fff;background:radial-gradient(850px 520px at 50% -160px,#6240a4 0%,#211a38 43%,#070910 100%);background-attachment:fixed}main{width:min(100%,520px);margin:auto}.hidden{display:none!important}section{animation:arrive .25s cubic-bezier(.2,.8,.2,1)}@keyframes arrive{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}\n.hero{padding:25px 22px 22px;margin-bottom:15px;border:1px solid rgba(255,255,255,.14);border-radius:29px;background:linear-gradient(145deg,rgba(139,92,246,.28),rgba(44,48,82,.12));box-shadow:inset 0 1px rgba(255,255,255,.16),0 25px 60px rgba(0,0,0,.33);backdrop-filter:blur(22px)}.eyebrow{display:flex;align-items:center;gap:8px;color:#cbc7da;font-size:12px;font-weight:800;letter-spacing:.1em;text-transform:uppercase}.dot{width:9px;height:9px;border-radius:50%;background:var(--mint);box-shadow:0 0 15px var(--mint)}h1{margin:11px 0 5px;font-size:32px;line-height:1.08;letter-spacing:-.04em}.subtitle{color:#c2bece;font-size:14px;line-height:1.45}\n.card{padding:19px;margin-bottom:15px;border:1px solid rgba(255,255,255,.12);border-radius:24px;background:linear-gradient(145deg,rgba(255,255,255,.105),rgba(255,255,255,.055));box-shadow:inset 0 1px rgba(255,255,255,.13),0 17px 42px rgba(0,0,0,.26);backdrop-filter:blur(20px)}.label,.section-title{color:#aaa7b7;font-size:12px;font-weight:820;letter-spacing:.1em;text-transform:uppercase}.section-title{margin:28px 3px 11px}.title{margin-top:7px;font-size:21px;font-weight:780;line-height:1.28;overflow-wrap:anywhere}.details{margin-top:5px;color:#b7b3c1;font-size:13px;line-height:1.4;overflow-wrap:anywhere}\n.grid{display:grid;gap:10px}.two{grid-template-columns:1fr 1fr}.three{grid-template-columns:1fr 1.2fr 1fr}.wide{grid-column:1/-1}button,input{font:inherit}button{width:100%;border:0;color:#fff;cursor:pointer;touch-action:manipulation}.action,.item,.transport,.back{position:relative;overflow:hidden;transition:transform .12s ease,filter .17s ease,box-shadow .18s ease,background .18s ease}.action:active,.item:active,.transport:active,.back:active{transform:scale(.96);filter:brightness(1.14)}.action:disabled{opacity:.55}.action{min-height:55px;padding:11px 13px;border-radius:18px;background:rgba(255,255,255,.12);box-shadow:inset 0 1px rgba(255,255,255,.16),0 10px 26px rgba(0,0,0,.2);font-size:14px;font-weight:790}.primary{background:linear-gradient(135deg,var(--blue),var(--violet))}.green{background:linear-gradient(135deg,#25ae7d,#287d95)}.danger{background:linear-gradient(135deg,#e84f75,#8e2b4b)}.busy:after{content:"";position:absolute;inset:0;background:linear-gradient(105deg,transparent 25%,rgba(255,255,255,.2) 50%,transparent 75%);animation:shine .8s linear infinite}@keyframes shine{from{transform:translateX(-100%)}to{transform:translateX(100%)}}\n.search{width:100%;min-height:50px;padding:11px 15px;border:1px solid rgba(255,255,255,.14);border-radius:17px;outline:0;color:#fff;background:rgba(255,255,255,.085);transition:.2s}.search:focus{border-color:#9b7aff;background:rgba(255,255,255,.12);box-shadow:0 0 0 4px rgba(130,93,255,.18)}.list{display:grid;gap:10px;margin-top:10px}.item{min-height:67px;padding:13px 16px;border:1px solid rgba(255,255,255,.08);border-radius:19px;text-align:left;background:rgba(255,255,255,.085);box-shadow:inset 0 1px rgba(255,255,255,.12)}.item.active{border-color:rgba(164,124,255,.68);background:linear-gradient(135deg,rgba(78,130,255,.42),rgba(133,82,255,.45));box-shadow:0 13px 32px rgba(81,57,190,.25)}.name{display:block;font-size:16px;font-weight:780;line-height:1.3}.meta{display:block;margin-top:4px;color:#aaa7b5;font-size:12px;line-height:1.35}.device-group{margin-top:18px}.device-head{display:flex;align-items:center;gap:11px;margin:0 3px 10px;color:#d8d4df;font-size:14px;font-weight:800}.device-icon{display:grid;place-items:center;width:31px;height:31px;border-radius:10px;background:rgba(255,255,255,.11);font-size:17px}.row{display:grid;grid-template-columns:minmax(0,1fr) 72px 72px;gap:9px}.header{display:grid;grid-template-columns:74px 1fr 74px;align-items:center;margin:4px 0 16px}.header h1{margin:0;text-align:center;font-size:23px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.back{min-height:44px;border-radius:15px;background:rgba(255,255,255,.11);font-weight:780}\n.player{padding:21px}.now-grid{display:grid;grid-template-columns:56px minmax(0,1fr);gap:14px;align-items:center}.album{display:grid;place-items:center;width:56px;height:56px;border-radius:18px;background:linear-gradient(145deg,#a66fff,#3c65de);box-shadow:0 13px 30px rgba(76,62,202,.34);font-size:24px}.range-row{display:grid;grid-template-columns:22px minmax(0,1fr) 22px;gap:8px;align-items:center}.volume-icon{display:grid;place-items:center;color:#e1deea}.range{--fill:0%;width:100%;height:36px;background:transparent;appearance:none;-webkit-appearance:none;touch-action:none}.range::-webkit-slider-runnable-track{height:6px;border-radius:999px;background:linear-gradient(to right,#fff 0,#fff var(--fill),rgba(255,255,255,.2) var(--fill),rgba(255,255,255,.2) 100%)}.range::-webkit-slider-thumb{width:21px;height:21px;margin-top:-7.5px;border:0;border-radius:50%;background:#fff;box-shadow:0 3px 10px rgba(0,0,0,.42);appearance:none;-webkit-appearance:none}.times{display:flex;justify-content:space-between;color:#aaa7b5;font-size:12px;font-variant-numeric:tabular-nums}.mode-controls{margin-top:10px}.mode-controls .active{background:var(--violet)}.source-card{padding:16px}.source-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}.source-mode.active{background:linear-gradient(135deg,var(--mint),#267da2);box-shadow:0 13px 30px rgba(37,174,125,.25)}\n.transport{min-height:80px;border-radius:999px;background:rgba(255,255,255,.11);box-shadow:inset 0 1px rgba(255,255,255,.18),0 15px 32px rgba(0,0,0,.28)}.transport.main{min-height:104px;background:linear-gradient(145deg,#9e68ff,#583ad2);box-shadow:0 20px 42px rgba(95,57,212,.36)}.media-icon{display:block;width:38px;height:38px;margin:auto;fill:none;stroke:#fff;stroke-width:2.1;stroke-linecap:round;stroke-linejoin:round;pointer-events:none}.main .media-icon{width:46px;height:46px}.icon-fill{fill:#fff;stroke:#fff}.toolbar{margin-top:13px}.check{display:grid;grid-template-columns:29px minmax(0,1fr);gap:11px;align-items:center;padding:12px;border:1px solid rgba(255,255,255,.08);border-radius:17px;background:rgba(255,255,255,.075)}.check input{width:22px;height:22px;accent-color:var(--violet)}.status{position:sticky;bottom:12px;z-index:10;min-height:0;margin-top:15px;text-align:center}.status:not(:empty){padding:11px 14px;border:1px solid rgba(255,255,255,.12);border-radius:16px;background:rgba(18,19,34,.94);box-shadow:0 18px 38px rgba(0,0,0,.38)}.error{background:rgba(113,28,52,.95)!important}@media(max-width:390px){.row{grid-template-columns:minmax(0,1fr) 64px 64px}.action{padding:9px 7px}.transport{min-height:72px}.transport.main{min-height:94px}}\n.system-player{padding:19px}.system-player .grid{margin-top:10px}</style></head><body><main>\n<section id="profiles"><div class="hero"><div class="eyebrow"><span class="dot"></span>Audio engine online</div><h1>CamillaDSP Studio</h1><div class="subtitle">Choose your listening profile or switch to the local music player.</div></div><div class="section-title">Audio source</div><div class="card source-card"><div id="source-title" class="title">Loading source…</div><div id="source-details" class="details">SonoBus always transmits the processed CamillaDSP output.</div><div class="source-grid"><button id="mode-system" class="action source-mode">Linux System Audio</button><button id="mode-airplay" class="action source-mode">iPad AirPlay</button></div></div><button id="open-pc" class="action green">Open PC Music Library</button><div class="section-title">Active profile</div><div class="card"><div id="active-profile" class="title">Loading…</div><div id="active-state" class="details"></div></div><div class="grid two"><button id="restart-camilla" class="action">Restart CamillaDSP</button><button id="restart-sonobus" class="action">Restart SonoBus</button><button id="restart-airplay" class="action">Restart AirPlay</button><button id="restart-vnc" class="action">Restart VNC</button></div><div class="section-title">System media</div><div class="card system-player"><div class="label">Active desktop player</div><div id="system-title" class="title">No system media</div><div id="system-details" class="details"></div><input id="system-seek" class="range" type="range" min="0" max="0" step=".1" disabled><div class="times"><span id="system-elapsed">0:00</span><span id="system-duration">0:00</span></div><div class="range-row"><span class="volume-icon">🔈</span><input id="system-volume" class="range" type="range" min="0" max="100" value="100"><span class="volume-icon">🔊</span></div><div class="grid three"><button id="system-previous" class="action">Previous</button><button id="system-toggle" class="action primary">Play / Pause</button><button id="system-next" class="action">Next</button></div></div><div class="section-title">Listening profiles</div><input id="profile-search" class="search" placeholder="Search profiles"><div id="profile-list"></div></section>\n<section id="pc" class="hidden"><div class="header"><button id="pc-back" class="back">Back</button><h1>PC Music</h1><div></div></div><div class="card player"><div class="now-grid"><div class="album">♪</div><div><div class="label">Now playing</div><div id="now-title" class="title">Nothing playing</div><div id="now-details" class="details"></div></div></div><input id="seek" class="range" type="range" min="0" max="0" step=".1"><div class="times"><span id="elapsed">0:00</span><span id="duration">0:00</span></div><div class="range-row"><span class="volume-icon">🔈</span><input id="volume" class="range" type="range" min="0" max="100" value="100"><span class="volume-icon">🔊</span></div><div class="grid two mode-controls"><button id="repeat" class="action">Repeat Off</button><button id="queue-shuffle" class="action">Shuffle Queue</button></div></div><div class="grid three"><button data-cmd="previous" class="transport" aria-label="Previous"><svg class="media-icon" viewBox="0 0 24 24"><path d="M6 5v14"></path><path d="M18 6.5 8.5 12 18 17.5z"></path></svg></button><button data-cmd="toggle" id="play-toggle" class="transport main" aria-label="Play or pause"><svg class="media-icon" viewBox="0 0 24 24"><path id="play-shape" class="icon-fill" d="M8 5.5 19 12 8 18.5z"></path></svg></button><button data-cmd="next" class="transport" aria-label="Next"><svg class="media-icon" viewBox="0 0 24 24"><path d="M18 5v14"></path><path d="M6 6.5 15.5 12 6 17.5z"></path></svg></button></div><div class="grid two toolbar"><button id="all-songs" class="action primary">All Songs</button><button id="new-playlist" class="action green">New Playlist</button><button id="return-airplay" class="action danger wide">Switch to iPad AirPlay</button></div><div class="section-title">Playlists</div><div id="playlists" class="list"></div></section>\n<section id="songs" class="hidden"><div class="header"><button data-back="pc" class="back">Back</button><h1>All Songs</h1><div></div></div><input id="song-search" class="search" placeholder="Search all songs"><div id="song-list" class="list"></div></section>\n<section id="playlist" class="hidden"><div class="header"><button data-back="pc" class="back">Back</button><h1 id="playlist-title">Playlist</h1><div></div></div><input id="playlist-search" class="search" placeholder="Search this playlist"><div id="playlist-songs" class="list"></div></section>\n<section id="add" class="hidden"><div class="header"><button id="add-back" class="back">Back</button><h1>Add Songs</h1><div></div></div><button id="add-selected" class="action primary">Add Selected Songs</button><input id="add-search" class="search" placeholder="Search available songs"><div id="add-list" class="list"></div></section><div id="status" class="status"></div></main>\n<script>\nconst $=s=>document.querySelector(s),screens=[\'profiles\',\'pc\',\'songs\',\'playlist\',\'add\'].map(x=>$(\'#\'+x));let current=\'\',all=[],inside=[],statusTimer=null;\nfunction show(id){screens.forEach(x=>x.classList.toggle(\'hidden\',x.id!==id));scrollTo({top:0,behavior:\'smooth\'})}function stat(x,e=false){const b=$(\'#status\');b.textContent=x;b.classList.toggle(\'error\',e);clearTimeout(statusTimer);if(x)statusTimer=setTimeout(()=>{if(b.textContent===x)b.textContent=\'\'},3000)}async function api(u,o={}){const r=await fetch(u,{cache:\'no-store\',...o}),d=await r.json().catch(()=>({ok:false,error:\'Invalid response\'}));if(!r.ok||d.ok===false)throw Error(d.error||\'Request failed\');return d}const post=(u,d={})=>api(u,{method:\'POST\',headers:{\'Content-Type\':\'application/json\'},body:JSON.stringify(d)}),fmt=v=>Math.floor((v||0)/60)+\':\'+String(Math.floor(v||0)%60).padStart(2,\'0\'),matches=(s,q)=>!q||[s.title,s.relative].join(\' \').toLowerCase().includes(q.toLowerCase());\nfunction friendly(filename){return filename.replace(/\\\\.ya?ml$/i,\'\').replace(/^\\\\d+-/,\'\').replace(/^earpods-/i,\'\').replace(/^cloud3-/i,\'\').replace(/^cmf-buds-pro-2-/i,\'\').replace(/-/g,\' \').replace(/\\\\b\\\\w/g,x=>x.toUpperCase())}function device(filename){const n=filename.toLowerCase();if(n.includes(\'cloud3\'))return{key:\'cloud3\',name:\'HyperX Cloud III\',icon:\'🎧\'};if(n.includes(\'cmf-buds-pro-2\'))return{key:\'cmf\',name:\'CMF Buds Pro 2\',icon:\'●\'};return{key:\'earpods\',name:\'Apple EarPods\',icon:\'♫\'}}\nasync function press(b,fn,label=\'Working…\'){if(b.disabled)return;const old=b.innerHTML;b.disabled=true;b.classList.add(\'busy\');b.textContent=label;try{return await fn()}catch(e){stat(e.message,true);throw e}finally{b.disabled=false;b.classList.remove(\'busy\');b.innerHTML=old}}\nasync function loadMode(){const d=await api(\'/api/mode\'),system=d.mode===\'system\';$(\'#source-title\').textContent=system?\'Linux System Audio\':\'iPad AirPlay\';$(\'#source-details\').textContent=system?\'Desktop apps, Glide, YouTube and PC Music feed CamillaDSP, then SonoBus.\':\'The iPad feeds Shairport Sync, then CamillaDSP and SonoBus.\';$(\'#mode-system\').classList.toggle(\'active\',system);$(\'#mode-airplay\').classList.toggle(\'active\',!system)}\nasync function chooseMode(mode,button){await press(button,async()=>{await post(\'/api/mode/\'+mode);await loadMode();stat(mode===\'system\'?\'Linux system audio active\':\'iPad AirPlay active\')},\'Switching…\')}\nasync function pollSystemMedia(){try{const d=await api(\'/api/system-media\'),seek=$(\'#system-seek\'),vol=$(\'#system-volume\');$(\'#system-title\').textContent=d.title||\'No system media\';$(\'#system-details\').textContent=[d.artist,d.player,d.status].filter(Boolean).join(\' • \');seek.disabled=!d.seekable;seek.max=d.duration||0;if(document.activeElement!==seek)seek.value=d.position||0;seek.style.setProperty(\'--fill\',(d.duration?d.position/d.duration*100:0)+\'%\');$(\'#system-elapsed\').textContent=fmt(d.position);$(\'#system-duration\').textContent=fmt(d.duration);if(document.activeElement!==vol)vol.value=d.volume;vol.style.setProperty(\'--fill\',(d.volume||0)+\'%\')}catch(e){stat(e.message,true)}}\nasync function loadProfiles(){const d=await api(\'/api/profiles\'),root=$(\'#profile-list\'),q=$(\'#profile-search\').value.toLowerCase();$(\'#active-profile\').textContent=d.active?friendly(d.active):\'No profile selected\';$(\'#active-state\').textContent=d.running?(d.active?device(d.active).name+\' • Running\':\'Running\'):\'Stopped\';root.replaceChildren();const groups=[{key:\'earpods\',name:\'Apple EarPods\',icon:\'♫\'},{key:\'cmf\',name:\'CMF Buds Pro 2\',icon:\'●\'},{key:\'cloud3\',name:\'HyperX Cloud III\',icon:\'🎧\'}];for(const g of groups){const names=d.profiles.filter(p=>device(p).key===g.key&&[p,friendly(p),g.name].join(\' \').toLowerCase().includes(q));if(!names.length)continue;const wrap=document.createElement(\'div\');wrap.className=\'device-group\';wrap.innerHTML=\'<div class="device-head"><span class="device-icon"></span><span></span></div><div class="list"></div>\';wrap.querySelector(\'.device-icon\').textContent=g.icon;wrap.querySelector(\'.device-head span:last-child\').textContent=g.name;const list=wrap.querySelector(\'.list\');for(const p of names){const b=document.createElement(\'button\');b.className=\'item\'+(d.running&&p===d.active?\' active\':\'\');b.innerHTML=\'<span class="name"></span><span class="meta"></span>\';b.querySelector(\'.name\').textContent=friendly(p);b.querySelector(\'.meta\').textContent=g.name;b.onclick=()=>press(b,async()=>{await post(\'/api/select\',{profile:p});await loadProfiles();stat(\'Profile activated\')},\'Switching…\');list.append(b)}root.append(wrap)}}\nasync function loadLists(){const d=await api(\'/api/playlists\'),l=$(\'#playlists\');l.replaceChildren();d.playlists.forEach(p=>{const r=document.createElement(\'div\');r.className=\'row\';const o=document.createElement(\'button\');o.className=\'item\';o.innerHTML=\'<span class="name"></span><span class="meta"></span>\';o.querySelector(\'.name\').textContent=p.name;o.querySelector(\'.meta\').textContent=p.count+(p.count===1?\' song\':\' songs\');o.onclick=()=>openList(p.name);const a=document.createElement(\'button\');a.className=\'action\';a.textContent=\'Play\';a.onclick=()=>press(a,()=>post(\'/api/play/playlist\',{name:p.name,shuffle:false}),\'Loading…\').then(()=>stat(\'Playing \'+p.name));const s=document.createElement(\'button\');s.className=\'action primary\';s.textContent=\'Shuffle\';s.onclick=()=>press(s,()=>post(\'/api/play/playlist\',{name:p.name,shuffle:true}),\'Mixing…\').then(()=>stat(\'Shuffling \'+p.name));r.append(o,a,s);l.append(r)})}\nfunction render(sel,songs,q,checks=false){const l=$(sel);l.replaceChildren();const found=songs.filter(s=>matches(s,q));if(!found.length){const e=document.createElement(\'div\');e.className=\'card details\';e.textContent=q?\'No matches\':\'Nothing here yet\';l.append(e);return}found.forEach(s=>{if(checks){const x=document.createElement(\'label\');x.className=\'check\';const c=document.createElement(\'input\');c.type=\'checkbox\';c.value=s.path;const t=document.createElement(\'span\');t.innerHTML=\'<span class="name"></span><span class="meta"></span>\';t.querySelector(\'.name\').textContent=s.title;t.querySelector(\'.meta\').textContent=s.relative;x.append(c,t);l.append(x)}else{const b=document.createElement(\'button\');b.className=\'item\';b.innerHTML=\'<span class="name"></span><span class="meta"></span>\';b.querySelector(\'.name\').textContent=s.title;b.querySelector(\'.meta\').textContent=s.relative;b.onclick=()=>press(b,()=>post(\'/api/play/song\',{path:s.path}),\'Playing…\').then(()=>stat(\'Playing \'+s.title));l.append(b)}})}\nasync function openSongs(){all=(await api(\'/api/songs\')).songs;show(\'songs\');render(\'#song-list\',all,$(\'#song-search\').value)}async function openList(n){current=n;inside=(await api(\'/api/playlist?name=\'+encodeURIComponent(n))).songs;$(\'#playlist-title\').textContent=n;show(\'playlist\');render(\'#playlist-songs\',inside,$(\'#playlist-search\').value)}async function openAdd(){const existing=new Set(inside.map(x=>x.path));all=(await api(\'/api/songs\')).songs.filter(s=>!existing.has(s.path));show(\'add\');render(\'#add-list\',all,$(\'#add-search\').value,true)}\nasync function poll(){if($(\'#pc\').classList.contains(\'hidden\'))return;try{const d=await api(\'/api/player\'),seek=$(\'#seek\'),vol=$(\'#volume\'),shape=$(\'#play-shape\');$(\'#now-title\').textContent=d.title||\'Nothing playing\';$(\'#now-details\').textContent=d.path;seek.max=d.duration||0;if(document.activeElement!==seek)seek.value=d.currentTime||0;seek.style.setProperty(\'--fill\',(d.duration?d.currentTime/d.duration*100:0)+\'%\');$(\'#elapsed\').textContent=fmt(d.currentTime);$(\'#duration\').textContent=fmt(d.duration);if(document.activeElement!==vol)vol.value=d.volume;vol.style.setProperty(\'--fill\',(d.volume||0)+\'%\');$(\'#repeat\').textContent=\'Repeat \'+({off:\'Off\',all:\'All\',one:\'1\'}[d.repeat]||\'Off\');$(\'#repeat\').classList.toggle(\'active\',d.repeat!==\'off\');shape.setAttribute(\'d\',d.playing?\'M8 5h3v14H8z M14 5h3v14h-3z\':\'M8 5.5 19 12 8 18.5z\')}catch(e){stat(e.message,true)}}\n$(\'#mode-system\').onclick=()=>chooseMode(\'system\',$(\'#mode-system\'));$(\'#mode-airplay\').onclick=()=>chooseMode(\'airplay\',$(\'#mode-airplay\'));$(\'#open-pc\').onclick=()=>press($(\'#open-pc\'),async()=>{await post(\'/api/mode/pc\');show(\'pc\');await loadLists();await poll()},\'Opening…\');$(\'#pc-back\').onclick=()=>show(\'profiles\');$(\'#all-songs\').onclick=openSongs;$(\'#profile-search\').oninput=loadProfiles;$(\'#song-search\').oninput=()=>render(\'#song-list\',all,$(\'#song-search\').value);$(\'#playlist-search\').oninput=()=>render(\'#playlist-songs\',inside,$(\'#playlist-search\').value);$(\'#add-search\').oninput=()=>render(\'#add-list\',all,$(\'#add-search\').value,true);document.querySelectorAll(\'[data-back]\').forEach(b=>b.onclick=()=>show(b.dataset.back));$(\'#add-back\').onclick=()=>show(\'playlist\');$(\'#add-selected\').onclick=()=>press($(\'#add-selected\'),async()=>{const paths=[...document.querySelectorAll(\'#add-list input:checked\')].map(x=>x.value);if(!paths.length)throw Error(\'Select at least one song\');await post(\'/api/playlist/add\',{name:current,paths});await openList(current);stat(\'Songs added\')},\'Adding…\');$(\'#new-playlist\').onclick=async()=>{const name=prompt(\'New playlist name\');if(name)try{await post(\'/api/playlist/create\',{name});await loadLists();stat(\'Playlist created\')}catch(e){stat(e.message,true)}};\ndocument.querySelectorAll(\'[data-cmd]\').forEach(b=>b.onclick=()=>press(b,()=>post(\'/api/player/command\',{command:b.dataset.cmd}),\'…\').then(poll));$(\'#seek\').oninput=()=>{$(\'#seek\').style.setProperty(\'--fill\',($(\'#seek\').max?$(\'#seek\').value/$(\'#seek\').max*100:0)+\'%\');$(\'#elapsed\').textContent=fmt(Number($(\'#seek\').value))};$(\'#seek\').onchange=()=>post(\'/api/player/seek\',{seconds:Number($(\'#seek\').value)});let vt=null;$(\'#volume\').oninput=()=>{const v=Number($(\'#volume\').value);$(\'#volume\').style.setProperty(\'--fill\',v+\'%\');clearTimeout(vt);vt=setTimeout(()=>post(\'/api/player/volume\',{volume:v}).catch(e=>stat(e.message,true)),75)};$(\'#repeat\').onclick=async()=>{const d=await api(\'/api/player\');await post(\'/api/player/repeat\',{mode:{off:\'all\',all:\'one\',one:\'off\'}[d.repeat]||\'off\'});poll()};$(\'#queue-shuffle\').onclick=()=>press($(\'#queue-shuffle\'),()=>post(\'/api/player/command\',{command:\'shuffle\'}),\'Shuffling…\').then(()=>stat(\'Queue shuffled\'));$(\'#return-airplay\').onclick=()=>press($(\'#return-airplay\'),()=>post(\'/api/mode/airplay\'),\'Switching…\').then(()=>{show(\'profiles\');stat(\'AirPlay restored\')});$(\'#restart-camilla\').onclick=()=>press($(\'#restart-camilla\'),async()=>{await post(\'/api/restart-camilladsp\');await loadProfiles();stat(\'CamillaDSP restarted\')},\'Restarting…\');$(\'#restart-sonobus\').onclick=()=>press($(\'#restart-sonobus\'),()=>post(\'/api/restart-sonobus\'),\'Restarting…\').then(()=>stat(\'SonoBus restarted\'));$(\'#restart-airplay\').onclick=()=>press($(\'#restart-airplay\'),()=>post(\'/api/restart-airplay\'),\'Restarting…\').then(()=>stat(\'AirPlay restarted\'));$(\'#restart-vnc\').onclick=()=>press($(\'#restart-vnc\'),()=>post(\'/api/restart-vnc\'),\'Restarting…\').then(()=>stat(\'VNC restarted\'));const systemMedia=(id,command)=>{$(\'#\'+id).onclick=()=>press($(\'#\'+id),()=>post(\'/api/system-media\',{command}),\'…\').then(()=>stat(\'System media command sent\'))};systemMedia(\'system-previous\',\'previous\');systemMedia(\'system-toggle\',\'toggle\');systemMedia(\'system-next\',\'next\');$(\'#system-seek\').oninput=()=>{$(\'#system-seek\').style.setProperty(\'--fill\',($(\'#system-seek\').max?$(\'#system-seek\').value/$(\'#system-seek\').max*100:0)+\'%\');$(\'#system-elapsed\').textContent=fmt(Number($(\'#system-seek\').value))};$(\'#system-seek\').onchange=()=>post(\'/api/system-media/seek\',{seconds:Number($(\'#system-seek\').value)}).then(pollSystemMedia).catch(e=>stat(e.message,true));let systemVolumeTimer=null;$(\'#system-volume\').oninput=()=>{const value=Number($(\'#system-volume\').value);$(\'#system-volume\').style.setProperty(\'--fill\',value+\'%\');clearTimeout(systemVolumeTimer);systemVolumeTimer=setTimeout(()=>post(\'/api/system-volume\',{volume:value}).catch(e=>stat(e.message,true)),75)};Promise.all([loadProfiles(),loadMode(),pollSystemMedia()]).catch(e=>stat(e.message,true));setInterval(poll,1000);setInterval(pollSystemMedia,1000);\n</script></body></html>'
+PAGE='<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>CamillaDSP Studio</title><style>\n:root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display",sans-serif;--v:#865dff;--b:#3f8eff;--g:#35d6a0}*{box-sizing:border-box}body{margin:0;min-height:100svh;padding:22px 16px 36px;color:#fff;background:radial-gradient(900px 520px at 50% -150px,#6542a8,#211a38 44%,#070910);background-attachment:fixed}main{max-width:540px;margin:auto}.hidden{display:none!important}.hero,.card{border:1px solid #ffffff22;background:linear-gradient(145deg,#ffffff1c,#ffffff0d);box-shadow:inset 0 1px #ffffff22,0 20px 50px #0005;backdrop-filter:blur(22px)}.hero{padding:25px 22px;border-radius:29px}.card{padding:18px;border-radius:24px;margin:14px 0}.eyebrow,.label,.section-title{color:#bcb7cb;text-transform:uppercase;letter-spacing:.1em;font-size:12px;font-weight:800}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--g);box-shadow:0 0 15px var(--g);margin-right:8px}h1{margin:10px 0 5px;font-size:32px;letter-spacing:-.04em}.subtitle,.details,.meta{color:#b9b4c5;font-size:13px}.section-title{margin:27px 3px 10px}.title{font-size:20px;font-weight:800;margin-top:6px;overflow-wrap:anywhere}.grid{display:grid;gap:10px}.two{grid-template-columns:1fr 1fr}.three{grid-template-columns:1fr 1.2fr 1fr}.wide{grid-column:1/-1}button,input{font:inherit}button{border:0;color:#fff;cursor:pointer}.action,.item,.transport,.back{width:100%;transition:transform .12s,filter .15s}.action:active,.item:active,.transport:active,.back:active{transform:scale(.96);filter:brightness(1.15)}.action{min-height:54px;border-radius:18px;background:#ffffff1b;font-weight:780}.primary{background:linear-gradient(135deg,var(--b),var(--v))}.green{background:linear-gradient(135deg,#24ae7c,#287d95)}.danger{background:linear-gradient(135deg,#e64e74,#8e2b4b)}.active{outline:2px solid #a783ff;background:linear-gradient(135deg,#4e82ff66,#8552ff77)!important}.search{width:100%;min-height:49px;border:1px solid #ffffff22;border-radius:17px;padding:12px 15px;color:#fff;background:#ffffff12;outline:0}.search:focus{border-color:#9b7aff;box-shadow:0 0 0 4px #825dff2e}.list{display:grid;gap:10px;margin-top:10px}.item{text-align:left;min-height:64px;padding:13px 15px;border-radius:19px;background:#ffffff16}.name{display:block;font-weight:780}.meta{display:block;margin-top:4px}.row{display:grid;grid-template-columns:minmax(0,1fr) 72px 72px;gap:8px}.header{display:grid;grid-template-columns:72px 1fr 72px;align-items:center}.header h1{text-align:center;font-size:23px}.back{min-height:43px;border-radius:15px;background:#ffffff18}.range{--fill:0%;width:100%;height:36px;background:transparent;appearance:none}.range::-webkit-slider-runnable-track{height:6px;border-radius:99px;background:linear-gradient(to right,#fff var(--fill),#ffffff2d var(--fill))}.range::-webkit-slider-thumb{appearance:none;width:21px;height:21px;margin-top:-7.5px;border-radius:50%;background:#fff;box-shadow:0 3px 10px #0008}.times{display:flex;justify-content:space-between;color:#aaa5b5;font-size:12px}.range-row{display:grid;grid-template-columns:24px 1fr 24px;align-items:center;gap:7px}.transport{display:grid;place-items:center;min-height:78px;border-radius:999px;background:#ffffff19}.transport.main{min-height:98px;background:linear-gradient(145deg,#9e68ff,#583ad2)}.media-icon{display:block;width:34px;height:34px;fill:none;stroke:#fff;stroke-width:2.15;stroke-linecap:round;stroke-linejoin:round;pointer-events:none}.transport.main .media-icon{width:42px;height:42px}.icon-fill{fill:#fff;stroke:#fff}.range{touch-action:none}.range.dragging::-webkit-slider-thumb{transform:scale(1.08)}.source-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}.status{position:sticky;bottom:12px;margin-top:14px;text-align:center}.status:not(:empty){padding:11px;border-radius:16px;background:#121322ee}.error{background:#711c34ee!important}\n\n/* Final interaction and consistency pass */\nbutton{position:relative;overflow:hidden;-webkit-user-select:none;user-select:none;touch-action:manipulation}\nbutton:focus-visible,.search:focus-visible,.range:focus-visible{outline:2px solid #b79cff;outline-offset:3px}\nbutton:disabled{opacity:.58;cursor:default}\n.action,.item,.transport,.back{will-change:transform}\n.action.busy::after,.item.busy::after{content:"";position:absolute;inset:0;background:linear-gradient(105deg,transparent 25%,#ffffff2e 50%,transparent 75%);animation:ui-shine .8s linear infinite}\n@keyframes ui-shine{from{transform:translateX(-100%)}to{transform:translateX(100%)}}\n.transport{transition:transform .12s ease,filter .15s ease,box-shadow .2s ease}\n.transport.main.playing{box-shadow:0 18px 42px #6b45dd77,inset 0 1px #ffffff35}\n.media-icon{transition:transform .16s ease}.transport:active .media-icon{transform:scale(.9)}\n.range{cursor:pointer}.range.dragging::-webkit-slider-thumb{transform:scale(1.1)}\n.range::-webkit-slider-runnable-track{transition:background .08s linear}\n.mode-active{outline:2px solid #72e5bc;background:linear-gradient(135deg,#24ae7c,#287d95)!important}\n#repeat.active,#shuffle.active{outline:2px solid #a783ff;background:linear-gradient(135deg,#4e82ff66,#8552ff77)!important}\n.status{pointer-events:none}\n@media (prefers-reduced-motion:reduce){*{animation-duration:.001ms!important;transition-duration:.001ms!important;scroll-behavior:auto!important}}\n</style></head><body><main>\n<section id="profiles"><div class="hero"><div class="eyebrow"><span class="dot"></span>Audio engine online</div><h1>CamillaDSP Studio</h1><div class="subtitle">System audio, AirPlay and PC Music through CamillaDSP and SonoBus.</div></div><div class="section-title">Audio source</div><div class="card"><div id="source-title" class="title">Loading…</div><div id="source-details" class="details"></div><div class="source-grid"><button id="mode-system" class="action">Linux System Audio</button><button id="mode-airplay" class="action">iPad AirPlay</button></div></div><button id="open-pc" class="action green">Open PC Music Library</button><div class="section-title">Active profile</div><div class="card"><div id="active-profile" class="title">Loading…</div><div id="active-state" class="details"></div></div><div class="grid two"><button id="restart-camilla" class="action">Restart CamillaDSP</button><button id="restart-sonobus" class="action">Restart SonoBus</button><button id="restart-airplay" class="action">Restart AirPlay</button><button id="restart-vnc" class="action">Restart VNC</button></div><div class="section-title">System media</div><div class="card"><div class="label">Active desktop player</div><div id="system-title" class="title">No system media</div><div id="system-details" class="details"></div><input id="system-seek" class="range" type="range" min="0" max="1" step=".1"><div class="times"><span id="system-elapsed">0:00</span><span id="system-duration">0:00</span></div><div class="range-row"><span>🔈</span><input id="system-volume" class="range" type="range" min="0" max="100" value="100"><span>🔊</span></div><div class="grid three"><button id="system-previous" class="transport" aria-label="Previous"><svg class="media-icon" viewBox="0 0 24 24"><path d="M6 5v14"></path><path d="M18 6.5 8.5 12 18 17.5z"></path></svg></button><button id="system-toggle" class="transport main" aria-label="Play"><svg class="media-icon" viewBox="0 0 24 24"><path id="system-play-shape" class="icon-fill" d="M8 5.5 19 12 8 18.5z"></path></svg></button><button id="system-next" class="transport" aria-label="Next"><svg class="media-icon" viewBox="0 0 24 24"><path d="M18 5v14"></path><path d="M6 6.5 15.5 12 6 17.5z"></path></svg></button></div></div><div class="section-title">Listening profiles</div><input id="profile-search" class="search" placeholder="Search profiles"><div id="profile-list"></div></section>\n<section id="pc" class="hidden"><div class="header"><button id="pc-back" class="back">Back</button><h1>PC Music</h1><div></div></div><div class="card"><div class="label">Now playing</div><div id="now-title" class="title">Nothing playing</div><div id="now-details" class="details"></div><input id="seek" class="range" type="range" min="0" max="1" step=".1"><div class="times"><span id="elapsed">0:00</span><span id="duration">0:00</span></div><div class="range-row"><span>🔈</span><input id="volume" class="range" type="range" min="0" max="100" value="100"><span>🔊</span></div><div class="grid two"><button id="repeat" class="action">Repeat Off</button><button id="shuffle" class="action">Shuffle Queue</button></div></div><div class="grid three"><button data-cmd="previous" class="transport" aria-label="Previous"><svg class="media-icon" viewBox="0 0 24 24"><path d="M6 5v14"></path><path d="M18 6.5 8.5 12 18 17.5z"></path></svg></button><button data-cmd="toggle" class="transport main" aria-label="Play"><svg class="media-icon" viewBox="0 0 24 24"><path id="local-play-shape" class="icon-fill" d="M8 5.5 19 12 8 18.5z"></path></svg></button><button data-cmd="next" class="transport" aria-label="Next"><svg class="media-icon" viewBox="0 0 24 24"><path d="M18 5v14"></path><path d="M6 6.5 15.5 12 6 17.5z"></path></svg></button></div><div class="grid two"><button id="all-songs" class="action primary">All Songs</button><button id="new-playlist" class="action green">New Playlist</button></div><div class="section-title">Playlists</div><div id="playlists" class="list"></div></section>\n<section id="songs" class="hidden"><div class="header"><button data-back="pc" class="back">Back</button><h1>All Songs</h1><div></div></div><input id="song-search" class="search" placeholder="Search all songs"><div id="song-list" class="list"></div></section>\n<section id="playlist" class="hidden"><div class="header"><button data-back="pc" class="back">Back</button><h1 id="playlist-title">Playlist</h1><div></div></div><input id="playlist-search" class="search" placeholder="Search this playlist"><div id="playlist-songs" class="list"></div></section><div id="status" class="status"></div>\n</main><script>const $=selector=>document.querySelector(selector);\nconst screens=[\'profiles\',\'pc\',\'songs\',\'playlist\'].map(id=>$(\'#\'+id));\nlet all=[],inside=[],current=\'\',statusTimer=null;\n\nconst state={\n  system:{kind:\'system\',slider:$(\'#system-seek\'),elapsed:$(\'#system-elapsed\'),durationLabel:$(\'#system-duration\'),volume:$(\'#system-volume\'),position:0,duration:0,playing:false,stamp:performance.now(),dragging:false,pending:null,pendingStamp:0,key:\'\',polling:false,volumeHold:0,volumeTimer:null,volumePending:null},\n  local:{kind:\'local\',slider:$(\'#seek\'),elapsed:$(\'#elapsed\'),durationLabel:$(\'#duration\'),volume:$(\'#volume\'),position:0,duration:0,playing:false,stamp:performance.now(),dragging:false,pending:null,pendingStamp:0,key:\'\',polling:false,volumeHold:0,volumeTimer:null,volumePending:null}\n};\n\nconst fmt=value=>{const v=Math.max(0,Number(value)||0);return Math.floor(v/60)+\':\'+String(Math.floor(v)%60).padStart(2,\'0\')};\nfunction show(id){screens.forEach(screen=>screen.classList.toggle(\'hidden\',screen.id!==id));scrollTo({top:0,behavior:\'smooth\'})}\nfunction note(message,error=false){const box=$(\'#status\');box.textContent=message;box.classList.toggle(\'error\',error);clearTimeout(statusTimer);if(message)statusTimer=setTimeout(()=>{if(box.textContent===message)box.textContent=\'\'},3200)}\nasync function api(url,options={}){const response=await fetch(url,{cache:\'no-store\',...options});const data=await response.json().catch(()=>({ok:false,error:\'Invalid server response\'}));if(!response.ok||data.ok===false)throw Error(data.error||\'Request failed\');return data}\nconst post=(url,data={})=>api(url,{method:\'POST\',headers:{\'Content-Type\':\'application/json\'},body:JSON.stringify(data)});\nfunction fill(element,value,maximum){const max=Number(maximum),v=Number(value);const percent=Number.isFinite(max)&&max>0&&Number.isFinite(v)?Math.max(0,Math.min(100,v/max*100)):0;element.style.setProperty(\'--fill\',percent+\'%\')}\nfunction predicted(media,now=performance.now()){\n  let base=media.pending!==null?media.pending:media.position;\n  let stamp=media.pending!==null?media.pendingStamp:media.stamp;\n  if(media.playing)base+=(now-stamp)/1000;\n  if(media.duration>0)base=Math.min(media.duration,base);\n  return Math.max(0,base);\n}\nfunction renderTimeline(media,now=performance.now()){\n  const shown=media.dragging?Number(media.slider.value):predicted(media,now);\n  if(!media.dragging)media.slider.value=String(shown);\n  fill(media.slider,shown,media.duration);\n  media.elapsed.textContent=fmt(shown);\n  media.durationLabel.textContent=fmt(media.duration);\n}\nfunction animationFrame(now){renderTimeline(state.system,now);if(!$(\'#pc\').classList.contains(\'hidden\'))renderTimeline(state.local,now);requestAnimationFrame(animationFrame)}\nrequestAnimationFrame(animationFrame);\n\nfunction friendly(name){return name.replace(/\\.ya?ml$/i,\'\').replace(/^\\d+-/,\'\').replace(/^(earpods|cloud3|cmf-buds-pro-2)-/i,\'\').replace(/-/g,\' \').replace(/\\b\\w/g,char=>char.toUpperCase())}\nfunction device(name){const lower=name.toLowerCase();return lower.includes(\'cloud3\')?\'HyperX Cloud III\':lower.includes(\'cmf-buds-pro-2\')?\'CMF Buds Pro 2\':\'Apple EarPods\'}\nasync function busy(button,work,label=\'Working…\'){if(button.disabled)return;const original=button.innerHTML;button.disabled=true;button.classList.add(\'busy\');button.textContent=label;try{return await work()}finally{button.disabled=false;button.classList.remove(\'busy\');button.innerHTML=original}}\nfunction setPlayIcon(shape,button,playing){shape.setAttribute(\'d\',playing?\'M8 5h3v14H8z M14 5h3v14h-3z\':\'M8 5.5 19 12 8 18.5z\');button.setAttribute(\'aria-label\',playing?\'Pause\':\'Play\');button.classList.toggle(\'playing\',playing)}\n\nasync function loadMode(){const data=await api(\'/api/mode\');const system=data.mode===\'system\';$(\'#source-title\').textContent=system?\'Linux System Audio\':\'iPad AirPlay\';$(\'#source-details\').textContent=system?\'Desktop apps, browsers and PC Music feed CamillaDSP, then SonoBus.\':\'The iPad feeds Shairport Sync, then CamillaDSP and SonoBus.\';$(\'#mode-system\').classList.toggle(\'mode-active\',system);$(\'#mode-airplay\').classList.toggle(\'mode-active\',!system)}\nasync function loadProfiles(){const data=await api(\'/api/profiles\'),query=$(\'#profile-search\').value.toLowerCase(),root=$(\'#profile-list\');$(\'#active-profile\').textContent=data.active?friendly(data.active):\'No profile\';$(\'#active-state\').textContent=data.running?\'Running\':\'Stopped\';root.replaceChildren();for(const group of [\'Apple EarPods\',\'CMF Buds Pro 2\',\'HyperX Cloud III\']){const matches=data.profiles.filter(profile=>device(profile)===group&&friendly(profile).toLowerCase().includes(query));if(!matches.length)continue;const heading=document.createElement(\'div\');heading.className=\'section-title\';heading.textContent=group;root.append(heading);const list=document.createElement(\'div\');list.className=\'list\';for(const profile of matches){const button=document.createElement(\'button\');button.className=\'item\'+(profile===data.active&&data.running?\' active\':\'\');button.innerHTML=\'<span class="name"></span><span class="meta"></span>\';button.children[0].textContent=friendly(profile);button.children[1].textContent=group;button.onclick=async()=>{try{await busy(button,()=>post(\'/api/select\',{profile}),\'Switching…\');await loadProfiles();note(\'Profile activated\')}catch(error){note(error.message,true)}};list.append(button)}root.append(list)}}\n\nfunction acceptTimeline(media,serverPosition,duration,playing,key){const now=performance.now();const pos=Number.isFinite(serverPosition)?Math.max(0,serverPosition):null;if(Number.isFinite(duration)&&duration>0){media.duration=duration;media.slider.max=String(duration)}\n  if(key&&media.key&&key!==media.key){media.pending=null;media.position=pos??0;media.stamp=now}\n  media.key=key||media.key;media.playing=Boolean(playing);\n  if(media.pending!==null){const expected=predicted(media,now);const confirmed=pos!==null&&Math.abs(pos-expected)<=2.25;if(confirmed){media.pending=null;media.position=pos;media.stamp=now}}\n  else if(pos!==null&&!media.dragging){media.position=pos;media.stamp=now}\n}\n\nasync function pollSystem(){const media=state.system;if(media.polling)return;media.polling=true;try{const data=await api(\'/api/system-media\');$(\'#system-title\').textContent=data.title||\'No system media\';$(\'#system-details\').textContent=[data.artist,data.player,data.status].filter(Boolean).join(\' • \');acceptTimeline(media,data.position,data.duration,data.playing,[data.player,data.title,data.duration].join(\'|\'));if(media.volumePending!==null&&Number.isFinite(data.volume)&&Math.abs(data.volume-media.volumePending)<=1){media.volumePending=null}if(media.volumePending===null&&performance.now()>=media.volumeHold&&document.activeElement!==media.volume&&Number.isFinite(data.volume)){media.volume.value=String(data.volume);fill(media.volume,data.volume,100)}setPlayIcon($(\'#system-play-shape\'),$(\'#system-toggle\'),data.playing)}catch(error){note(error.message,true)}finally{media.polling=false}}\nasync function pollLocal(){const media=state.local;if(media.polling)return;media.polling=true;try{if(!$(\'#pc\').classList.contains(\'hidden\')){const data=await api(\'/api/player\');$(\'#now-title\').textContent=data.title||\'Nothing playing\';$(\'#now-details\').textContent=data.path||\'\';acceptTimeline(media,data.currentTime,data.duration,data.playing,[data.path,data.duration].join(\'|\'));if(media.volumePending!==null&&Number.isFinite(data.volume)&&Math.abs(data.volume-media.volumePending)<=1){media.volumePending=null}if(media.volumePending===null&&performance.now()>=media.volumeHold&&document.activeElement!==media.volume&&Number.isFinite(data.volume)){media.volume.value=String(data.volume);fill(media.volume,data.volume,100)}$(\'#repeat\').textContent=\'Repeat \'+({off:\'Off\',all:\'All\',one:\'1\'}[data.repeat]||\'Off\');$(\'#repeat\').classList.toggle(\'active\',data.repeat!==\'off\');setPlayIcon($(\'#local-play-shape\'),document.querySelector(\'[data-cmd="toggle"]\'),data.playing)}}catch(error){note(error.message,true)}finally{media.polling=false}}\n\nfunction bindSeek(media,url){const slider=media.slider;const begin=()=>{media.dragging=true;slider.classList.add(\'dragging\')};const end=()=>{media.dragging=false;slider.classList.remove(\'dragging\')};slider.addEventListener(\'pointerdown\',begin);slider.addEventListener(\'pointerup\',end);slider.addEventListener(\'pointercancel\',end);slider.addEventListener(\'touchstart\',begin,{passive:true});slider.addEventListener(\'touchend\',end,{passive:true});slider.oninput=()=>{media.dragging=true;fill(slider,Number(slider.value),media.duration);media.elapsed.textContent=fmt(Number(slider.value))};slider.onchange=async()=>{const target=Math.max(0,Number(slider.value)||0);end();media.pending=target;media.pendingStamp=performance.now();media.position=target;media.stamp=media.pendingStamp;renderTimeline(media);try{await post(url,{seconds:target})}catch(error){media.pending=null;note(error.message,true)}}}\nfunction bindVolume(media,url){const control=media.volume;const send=()=>{const value=Math.max(0,Math.min(100,Number(control.value)||0));media.volumeHold=performance.now()+1000;media.volumePending=value;post(url,{volume:value}).catch(error=>note(error.message,true))};control.oninput=()=>{const value=Number(control.value);media.volumeHold=performance.now()+1000;media.volumePending=value;fill(control,value,100);clearTimeout(media.volumeTimer);media.volumeTimer=setTimeout(send,90)};control.onchange=()=>{clearTimeout(media.volumeTimer);send()}}\n\nfunction render(sel,data,query){const list=$(sel);list.replaceChildren();const filtered=data.filter(song=>!query||[song.title,song.relative].join(\' \').toLowerCase().includes(query.toLowerCase()));if(!filtered.length){const empty=document.createElement(\'div\');empty.className=\'card details\';empty.textContent=query?\'No matches\':\'Nothing here yet\';list.append(empty);return}for(const song of filtered){const button=document.createElement(\'button\');button.className=\'item\';button.innerHTML=\'<span class="name"></span><span class="meta"></span>\';button.children[0].textContent=song.title;button.children[1].textContent=song.relative;button.onclick=async()=>{try{await busy(button,()=>post(\'/api/play/song\',{path:song.path}),\'Playing…\');note(\'Playing \'+song.title)}catch(error){note(error.message,true)}};list.append(button)}}\nasync function loadLists(){const data=await api(\'/api/playlists\'),list=$(\'#playlists\');list.replaceChildren();for(const playlist of data.playlists){const row=document.createElement(\'div\');row.className=\'row\';const open=document.createElement(\'button\');open.className=\'item\';open.innerHTML=\'<span class="name"></span><span class="meta"></span>\';open.children[0].textContent=playlist.name;open.children[1].textContent=playlist.count+(playlist.count===1?\' song\':\' songs\');open.onclick=async()=>{current=playlist.name;inside=(await api(\'/api/playlist?name=\'+encodeURIComponent(playlist.name))).songs;$(\'#playlist-title\').textContent=playlist.name;show(\'playlist\');render(\'#playlist-songs\',inside,\'\')};const play=document.createElement(\'button\');play.className=\'action\';play.textContent=\'Play\';play.onclick=()=>busy(play,()=>post(\'/api/play/playlist\',{name:playlist.name,shuffle:false}),\'Loading…\').catch(error=>note(error.message,true));const shuffle=document.createElement(\'button\');shuffle.className=\'action primary\';shuffle.textContent=\'Shuffle\';shuffle.onclick=()=>busy(shuffle,()=>post(\'/api/play/playlist\',{name:playlist.name,shuffle:true}),\'Mixing…\').catch(error=>note(error.message,true));row.append(open,play,shuffle);list.append(row)}}\n\n$(\'#mode-system\').onclick=async()=>{try{await busy($(\'#mode-system\'),()=>post(\'/api/mode/system\'),\'Switching…\');await loadMode()}catch(error){note(error.message,true)}};\n$(\'#mode-airplay\').onclick=async()=>{try{await busy($(\'#mode-airplay\'),()=>post(\'/api/mode/airplay\'),\'Switching…\');await loadMode()}catch(error){note(error.message,true)}};\n$(\'#open-pc\').onclick=async()=>{try{await busy($(\'#open-pc\'),()=>post(\'/api/mode/pc\'),\'Opening…\');show(\'pc\');await loadLists();await pollLocal()}catch(error){note(error.message,true)}};\n$(\'#pc-back\').onclick=()=>show(\'profiles\');\n$(\'#all-songs\').onclick=async()=>{try{all=(await api(\'/api/songs\')).songs;show(\'songs\');render(\'#song-list\',all,\'\')}catch(error){note(error.message,true)}};\n$(\'#song-search\').oninput=()=>render(\'#song-list\',all,$(\'#song-search\').value);\n$(\'#playlist-search\').oninput=()=>render(\'#playlist-songs\',inside,$(\'#playlist-search\').value);\ndocument.querySelectorAll(\'[data-back]\').forEach(button=>button.onclick=()=>show(button.dataset.back));\n$(\'#new-playlist\').onclick=async()=>{const name=prompt(\'New playlist name\');if(name)try{await post(\'/api/playlist/create\',{name});await loadLists();note(\'Playlist created\')}catch(error){note(error.message,true)}};\ndocument.querySelectorAll(\'[data-cmd]\').forEach(button=>button.onclick=async()=>{try{await busy(button,()=>post(\'/api/player/command\',{command:button.dataset.cmd}),\'…\');await pollLocal()}catch(error){note(error.message,true)}});\n$(\'#repeat\').onclick=async()=>{try{const data=await api(\'/api/player\');await post(\'/api/player/repeat\',{mode:{off:\'all\',all:\'one\',one:\'off\'}[data.repeat]||\'off\'});await pollLocal()}catch(error){note(error.message,true)}};\n$(\'#shuffle\').onclick=async()=>{try{await busy($(\'#shuffle\'),()=>post(\'/api/player/command\',{command:\'shuffle\'}),\'Shuffling…\');note(\'Queue shuffled\')}catch(error){note(error.message,true)}};\nfor(const [id,command] of [[\'system-previous\',\'previous\'],[\'system-toggle\',\'toggle\'],[\'system-next\',\'next\']])$(\'#\'+id).onclick=async()=>{try{await busy($(\'#\'+id),()=>post(\'/api/system-media\',{command}),\'…\');await pollSystem()}catch(error){note(error.message,true)}};\n$(\'#restart-camilla\').onclick=()=>busy($(\'#restart-camilla\'),()=>post(\'/api/restart-camilladsp\'),\'Restarting…\').then(loadProfiles).catch(error=>note(error.message,true));\n$(\'#restart-sonobus\').onclick=()=>busy($(\'#restart-sonobus\'),()=>post(\'/api/restart-sonobus\'),\'Restarting…\').catch(error=>note(error.message,true));\n$(\'#restart-airplay\').onclick=()=>busy($(\'#restart-airplay\'),()=>post(\'/api/restart-airplay\'),\'Restarting…\').catch(error=>note(error.message,true));\n$(\'#restart-vnc\').onclick=()=>busy($(\'#restart-vnc\'),()=>post(\'/api/restart-vnc\'),\'Restarting…\').catch(error=>note(error.message,true));\n$(\'#profile-search\').oninput=loadProfiles;\nbindSeek(state.local,\'/api/player/seek\');bindSeek(state.system,\'/api/system-media/seek\');bindVolume(state.local,\'/api/player/volume\');bindVolume(state.system,\'/api/system-volume\');\nPromise.all([loadProfiles(),loadMode(),pollSystem()]).catch(error=>note(error.message,true));pollLocal();setInterval(pollSystem,700);setInterval(pollLocal,700);\n</script></body></html>'
 
 class H(BaseHTTPRequestHandler):
     def data(self,n,t,b):self.send_response(n);self.send_header('Content-Type',t);self.send_header('Content-Length',str(len(b)));self.send_header('Cache-Control','no-store');self.end_headers();self.wfile.write(b)
-    def out(self,n,d):self.data(n,'application/json; charset=utf-8',json.dumps(d,ensure_ascii=False,separators=(',',':')).encode())
+    def out(self,n,d):self.data(n,'application/json; charset=utf-8',json.dumps(d,separators=(',',':')).encode())
     def body(self):
-        n=int(self.headers.get('Content-Length','0'))
-        if n<0 or n>1048576:raise ValueError('Invalid body size')
-        d=json.loads(self.rfile.read(n)) if n else {}
-        if not isinstance(d,dict):raise ValueError('Body must be an object')
+        n=int(self.headers.get('Content-Length','0'));d=json.loads(self.rfile.read(n)) if n else {}
+        if not isinstance(d,dict):raise ValueError('Body must be object')
         return d
     def do_GET(self):
         u=urlparse(self.path);p=u.path;q=parse_qs(u.query)
@@ -581,7 +283,7 @@ class H(BaseHTTPRequestHandler):
             if p=='/':self.data(200,'text/html; charset=utf-8',PAGE.encode());return
             if p=='/api/profiles':r={'profiles':[x.name for x in profiles()],'active':active(),'running':alive(rpid(CAMPID),'camilladsp')}
             elif p=='/api/mode':r={'mode':audio_mode(),'sonobus':bool(sonopids())}
-            elif p=='/api/system-media':r=system_media_state()
+            elif p=='/api/system-media':r=system_state()
             elif p=='/api/player':r=player_state()
             elif p=='/api/playlists':r={'playlists':lists()}
             elif p=='/api/songs':r={'songs':[sobj(x) for x in files()]}
@@ -597,25 +299,23 @@ class H(BaseHTTPRequestHandler):
             elif p=='/api/restart-camilladsp':r=restart_camilla()
             elif p=='/api/restart-sonobus':r=restart_sonobus()
             elif p=='/api/restart-airplay':airplay(True);r={'restarted':True}
-            elif p=='/api/restart-vnc':r=restart_vnc_service()
+            elif p=='/api/restart-vnc':r=restart_vnc()
             elif p=='/api/system-media':r=system_media(d.get('command'))
-            elif p=='/api/system-media/seek':r=system_media_seek(d.get('seconds'))
+            elif p=='/api/system-media/seek':r=system_seek(d.get('seconds'))
             elif p=='/api/system-volume':r=set_system_volume(d.get('volume'))
-            elif p=='/api/mode/pc':r=enter_pc()
-            elif p=='/api/mode/system':r=set_source_mode('system')
-            elif p=='/api/mode/airplay':r=return_airplay()
+            elif p=='/api/mode/pc':r=set_mode('system');ensure_mpv();r['player']='mpv'
+            elif p=='/api/mode/system':r=set_mode('system')
+            elif p=='/api/mode/airplay':r=set_mode('airplay')
             elif p=='/api/player/command':
-                c=d.get('command'); cmds={'toggle':['cycle','pause'],'next':['playlist-next','force'],'previous':['playlist-prev','force'],'shuffle':['playlist-shuffle']}
-                if c not in cmds:raise ValueError('Invalid command')
-                mpv(cmds[c]);r={'command':c}
-            elif p=='/api/player/seek':v=float(d.get('seconds'));mpv(['set_property','time-pos',v]);r={'seconds':v}
-            elif p=='/api/player/volume':v=float(d.get('volume'));mpv(['set_property','volume',max(0,min(100,v))]);r={'volume':v}
+                c=d.get('command');cmd={'toggle':['cycle','pause'],'next':['playlist-next','force'],'previous':['playlist-prev','force'],'shuffle':['playlist-shuffle']}.get(c)
+                if not cmd:raise ValueError('Invalid command')
+                mpv(cmd);r={'command':c}
+            elif p=='/api/player/seek':v=max(0,float(d.get('seconds')));mpv(['seek',v,'absolute+exact']);r={'seconds':v}
+            elif p=='/api/player/volume':v=max(0,min(100,float(d.get('volume'))));mpv(['set_property','volume',v]);r={'volume':v}
             elif p=='/api/player/repeat':r={'mode':set_repeat(d.get('mode'))}
             elif p=='/api/play/song':x=song(d.get('path'));mpv(['loadfile',str(x),'replace']);r=sobj(x)
             elif p=='/api/play/playlist':r=play_list(d.get('name'),bool(d.get('shuffle')))
             elif p=='/api/playlist/create':r=create_list(d.get('name'))
-            elif p=='/api/playlist/remove':r=remove_list(d.get('name'))
-            elif p=='/api/playlist/add':r=add_to_list(d.get('name'),d.get('paths'))
             else:self.out(404,{'ok':False,'error':'Not found'});return
             self.out(200,{'ok':True,**r})
         except (ValueError,TypeError,KeyError,FileNotFoundError,json.JSONDecodeError) as e:self.out(400,{'ok':False,'error':str(e)})
@@ -623,154 +323,27 @@ class H(BaseHTTPRequestHandler):
     def log_message(self,*a):pass
 class S(ThreadingHTTPServer):allow_reuse_address=True;daemon_threads=True
 
-def reset_previous_runtime():
-    """Stop only the processes owned by this server before replacement."""
-    ensure()
-    stop_mpv()
-    stop_sonobus()
-    stop_camilla()
-
-
-
+def reset_runtime():ensure();stop_mpv();stop_sonobus();stop_camilla()
 def start_runtime():
-    """Start CamillaDSP and SonoBus, then restore the saved source mode."""
-    ensure()
-    alsa100()
-
-    selected_profile = active()
-    if not selected_profile:
-        available_profiles = profiles()
-        if not available_profiles:
-            raise RuntimeError("No CamillaDSP profiles available")
-        selected_profile = available_profiles[0].name
-
-    start_camilla(profile(selected_profile))
-    restart_sonobus()
-    apply_source_mode(audio_mode())
-
-
-def cleanup():
-    # PipeWire and the selected source mode are systemd-managed.
-    # Only stop processes owned directly by this server.
-    stop_mpv()
-    stop_sonobus()
-    stop_camilla()
-
-
+    ensure();alsa100();ps=profiles();name=active() or (ps[0].name if ps else '')
+    if not name:raise RuntimeError('No profiles')
+    start_camilla(profile(name));restart_sonobus();apply_mode(audio_mode())
+def cleanup():stop_mpv();stop_sonobus();stop_camilla()
 def main():
-    ensure()
-
-    current_pid = os.getpid()
-    previous_pid = rpid(SERVERPID)
-
-    if (
-        previous_pid
-        and previous_pid != current_pid
-        and alive(previous_pid)
-    ):
-        try:
-            os.kill(
-                previous_pid,
-                signal.SIGTERM,
-            )
-
-        except OSError:
-            pass
-
-        # Wait for the old process to finish its complete cleanup,
-        # including stop_camilla(), before starting replacements.
-        for _ in range(100):
-            if not alive(previous_pid):
-                break
-
-            time.sleep(0.1)
-
-        if alive(previous_pid):
-            try:
-                os.kill(
-                    previous_pid,
-                    signal.SIGKILL,
-                )
-
-            except OSError:
-                pass
-
-            for _ in range(30):
-                if not alive(previous_pid):
-                    break
-
-                time.sleep(0.1)
-
-        if alive(previous_pid):
-            raise RuntimeError(
-                "Previous webserver did not stop cleanly"
-            )
-
-    SERVERPID.unlink(
-        missing_ok=True
-    )
-
-    # The previous server has fully exited, so its cleanup can
-    # no longer kill processes started below.
-    reset_previous_runtime()
-    start_runtime()
-
-    server = S(
-        (
-            "0.0.0.0",
-            PORT,
-        ),
-        H,
-    )
-
-    SERVERPID.write_text(
-        str(current_pid) + "\n"
-    )
-
-    def shut(*_args):
-        threading.Thread(
-            target=server.shutdown,
-            daemon=True,
-        ).start()
-
-    signal.signal(
-        signal.SIGTERM,
-        shut,
-    )
-
-    signal.signal(
-        signal.SIGHUP,
-        shut,
-    )
-
-    print(
-        "CamillaDSP web remote "
-        f"listening on 0.0.0.0:{PORT}",
-        flush=True,
-    )
-
-    try:
-        server.serve_forever()
-
-    except KeyboardInterrupt:
-        pass
-
+    ensure();me=os.getpid();old=rpid(SERVERPID)
+    if old and old!=me and alive(old):
+        try:os.kill(old,signal.SIGTERM)
+        except OSError:pass
+        deadline=time.monotonic()+10
+        while alive(old) and time.monotonic()<deadline:time.sleep(.05)
+        if alive(old):os.kill(old,signal.SIGKILL)
+    reset_runtime();start_runtime();server=S(('0.0.0.0',PORT),H);SERVERPID.write_text(str(me)+'\n')
+    def shut(*_):threading.Thread(target=server.shutdown,daemon=True).start()
+    signal.signal(signal.SIGTERM,shut);signal.signal(signal.SIGHUP,shut)
+    print(f'CamillaDSP web remote listening on 0.0.0.0:{PORT}',flush=True)
+    try:server.serve_forever()
+    except KeyboardInterrupt:pass
     finally:
-        server.server_close()
-        cleanup()
-
-        try:
-            recorded_pid = rpid(
-                SERVERPID
-            )
-
-            if recorded_pid == current_pid:
-                SERVERPID.unlink(
-                    missing_ok=True
-                )
-
-        except OSError:
-            pass
-
-if __name__ == "__main__":
-    main()
+        server.server_close();cleanup()
+        if rpid(SERVERPID)==me:SERVERPID.unlink(missing_ok=True)
+if __name__=='__main__':main()
