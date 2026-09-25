@@ -1,0 +1,6 @@
+i also want to add these home setups (create a camilladsp config with no filters):
+playing audio from ipad:
+- output ipad
+- output laptop through airplay
+- output on both by airplaying to laptop, then sonobussing back to ipad with relevant input and output such that playback happens on both laptop and ipad. 
+
