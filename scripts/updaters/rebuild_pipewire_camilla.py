@@ -674,6 +674,31 @@ def main():
         print()
     print(f'Rebuilt {len(PROFILES)} sink modules: {PIPEWIRE_NIX}')
 
+
+
+def write_filterless_camilladsp_profile():
+    CAMILLA_ROOT.mkdir(parents=True, exist_ok=True)
+    output_path = CAMILLA_ROOT / "00-filterless.yml"
+    output_path.write_text(f"""---
+title: "Filterless / Speakers"
+description: "Pass-through CamillaDSP profile with no filters"
+devices:
+  samplerate: {SAMPLE_RATE}
+  chunksize: 1024
+  capture:
+    type: Alsa
+    channels: 2
+    device: "hw:Loopback,1,0"
+    format: S32_LE
+  playback:
+    type: Alsa
+    channels: 2
+    device: "{CAMILLA_PLAYBACK_DEVICE}"
+    format: {CAMILLA_PLAYBACK_FORMAT}
+pipeline: []
+""", encoding="utf-8")
+    return output_path
+
 def write_camilladsp_profiles(report):
     CAMILLA_ROOT.mkdir(
         parents=True,
@@ -798,7 +823,8 @@ def write_camilladsp_profiles(report):
         expected_paths
     )
 
-    return sorted(expected_paths)
+    filterless_path = write_filterless_camilladsp_profile()
+    return sorted(expected_paths | {filterless_path})
 
 def verify_camilladsp_profiles(paths):
     cloud3_profiles = [

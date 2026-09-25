@@ -12,6 +12,21 @@ CAMPID=STATE/'camilladsp.pid'; ACTIVE=STATE/'active-profile'; SERVERPID=STATE/'w
 MPVPID=STATE/'mpv.pid'; MPVSOCK=STATE/'mpv.sock'; MPVLOG=STATE/'mpv.log'; MPVVOLUME=STATE/'mpv-volume'; MODE=STATE/'mode'
 LOCK=threading.RLock(); PLAYERLOCK=threading.RLock(); MPRISLOCK=threading.RLock(); LAST_MPRIS=None
 SYSTEM_AUDIO_SERVICE='camilladsp-system-audio.service'
+CACHELOCK=threading.RLock()
+CACHE={'profiles':(0.0,[]),'playlists':(0.0,[]),'songs':(0.0,[])}
+
+def cached(name, ttl, loader):
+    now=time.monotonic()
+    with CACHELOCK:
+        stamp,value=CACHE.get(name,(0.0,None))
+        if value is not None and now-stamp < ttl:return value
+    value=loader()
+    with CACHELOCK:CACHE[name]=(now,value)
+    return value
+
+def invalidate_cache(*names):
+    with CACHELOCK:
+        for name in names:CACHE.pop(name,None)
 
 def exe(*names):
     for n in names:
@@ -52,22 +67,16 @@ def user_service(action,name):
 def airplay(start):
     action='restart' if start else 'stop'; r=run(['systemctl',action,'nqptp.service','shairport-sync.service'],False)
     if r.returncode:raise RuntimeError(r.stderr.strip() or 'Could not change AirPlay services')
-def audio_mode():
-    try:m=MODE.read_text().strip()
-    except OSError:m='airplay'
-    return m if m in {'airplay','system'} else 'airplay'
-def apply_mode(mode):
-    if mode=='system':airplay(False);user_service('restart',SYSTEM_AUDIO_SERVICE)
-    elif mode=='airplay':user_service('stop',SYSTEM_AUDIO_SERVICE);stop_mpv();airplay(True)
-    else:raise ValueError('Invalid audio mode')
-    MODE.write_text(mode+'\n');return {'mode':mode,'sonobus':bool(sonopids())}
-def set_mode(mode):
-    with LOCK:
-        if not alive(rpid(CAMPID),'camilladsp'):restart_camilla()
-        return apply_mode(mode)
 def restart_vnc():user_service('restart','camilladsp-wayvnc.service');return {'restarted':True}
 
-def profiles():return sorted([p for pat in ('*.yml','*.yaml') for p in PROFILES.glob(pat) if p.is_file()],key=lambda p:p.name.lower())
+
+def profiles():
+    def load():
+        return sorted(
+            [p for pattern in ('*.yml','*.yaml') for p in PROFILES.glob(pattern) if p.is_file()],
+            key=lambda item:item.name.lower(),
+        )
+    return cached('profiles',5.0,load)
 def profile(name):
     if not isinstance(name,str) or Path(name).name!=name:raise ValueError('Invalid profile')
     p=(PROFILES/name).resolve()
@@ -117,25 +126,7 @@ def stop_sonobus():
     for p in sonopids():
         try:os.kill(p,signal.SIGKILL)
         except OSError:pass
-def configure_sonobus():
-    if not SONOSET.is_file():raise FileNotFoundError(SONOSET)
-    t=SONOSET.read_text(); attrs={'deviceType':'ALSA','audioOutputDeviceName':'SonoBus Silent Output','audioInputDeviceName':'CamillaDSP SonoBus','audioDeviceRate':'96000.0','audioDeviceBufferSize':'512'}
-    for k,v in attrs.items():
-        t,n=re.subn(rf'(<DEVICESETUP\b[^>]*\b{k}=")[^"]*(")',rf'\g<1>{v}\g<2>',t,count=1)
-        if n!=1:raise RuntimeError(f'Could not set SonoBus {k}')
-    t,n=re.subn(r'(<PARAM\s+id="sendchannels"\s+value=")[^"]*("\s*/>)',r'\g<1>2.0\g<2>',t,count=1)
-    if n!=1:raise RuntimeError('Could not set SonoBus sendchannels')
-    tmp=SONOSET.with_suffix('.tmp');tmp.write_text(t);tmp.replace(SONOSET)
-def restart_sonobus():
-    with LOCK:
-        stop_sonobus();alsa100();configure_sonobus();log=(STATE/'sonobus.log').open('ab',buffering=0)
-        try:q=subprocess.Popen([str(SONOBUS),'--group=rt4817-camilladsp','--username=rt4817','--connectionserver=aoo.sonobus.net:10998'],stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
-        finally:log.close()
-        deadline=time.monotonic()+1
-        while time.monotonic()<deadline:
-            if q.poll() is not None:raise RuntimeError('SonoBus failed to start')
-            time.sleep(.05)
-        return {'pid':q.pid}
+
 
 def saved_mpv_volume():
     try:return max(0.0,min(100.0,float(MPVVOLUME.read_text().strip())))
@@ -155,19 +146,35 @@ def ensure_mpv():
         if q.poll() is not None:break
         time.sleep(.05)
     raise RuntimeError('mpv failed to start; check '+str(MPVLOG))
-def mpv(command):
+def mpv_properties(names):
     with PLAYERLOCK:
-        ensure_mpv();data=b''
-        with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as c:
-            c.settimeout(3);c.connect(str(MPVSOCK));c.sendall((json.dumps({'command':command})+'\n').encode())
-            while b'\n' not in data:
-                x=c.recv(65536)
-                if not x:break
-                data+=x
-        if not data:raise RuntimeError('mpv returned no response')
-        r=json.loads(data.splitlines()[0])
-        if r.get('error')!='success':raise RuntimeError(r.get('error','mpv failed'))
-        return r.get('data')
+        for attempt in range(2):
+            try:
+                ensure_mpv()
+                requests=[]
+                pending={}
+                for index,name in enumerate(names,1):
+                    request_id=random.randint(1,2_147_000_000)+index
+                    pending[request_id]=name
+                    requests.append(json.dumps({'command':['get_property',name],'request_id':request_id}))
+                values={}
+                with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as client:
+                    client.settimeout(4);client.connect(str(MPVSOCK));client.sendall(('\n'.join(requests)+'\n').encode())
+                    stream=client.makefile('rb')
+                    while pending:
+                        line=stream.readline()
+                        if not line:break
+                        response=json.loads(line)
+                        request_id=response.get('request_id')
+                        if request_id not in pending:continue
+                        name=pending.pop(request_id)
+                        values[name]=response.get('data') if response.get('error')=='success' else None
+                if pending:raise RuntimeError('mpv state response was incomplete')
+                return values
+            except (OSError,ValueError,RuntimeError):
+                if attempt:raise
+                stop_mpv()
+
 def prop(name,default=None):
     try:
         v=mpv(['get_property',name]);return default if v is None else v
@@ -179,9 +186,25 @@ def repeat_mode():
 def set_repeat(m):
     if m not in ('off','all','one'):raise ValueError('Invalid repeat mode')
     mpv(['set_property','loop-file','inf' if m=='one' else 'no']);mpv(['set_property','loop-playlist','inf' if m=='all' else 'no']);return m
+
 def player_state():
-    p=prop('path','');t=prop('playback-time',None);d=prop('duration',None)
-    return {'available':bool(p),'playing':bool(p) and not bool(prop('pause',True)),'title':prop('media-title','') or (Path(p).stem if p else ''),'path':p or '','currentTime':None if t is None else float(t),'duration':None if d is None else float(d),'volume':float(prop('volume',100) or 0),'repeat':repeat_mode()}
+    try:
+        values=mpv_properties(['path','playback-time','duration','volume','pause','loop-file','loop-playlist','media-title'])
+    except Exception:
+        return {'available':False,'playing':False,'title':'','path':'','currentTime':None,'duration':None,'volume':saved_mpv_volume(),'repeat':'off'}
+    path=values.get('path') or ''
+    loop_file=values.get('loop-file');loop_playlist=values.get('loop-playlist')
+    repeat='one' if loop_file not in ('no',False,None,0) else ('all' if loop_playlist not in ('no',False,None,0) else 'off')
+    def number(value):
+        try:return float(value) if value is not None else None
+        except (TypeError,ValueError):return None
+    return {
+        'available':bool(path),'playing':bool(path) and not bool(values.get('pause',True)),
+        'title':values.get('media-title') or (Path(path).stem if path else ''),'path':path,
+        'currentTime':number(values.get('playback-time')),'duration':number(values.get('duration')),
+        'volume':number(values.get('volume')) if number(values.get('volume')) is not None else saved_mpv_volume(),
+        'repeat':repeat,
+    }
 
 def mpris_players():
     r=run([exe('playerctl'),'--list-all'],False,5,media_env());return [x.strip() for x in r.stdout.splitlines() if x.strip() and x.strip()!='playerctld']
@@ -209,14 +232,19 @@ def set_system_volume(v):
     v=max(0,min(100,float(v)));r=run([exe('pactl'),'set-sink-volume','@DEFAULT_SINK@',f'{v:.2f}%'],False,5,media_env())
     if r.returncode:raise RuntimeError(r.stderr.strip() or 'Could not set system volume')
     return {'volume':v}
+
 def system_state():
-    p=active_mpris();base={'available':False,'player':'','status':'Stopped','playing':False,'title':'No system media','artist':'','position':0.0,'duration':0.0,'seekable':False,'volume':system_volume()}
-    if not p:return base
-    def num(v):
-        try:return float(v or 0)
-        except ValueError:return 0.0
-    pos=num(pctl(p,'position'));dur=num(pctl(p,'metadata','mpris:length'))/1_000_000;status=mpris_status(p) or 'Stopped'
-    base.update(available=True,player=p,status=status,playing=status=='Playing',title=pctl(p,'metadata','xesam:title',default=p),artist=pctl(p,'metadata','xesam:artist'),position=max(0,pos),duration=max(0,dur),seekable=dur>0)
+    player=active_mpris()
+    base={'available':False,'player':'','status':'Stopped','playing':False,'title':'No system media','artist':'','position':0.0,'duration':0.0,'seekable':False,'volume':system_volume()}
+    if not player:return base
+    metadata=pctl(player,'metadata','--format','{{xesam:title}}\n{{xesam:artist}}\n{{mpris:length}}')
+    rows=metadata.splitlines();title=rows[0] if rows else player;artist=rows[1] if len(rows)>1 else ''
+    try:duration=float(rows[2])/1_000_000 if len(rows)>2 and rows[2] else 0.0
+    except ValueError:duration=0.0
+    try:position=float(pctl(player,'position') or 0)
+    except ValueError:position=0.0
+    status=mpris_status(player) or 'Stopped'
+    base.update(available=True,player=player,status=status,playing=status=='Playing',title=title or player,artist=artist,position=max(0,position),duration=max(0,duration),seekable=duration>0)
     return base
 def system_media(command):
     cmd={'previous':'previous','toggle':'play-pause','next':'next'}.get(command)
@@ -247,34 +275,268 @@ def pdir(n):
     p=(MUSIC/pname(n)).resolve()
     if p.parent!=MUSIC.resolve():raise ValueError('Invalid playlist path')
     return p
+
 def files(root=None):
-    root=root or MUSIC;found={}
-    if not root.exists():return []
-    for p in root.rglob('*'):
-        try:
-            if p.is_file() and p.suffix.lower() in EXTS and not p.name.startswith('.'):found[str(p.resolve())]=p
-        except OSError:pass
-    return sorted(found.values(),key=lambda p:(p.stem.casefold(),str(p).casefold()))
+    root=root or MUSIC
+    cache_name='songs' if root==MUSIC else None
+    def load():
+        found={}
+        if not root.exists():return []
+        for item in root.rglob('*'):
+            try:
+                if item.is_file() and item.suffix.lower() in EXTS and not item.name.startswith('.'):
+                    found[str(item.resolve())]=item
+            except OSError:
+                pass
+        return sorted(found.values(),key=lambda item:(item.stem.casefold(),str(item).casefold()))
+    return cached(cache_name,5.0,load) if cache_name else load()
 def sobj(p):
     try:r=str(p.relative_to(MUSIC))
     except ValueError:r=str(p)
     return {'id':str(p.resolve()),'title':p.stem,'path':str(p.resolve()),'relative':r}
-def lists():return [{'name':d.name,'count':len(files(d))} for d in sorted([p for p in MUSIC.iterdir() if p.is_dir() and not p.name.startswith('.')],key=lambda p:p.name.casefold())]
+
+def lists():
+    def load():
+        if not MUSIC.exists():return []
+        directories=sorted(
+            [item for item in MUSIC.iterdir() if item.is_dir() and not item.name.startswith('.')],
+            key=lambda item:item.name.casefold(),
+        )
+        return [{'name':item.name,'count':len(files(item))} for item in directories]
+    return cached('playlists',5.0,load)
 def atomic(path,text):
     t=path.with_name('.'+path.name+'.'+uuid.uuid4().hex);t.write_text(text);os.replace(t,path)
+
 def rebuild(n):
-    d=pdir(n);d.mkdir(parents=True,exist_ok=True);e=[os.path.relpath(str(x.resolve()),MUSIC) for x in files(d)];atomic(MUSIC/f'{n}.m3u','#EXTM3U\n'+'\n'.join(e)+('\n' if e else ''));s=e[:];random.SystemRandom().shuffle(s);atomic(MUSIC/f'{n}-shuffled.m3u','#EXTM3U\n'+'\n'.join(s)+('\n' if s else ''));return {'name':n,'count':len(e)}
+    directory=pdir(n);directory.mkdir(parents=True,exist_ok=True)
+    entries=[os.path.relpath(str(item.resolve()),MUSIC) for item in files(directory)]
+    atomic(MUSIC/f'{n}.m3u','#EXTM3U\n'+'\n'.join(entries)+('\n' if entries else ''))
+    shuffled=entries[:];random.SystemRandom().shuffle(shuffled)
+    atomic(MUSIC/f'{n}-shuffled.m3u','#EXTM3U\n'+'\n'.join(shuffled)+('\n' if shuffled else ''))
+    invalidate_cache('playlists','songs')
+    return {'name':n,'count':len(entries)}
 def create_list(n):
     d=pdir(n);exists=d.exists();d.mkdir(parents=True,exist_ok=True);r=rebuild(n);r.update(created=not exists);return r
 def song(v):
     p=Path(v).resolve()
     if MUSIC.resolve() not in p.parents or not p.is_file() or p.suffix.lower() not in EXTS:raise ValueError('Unsupported song')
     return p
-def play_list(n,shuffle=False):
-    rebuild(n);p=MUSIC/(f'{n}-shuffled.m3u' if shuffle else f'{n}.m3u');mpv(['loadlist',str(p),'replace']);mpv(['set_property','pause',False]);return {'playlist':n,'shuffled':shuffle}
 
-PAGE='<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>CamillaDSP Studio</title><style>\n:root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display",sans-serif;--v:#865dff;--b:#3f8eff;--g:#35d6a0}*{box-sizing:border-box}body{margin:0;min-height:100svh;padding:22px 16px 36px;color:#fff;background:radial-gradient(900px 520px at 50% -150px,#6542a8,#211a38 44%,#070910);background-attachment:fixed}main{max-width:540px;margin:auto}.hidden{display:none!important}.hero,.card{border:1px solid #ffffff22;background:linear-gradient(145deg,#ffffff1c,#ffffff0d);box-shadow:inset 0 1px #ffffff22,0 20px 50px #0005;backdrop-filter:blur(22px)}.hero{padding:25px 22px;border-radius:29px}.card{padding:18px;border-radius:24px;margin:14px 0}.card+.grid{margin-top:14px}.eyebrow,.label,.section-title{color:#bcb7cb;text-transform:uppercase;letter-spacing:.1em;font-size:12px;font-weight:800}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--g);box-shadow:0 0 15px var(--g);margin-right:8px}h1{margin:10px 0 5px;font-size:32px;letter-spacing:-.04em}.subtitle,.details,.meta{color:#b9b4c5;font-size:13px}.section-title{margin:27px 3px 10px}.title{font-size:20px;font-weight:800;margin-top:6px;overflow-wrap:anywhere}.grid{display:grid;gap:10px}.two{grid-template-columns:1fr 1fr}.three{grid-template-columns:1fr 1.2fr 1fr}.pc-transport{margin-bottom:18px}.pc-library-actions{margin-top:18px}.wide{grid-column:1/-1}button,input{font:inherit}button{border:0;color:#fff;cursor:pointer}.action,.item,.transport,.back{width:100%;transition:transform .12s,filter .15s}.action:active,.item:active,.transport:active,.back:active{transform:scale(.96);filter:brightness(1.15)}.action{min-height:54px;border-radius:18px;background:#ffffff1b;font-weight:780}.primary{background:linear-gradient(135deg,var(--b),var(--v))}.green{background:linear-gradient(135deg,#24ae7c,#287d95)}.danger{background:linear-gradient(135deg,#e64e74,#8e2b4b)}.active{outline:2px solid #a783ff;background:linear-gradient(135deg,#4e82ff66,#8552ff77)!important}.search{width:100%;min-height:49px;border:1px solid #ffffff22;border-radius:17px;padding:12px 15px;color:#fff;background:#ffffff12;outline:0}.search:focus{border-color:#9b7aff;box-shadow:0 0 0 4px #825dff2e}.list{display:grid;gap:10px;margin-top:10px}.item{text-align:left;min-height:64px;padding:13px 15px;border-radius:19px;background:#ffffff16}.name{display:block;font-weight:780}.meta{display:block;margin-top:4px}.row{display:grid;grid-template-columns:minmax(0,1fr) 72px 72px;gap:8px}.header{display:grid;grid-template-columns:72px 1fr 72px;align-items:center}.header h1{text-align:center;font-size:23px}.back{min-height:43px;border-radius:15px;background:#ffffff18}.range{--fill:0%;width:100%;height:36px;background:transparent;appearance:none}.range::-webkit-slider-runnable-track{height:6px;border-radius:99px;background:linear-gradient(to right,#fff var(--fill),#ffffff2d var(--fill))}.range::-webkit-slider-thumb{appearance:none;width:21px;height:21px;margin-top:-7.5px;border-radius:50%;background:#fff;box-shadow:0 3px 10px #0008}.times{display:flex;justify-content:space-between;color:#aaa5b5;font-size:12px}.range-row{display:grid;grid-template-columns:24px 1fr 24px;align-items:center;gap:7px}.transport{display:grid;place-items:center;min-height:78px;border-radius:999px;background:#ffffff19}.transport.main{min-height:98px;background:linear-gradient(145deg,#9e68ff,#583ad2)}.media-icon{display:block;width:34px;height:34px;fill:none;stroke:#fff;stroke-width:2.15;stroke-linecap:round;stroke-linejoin:round;pointer-events:none}.transport.main .media-icon{width:42px;height:42px}.icon-fill{fill:#fff;stroke:#fff}.range{touch-action:none}.range.dragging::-webkit-slider-thumb{transform:scale(1.08)}.source-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}.status{position:sticky;bottom:12px;margin-top:14px;text-align:center}.status:not(:empty){padding:11px;border-radius:16px;background:#121322ee}.error{background:#711c34ee!important}\n\n/* Final interaction and consistency pass */\nbutton{position:relative;overflow:hidden;-webkit-user-select:none;user-select:none;touch-action:manipulation}\nbutton:focus-visible,.search:focus-visible,.range:focus-visible{outline:2px solid #b79cff;outline-offset:3px}\nbutton:disabled{opacity:.58;cursor:default}\n.action,.item,.transport,.back{will-change:transform}\n.action.busy::after,.item.busy::after{content:"";position:absolute;inset:0;background:linear-gradient(105deg,transparent 25%,#ffffff2e 50%,transparent 75%);animation:ui-shine .8s linear infinite}\n@keyframes ui-shine{from{transform:translateX(-100%)}to{transform:translateX(100%)}}\n.transport{transition:transform .12s ease,filter .15s ease,box-shadow .2s ease}\n.transport.main.playing{box-shadow:0 18px 42px #6b45dd77,inset 0 1px #ffffff35}\n.media-icon{transition:transform .16s ease}.transport:active .media-icon{transform:scale(.9)}\n.range{cursor:pointer}.range.dragging::-webkit-slider-thumb{transform:scale(1.1)}\n.range::-webkit-slider-runnable-track{transition:background .08s linear}\n.mode-active{outline:2px solid #72e5bc;background:linear-gradient(135deg,#24ae7c,#287d95)!important}\n#repeat.active,#shuffle.active{outline:2px solid #a783ff;background:linear-gradient(135deg,#4e82ff66,#8552ff77)!important}\n.status{pointer-events:none}\n@media (prefers-reduced-motion:reduce){*{animation-duration:.001ms!important;transition-duration:.001ms!important;scroll-behavior:auto!important}}\n</style></head><body><main>\n<section id="profiles"><div class="hero"><div class="eyebrow"><span class="dot"></span>Audio engine online</div><h1>CamillaDSP Studio</h1><div class="subtitle">System audio, AirPlay and PC Music through CamillaDSP and SonoBus.</div></div><div class="section-title">Audio source</div><div class="card"><div id="source-title" class="title">Loading…</div><div id="source-details" class="details"></div><div class="source-grid"><button id="mode-system" class="action">Linux System Audio</button><button id="mode-airplay" class="action">iPad AirPlay</button></div></div><button id="open-pc" class="action green">Open PC Music Library</button><div class="section-title">Active profile</div><div class="card"><div id="active-profile" class="title">Loading…</div><div id="active-state" class="details"></div></div><div class="grid two"><button id="restart-camilla" class="action">Restart CamillaDSP</button><button id="restart-sonobus" class="action">Restart SonoBus</button><button id="restart-airplay" class="action">Restart AirPlay</button><button id="restart-vnc" class="action">Restart VNC</button></div><div class="section-title">System media</div><div class="card"><div class="label">Active desktop player</div><div id="system-title" class="title">No system media</div><div id="system-details" class="details"></div><input id="system-seek" class="range" type="range" min="0" max="1" step=".1"><div class="times"><span id="system-elapsed">0:00</span><span id="system-duration">0:00</span></div><div class="range-row"><span>🔈</span><input id="system-volume" class="range" type="range" min="0" max="100" value="100"><span>🔊</span></div><div class="grid three"><button id="system-previous" class="transport" aria-label="Previous"><svg class="media-icon" viewBox="0 0 24 24"><path d="M6 5v14"></path><path d="M18 6.5 8.5 12 18 17.5z"></path></svg></button><button id="system-toggle" class="transport main" aria-label="Play"><svg class="media-icon" viewBox="0 0 24 24"><path id="system-play-shape" class="icon-fill" d="M8 5.5 19 12 8 18.5z"></path></svg></button><button id="system-next" class="transport" aria-label="Next"><svg class="media-icon" viewBox="0 0 24 24"><path d="M18 5v14"></path><path d="M6 6.5 15.5 12 6 17.5z"></path></svg></button></div></div><div class="section-title">Listening profiles</div><input id="profile-search" class="search" placeholder="Search profiles"><div id="profile-list"></div></section>\n<section id="pc" class="hidden"><div class="header"><button id="pc-back" class="back">Back</button><h1>PC Music</h1><div></div></div><div class="card"><div class="label">Now playing</div><div id="now-title" class="title">Nothing playing</div><div id="now-details" class="details"></div><input id="seek" class="range" type="range" min="0" max="1" step=".1"><div class="times"><span id="elapsed">0:00</span><span id="duration">0:00</span></div><div class="range-row"><span>🔈</span><input id="volume" class="range" type="range" min="0" max="100" value="100"><span>🔊</span></div><div class="grid two"><button id="repeat" class="action">Repeat Off</button><button id="shuffle" class="action">Shuffle Queue</button></div></div><div class="grid three pc-transport"><button data-cmd="previous" class="transport" aria-label="Previous"><svg class="media-icon" viewBox="0 0 24 24"><path d="M6 5v14"></path><path d="M18 6.5 8.5 12 18 17.5z"></path></svg></button><button data-cmd="toggle" class="transport main" aria-label="Play"><svg class="media-icon" viewBox="0 0 24 24"><path id="local-play-shape" class="icon-fill" d="M8 5.5 19 12 8 18.5z"></path></svg></button><button data-cmd="next" class="transport" aria-label="Next"><svg class="media-icon" viewBox="0 0 24 24"><path d="M18 5v14"></path><path d="M6 6.5 15.5 12 6 17.5z"></path></svg></button></div><div class="grid two pc-library-actions"><button id="all-songs" class="action primary">All Songs</button><button id="new-playlist" class="action green">New Playlist</button></div><div class="section-title">Playlists</div><div id="playlists" class="list"></div></section>\n<section id="songs" class="hidden"><div class="header"><button data-back="pc" class="back">Back</button><h1>All Songs</h1><div></div></div><input id="song-search" class="search" placeholder="Search all songs"><div id="song-list" class="list"></div></section>\n<section id="playlist" class="hidden"><div class="header"><button data-back="pc" class="back">Back</button><h1 id="playlist-title">Playlist</h1><div></div></div><input id="playlist-search" class="search" placeholder="Search this playlist"><div id="playlist-songs" class="list"></div></section><div id="status" class="status"></div>\n</main><script>const $=selector=>document.querySelector(selector);\nconst screens=[\'profiles\',\'pc\',\'songs\',\'playlist\'].map(id=>$(\'#\'+id));\nlet all=[],inside=[],current=\'\',statusTimer=null;\n\nconst state={\n  system:{slider:$(\'#system-seek\'),elapsed:$(\'#system-elapsed\'),durationLabel:$(\'#system-duration\'),volume:$(\'#system-volume\'),duration:0,dragging:false,polling:false,volumeHold:0,volumeTimer:null,volumePending:null},\n  local:{slider:$(\'#seek\'),elapsed:$(\'#elapsed\'),durationLabel:$(\'#duration\'),volume:$(\'#volume\'),duration:0,dragging:false,polling:false,volumeHold:0,volumeTimer:null,volumePending:null}\n};\n\nconst fmt=value=>{const v=Math.max(0,Number(value)||0);return Math.floor(v/60)+\':\'+String(Math.floor(v)%60).padStart(2,\'0\')};\nfunction show(id){screens.forEach(screen=>screen.classList.toggle(\'hidden\',screen.id!==id));scrollTo({top:0,behavior:\'smooth\'})}\nfunction note(message,error=false){const box=$(\'#status\');box.textContent=message;box.classList.toggle(\'error\',error);clearTimeout(statusTimer);if(message)statusTimer=setTimeout(()=>{if(box.textContent===message)box.textContent=\'\'},3200)}\nasync function api(url,options={}){const response=await fetch(url,{cache:\'no-store\',...options});const data=await response.json().catch(()=>({ok:false,error:\'Invalid server response\'}));if(!response.ok||data.ok===false)throw Error(data.error||\'Request failed\');return data}\nconst post=(url,data={})=>api(url,{method:\'POST\',headers:{\'Content-Type\':\'application/json\'},body:JSON.stringify(data)});\nfunction fill(element,value,maximum){const max=Number(maximum),v=Number(value);const percent=Number.isFinite(max)&&max>0&&Number.isFinite(v)?Math.max(0,Math.min(100,v/max*100)):0;element.style.setProperty(\'--fill\',percent+\'%\')}\nfunction renderTimeline(media,position,duration){\n  const total=Number.isFinite(Number(duration))?Math.max(0,Number(duration)):0;\n  const current=Number.isFinite(Number(position))?Math.max(0,Math.min(Number(position),total>0?total:Number(position))):0;\n  media.duration=total;\n  media.slider.max=String(total>0?total:1);\n  if(!media.dragging)media.slider.value=String(current);\n  const shown=media.dragging?Number(media.slider.value):current;\n  fill(media.slider,shown,total);\n  media.elapsed.textContent=fmt(shown);\n  media.durationLabel.textContent=fmt(total);\n}\n\nfunction friendly(name){return name.replace(/\\.ya?ml$/i,\'\').replace(/^\\d+-/,\'\').replace(/^(earpods|cloud3|cmf-buds-pro-2)-/i,\'\').replace(/-/g,\' \').replace(/\\b\\w/g,char=>char.toUpperCase())}\nfunction device(name){const lower=name.toLowerCase();return lower.includes(\'cloud3\')?\'HyperX Cloud III\':lower.includes(\'cmf-buds-pro-2\')?\'CMF Buds Pro 2\':\'Apple EarPods\'}\nasync function busy(button,work,label=\'Working…\'){if(button.disabled)return;const original=button.innerHTML;button.disabled=true;button.classList.add(\'busy\');button.textContent=label;try{return await work()}finally{button.disabled=false;button.classList.remove(\'busy\');button.innerHTML=original}}\nfunction setPlayIcon(shape,button,playing){shape.setAttribute(\'d\',playing?\'M8 5h3v14H8z M14 5h3v14h-3z\':\'M8 5.5 19 12 8 18.5z\');button.setAttribute(\'aria-label\',playing?\'Pause\':\'Play\');button.classList.toggle(\'playing\',playing)}\n\nasync function loadMode(){const data=await api(\'/api/mode\');const system=data.mode===\'system\';$(\'#source-title\').textContent=system?\'Linux System Audio\':\'iPad AirPlay\';$(\'#source-details\').textContent=system?\'Desktop apps, browsers and PC Music feed CamillaDSP, then SonoBus.\':\'The iPad feeds Shairport Sync, then CamillaDSP and SonoBus.\';$(\'#mode-system\').classList.toggle(\'mode-active\',system);$(\'#mode-airplay\').classList.toggle(\'mode-active\',!system)}\nasync function loadProfiles(){const data=await api(\'/api/profiles\'),query=$(\'#profile-search\').value.toLowerCase(),root=$(\'#profile-list\');$(\'#active-profile\').textContent=data.active?friendly(data.active):\'No profile\';$(\'#active-state\').textContent=data.running?\'Running\':\'Stopped\';root.replaceChildren();for(const group of [\'Apple EarPods\',\'CMF Buds Pro 2\',\'HyperX Cloud III\']){const matches=data.profiles.filter(profile=>device(profile)===group&&friendly(profile).toLowerCase().includes(query));if(!matches.length)continue;const heading=document.createElement(\'div\');heading.className=\'section-title\';heading.textContent=group;root.append(heading);const list=document.createElement(\'div\');list.className=\'list\';for(const profile of matches){const button=document.createElement(\'button\');button.className=\'item\'+(profile===data.active&&data.running?\' active\':\'\');button.innerHTML=\'<span class="name"></span><span class="meta"></span>\';button.children[0].textContent=friendly(profile);button.children[1].textContent=group;button.onclick=async()=>{try{await busy(button,()=>post(\'/api/select\',{profile}),\'Switching…\');await loadProfiles();note(\'Profile activated\')}catch(error){note(error.message,true)}};list.append(button)}root.append(list)}}\n\nasync function pollSystem(){const media=state.system;if(media.polling)return;media.polling=true;try{const data=await api(\'/api/system-media\');$(\'#system-title\').textContent=data.title||\'No system media\';$(\'#system-details\').textContent=[data.artist,data.player,data.status].filter(Boolean).join(\' • \');renderTimeline(media,data.position,data.duration);if(media.volumePending!==null&&Number.isFinite(data.volume)&&Math.abs(data.volume-media.volumePending)<=1){media.volumePending=null}if(media.volumePending===null&&performance.now()>=media.volumeHold&&document.activeElement!==media.volume&&Number.isFinite(data.volume)){media.volume.value=String(data.volume);fill(media.volume,data.volume,100)}setPlayIcon($(\'#system-play-shape\'),$(\'#system-toggle\'),data.playing)}catch(error){note(error.message,true)}finally{media.polling=false}}\nasync function pollLocal(){const media=state.local;if(media.polling)return;media.polling=true;try{if(!$(\'#pc\').classList.contains(\'hidden\')){const data=await api(\'/api/player\');$(\'#now-title\').textContent=data.title||\'Nothing playing\';$(\'#now-details\').textContent=data.path||\'\';renderTimeline(media,data.currentTime,data.duration);if(media.volumePending!==null&&Number.isFinite(data.volume)&&Math.abs(data.volume-media.volumePending)<=1){media.volumePending=null}if(media.volumePending===null&&performance.now()>=media.volumeHold&&document.activeElement!==media.volume&&Number.isFinite(data.volume)){media.volume.value=String(data.volume);fill(media.volume,data.volume,100)}$(\'#repeat\').textContent=\'Repeat \'+({off:\'Off\',all:\'All\',one:\'1\'}[data.repeat]||\'Off\');$(\'#repeat\').classList.toggle(\'active\',data.repeat!==\'off\');setPlayIcon($(\'#local-play-shape\'),document.querySelector(\'[data-cmd="toggle"]\'),data.playing)}}catch(error){note(error.message,true)}finally{media.polling=false}}\n\nfunction bindSeek(media,url){\n  const slider=media.slider;\n  const begin=()=>{media.dragging=true;slider.classList.add(\'dragging\')};\n  const end=()=>{media.dragging=false;slider.classList.remove(\'dragging\')};\n  slider.addEventListener(\'pointerdown\',begin);\n  slider.addEventListener(\'pointercancel\',end);\n  slider.addEventListener(\'touchstart\',begin,{passive:true});\n  slider.oninput=()=>{media.dragging=true;const value=Number(slider.value);fill(slider,value,media.duration);media.elapsed.textContent=fmt(value)};\n  slider.onchange=async()=>{const target=Math.max(0,Number(slider.value)||0);end();try{await post(url,{seconds:target})}catch(error){note(error.message,true)}};\n}\nfunction bindVolume(media,url){const control=media.volume;const send=()=>{const value=Math.max(0,Math.min(100,Number(control.value)||0));media.volumeHold=performance.now()+1000;media.volumePending=value;post(url,{volume:value}).catch(error=>note(error.message,true))};control.oninput=()=>{const value=Number(control.value);media.volumeHold=performance.now()+1000;media.volumePending=value;fill(control,value,100);clearTimeout(media.volumeTimer);media.volumeTimer=setTimeout(send,90)};control.onchange=()=>{clearTimeout(media.volumeTimer);send()}}\n\nfunction render(sel,data,query){const list=$(sel);list.replaceChildren();const filtered=data.filter(song=>!query||[song.title,song.relative].join(\' \').toLowerCase().includes(query.toLowerCase()));if(!filtered.length){const empty=document.createElement(\'div\');empty.className=\'card details\';empty.textContent=query?\'No matches\':\'Nothing here yet\';list.append(empty);return}for(const song of filtered){const button=document.createElement(\'button\');button.className=\'item\';button.innerHTML=\'<span class="name"></span><span class="meta"></span>\';button.children[0].textContent=song.title;button.children[1].textContent=song.relative;button.onclick=async()=>{try{await busy(button,()=>post(\'/api/play/song\',{path:song.path}),\'Playing…\');note(\'Playing \'+song.title)}catch(error){note(error.message,true)}};list.append(button)}}\nasync function loadLists(){const data=await api(\'/api/playlists\'),list=$(\'#playlists\');list.replaceChildren();for(const playlist of data.playlists){const row=document.createElement(\'div\');row.className=\'row\';const open=document.createElement(\'button\');open.className=\'item\';open.innerHTML=\'<span class="name"></span><span class="meta"></span>\';open.children[0].textContent=playlist.name;open.children[1].textContent=playlist.count+(playlist.count===1?\' song\':\' songs\');open.onclick=async()=>{current=playlist.name;inside=(await api(\'/api/playlist?name=\'+encodeURIComponent(playlist.name))).songs;$(\'#playlist-title\').textContent=playlist.name;show(\'playlist\');render(\'#playlist-songs\',inside,\'\')};const play=document.createElement(\'button\');play.className=\'action\';play.textContent=\'Play\';play.onclick=()=>busy(play,()=>post(\'/api/play/playlist\',{name:playlist.name,shuffle:false}),\'Loading…\').catch(error=>note(error.message,true));const shuffle=document.createElement(\'button\');shuffle.className=\'action primary\';shuffle.textContent=\'Shuffle\';shuffle.onclick=()=>busy(shuffle,()=>post(\'/api/play/playlist\',{name:playlist.name,shuffle:true}),\'Mixing…\').catch(error=>note(error.message,true));row.append(open,play,shuffle);list.append(row)}}\n\n$(\'#mode-system\').onclick=async()=>{try{await busy($(\'#mode-system\'),()=>post(\'/api/mode/system\'),\'Switching…\');await loadMode()}catch(error){note(error.message,true)}};\n$(\'#mode-airplay\').onclick=async()=>{try{await busy($(\'#mode-airplay\'),()=>post(\'/api/mode/airplay\'),\'Switching…\');await loadMode()}catch(error){note(error.message,true)}};\n$(\'#open-pc\').onclick=async()=>{try{await busy($(\'#open-pc\'),()=>post(\'/api/mode/pc\'),\'Opening…\');show(\'pc\');await loadLists();await pollLocal()}catch(error){note(error.message,true)}};\n$(\'#pc-back\').onclick=()=>show(\'profiles\');\n$(\'#all-songs\').onclick=async()=>{try{all=(await api(\'/api/songs\')).songs;show(\'songs\');render(\'#song-list\',all,\'\')}catch(error){note(error.message,true)}};\n$(\'#song-search\').oninput=()=>render(\'#song-list\',all,$(\'#song-search\').value);\n$(\'#playlist-search\').oninput=()=>render(\'#playlist-songs\',inside,$(\'#playlist-search\').value);\ndocument.querySelectorAll(\'[data-back]\').forEach(button=>button.onclick=()=>show(button.dataset.back));\n$(\'#new-playlist\').onclick=async()=>{const name=prompt(\'New playlist name\');if(name)try{await post(\'/api/playlist/create\',{name});await loadLists();note(\'Playlist created\')}catch(error){note(error.message,true)}};\ndocument.querySelectorAll(\'[data-cmd]\').forEach(button=>button.onclick=async()=>{try{await busy(button,()=>post(\'/api/player/command\',{command:button.dataset.cmd}),\'…\');await pollLocal()}catch(error){note(error.message,true)}});\n$(\'#repeat\').onclick=async()=>{try{const data=await api(\'/api/player\');await post(\'/api/player/repeat\',{mode:{off:\'all\',all:\'one\',one:\'off\'}[data.repeat]||\'off\'});await pollLocal()}catch(error){note(error.message,true)}};\n$(\'#shuffle\').onclick=async()=>{try{await busy($(\'#shuffle\'),()=>post(\'/api/player/command\',{command:\'shuffle\'}),\'Shuffling…\');note(\'Queue shuffled\')}catch(error){note(error.message,true)}};\nfor(const [id,command] of [[\'system-previous\',\'previous\'],[\'system-toggle\',\'toggle\'],[\'system-next\',\'next\']])$(\'#\'+id).onclick=async()=>{try{await busy($(\'#\'+id),()=>post(\'/api/system-media\',{command}),\'…\');await pollSystem()}catch(error){note(error.message,true)}};\n$(\'#restart-camilla\').onclick=()=>busy($(\'#restart-camilla\'),()=>post(\'/api/restart-camilladsp\'),\'Restarting…\').then(loadProfiles).catch(error=>note(error.message,true));\n$(\'#restart-sonobus\').onclick=()=>busy($(\'#restart-sonobus\'),()=>post(\'/api/restart-sonobus\'),\'Restarting…\').catch(error=>note(error.message,true));\n$(\'#restart-airplay\').onclick=()=>busy($(\'#restart-airplay\'),()=>post(\'/api/restart-airplay\'),\'Restarting…\').catch(error=>note(error.message,true));\n$(\'#restart-vnc\').onclick=()=>busy($(\'#restart-vnc\'),()=>post(\'/api/restart-vnc\'),\'Restarting…\').catch(error=>note(error.message,true));\n$(\'#profile-search\').oninput=loadProfiles;\nbindSeek(state.local,\'/api/player/seek\');bindSeek(state.system,\'/api/system-media/seek\');bindVolume(state.local,\'/api/player/volume\');bindVolume(state.system,\'/api/system-volume\');\nPromise.all([loadProfiles(),loadMode(),pollSystem()]).catch(error=>note(error.message,true));pollLocal();setInterval(pollSystem,700);setInterval(pollLocal,700);\n</script></body></html>'
 
+GROUPS=STATE/'sonobus-groups.json'; LOCALMONPID=STATE/'local-monitor.pid'
+MODES={
+'ipad_external':('iPad → external','airplay',False,True),
+'laptop_external':('Laptop → external','system',False,True),
+'ipad_ipad':('iPad only','airplay',False,False),
+'ipad_laptop':('iPad → laptop','airplay',True,False),
+'ipad_both':('iPad → iPad + laptop','airplay',True,True),
+'laptop_ipad':('Laptop → iPad','system',False,True),
+'laptop_laptop':('Laptop only','system',True,False),
+'laptop_both':('Laptop → iPad + laptop','system',True,True),
+'external_roundtrip':('Laptop ↔ one external device','system',False,True),
+}
+def _read_json(path,default):
+    try:return json.loads(path.read_text())
+    except (OSError,ValueError,TypeError):return default
+def _write_json(path,value):atomic(path,json.dumps(value,indent=2,ensure_ascii=False)+'\n')
+def groups_state():
+    default={'active':'default','profiles':{'default':{'group':'rt4817-camilladsp','username':'rt4817','server':'aoo.sonobus.net:10998','passwordRequired':False}}}
+    data=_read_json(GROUPS,default); profiles=data.get('profiles') if isinstance(data,dict) else None
+    if not isinstance(profiles,dict) or not profiles:return default
+    active=data.get('active');return {'active':active if active in profiles else next(iter(profiles)),'profiles':profiles}
+def save_group(data):
+    key=re.sub(r'[^A-Za-z0-9_.-]+','-',str(data.get('key','')).strip()).strip('-')
+    group=str(data.get('group','')).strip();user=str(data.get('username','')).strip();server=str(data.get('server','aoo.sonobus.net:10998')).strip()
+    if not key or not group or not user or not server:raise ValueError('Profile, group, username and server are required')
+    state=groups_state();state['profiles'][key]={'group':group,'username':user,'server':server,'passwordRequired':bool(data.get('passwordRequired'))};state['active']=key;_write_json(GROUPS,state);return state
+def audio_mode():
+    try:value=MODE.read_text().strip()
+    except OSError:value='ipad_external'
+    if value=='airplay':value='ipad_external'
+    if value=='system':value='laptop_external'
+    return value if value in MODES else 'ipad_external'
+def configure_sonobus():
+    if not SONOSET.is_file():
+        raise FileNotFoundError(SONOSET)
+
+    text = SONOSET.read_text(encoding='utf-8')
+    device_match = re.search(r'<DEVICESETUP\b[^>]*>', text)
+    if device_match is None:
+        raise RuntimeError('SonoBus DEVICESETUP entry was not found')
+
+    device_tag = device_match.group(0)
+    attributes = {
+        'deviceType': 'ALSA',
+        'audioOutputDeviceName': 'SonoBus Silent Output',
+        'audioInputDeviceName': 'CamillaDSP SonoBus',
+        'audioDeviceRate': '96000.0',
+        'audioDeviceBufferSize': '512',
+    }
+
+    for key, value in attributes.items():
+        attribute_pattern = rf'\b{re.escape(key)}="[^"]*"'
+        attribute_text = f'{key}="{value}"'
+        if re.search(attribute_pattern, device_tag):
+            device_tag = re.sub(
+                attribute_pattern,
+                attribute_text,
+                device_tag,
+                count=1,
+            )
+        else:
+            device_tag = device_tag[:-1] + f' {attribute_text}>'
+
+    text = (
+        text[:device_match.start()]
+        + device_tag
+        + text[device_match.end():]
+    )
+
+    parameters = {
+        'sendchannels': '2.0',
+        'defsendqual': '4.0',
+        'mastinmute': '0.0',
+        'mastsendmute': '0.0',
+        'mastrecvmute': '0.0',
+        'mastmonsolo': '0.0',
+        'dry': '0.0',
+        'wet': '0.9999999403953552',
+    }
+
+    missing = []
+    for key, value in parameters.items():
+        parameter_pattern = (
+            rf'(<PARAM\s+id="{re.escape(key)}"\s+value=")'
+            rf'[^"]*("\s*/>)'
+        )
+        text, count = re.subn(
+            parameter_pattern,
+            rf'\g<1>{value}\g<2>',
+            text,
+            count=1,
+        )
+        if count != 1:
+            missing.append(key)
+
+    if missing:
+        raise RuntimeError(
+            'SonoBus settings are missing PARAM entries: '
+            + ', '.join(missing)
+        )
+
+    temporary = SONOSET.with_suffix('.tmp')
+    temporary.write_text(text, encoding='utf-8')
+    temporary.replace(SONOSET)
+def restart_sonobus(password=None):
+    with LOCK:
+        stop_sonobus();alsa100();configure_sonobus();state=groups_state();item=state['profiles'][state['active']]
+        command=[str(SONOBUS),'--group='+item['group'],'--username='+item['username'],'--connectionserver='+item['server']]
+        if item.get('passwordRequired'):
+            if not password:raise ValueError('The selected SonoBus group requires a password')
+            command.append('--group-password='+str(password))
+        log=(STATE/'sonobus.log').open('ab',buffering=0)
+        try:process=subprocess.Popen(command,stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
+        finally:log.close()
+        deadline=time.monotonic()+3
+        while time.monotonic()<deadline:
+            if process.poll() is not None:
+                try:tail=(STATE/'sonobus.log').read_text(errors='replace')[-1600:]
+                except OSError:tail=''
+                raise RuntimeError('SonoBus failed to start: '+tail)
+            if process.pid in sonopids():break
+            time.sleep(.05)
+        return {'pid':process.pid,'profile':state['active'],'group':item['group']}
+
+def stop_local_monitor():
+    pid=rpid(LOCALMONPID)
+    if alive(pid):
+        try:os.killpg(pid,signal.SIGTERM)
+        except OSError:pass
+        deadline=time.monotonic()+2
+        while alive(pid) and time.monotonic()<deadline:time.sleep(.05)
+        if alive(pid):
+            try:os.killpg(pid,signal.SIGKILL)
+            except OSError:pass
+    LOCALMONPID.unlink(missing_ok=True)
+def _physical_sink():
+    result=run([exe('pactl'),'list','short','sinks'],False,5,media_env());candidates=[]
+    for line in result.stdout.splitlines():
+        parts=line.split('\t');name=parts[1] if len(parts)>1 else '';low=name.lower()
+        if name and not any(x in low for x in ('camilladsp','loopback','earpods_','cloud3_','cmf-')):candidates.append(name)
+    return candidates[0] if candidates else ''
+def start_local_monitor():
+    stop_local_monitor();sink=_physical_sink()
+    if not sink:raise RuntimeError('No physical laptop output was found')
+    command=f"exec {shutil.which('arecord') or '/run/current-system/sw/bin/arecord'} -q -D camilladsp_output_shared -r 96000 -f S32_LE -c 2 -t raw | {exe('pacat')} --playback --device={sink} --rate=96000 --format=s32le --channels=2"
+    log=(STATE/'local-monitor.log').open('ab',buffering=0)
+    try:process=subprocess.Popen(['/run/current-system/sw/bin/bash','-lc',command],stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True,env=media_env())
+    finally:log.close()
+    LOCALMONPID.write_text(str(process.pid)+'\n');return {'pid':process.pid,'sink':sink}
+
+def mode_state():
+    name=audio_mode();label,source,local,sono=MODES[name]
+    local_pid=rpid(LOCALMONPID)
+    return {
+        'mode':name,'label':label,'source':source,'localWanted':local,'sonobusWanted':sono,
+        'camilla':alive(rpid(CAMPID),'camilladsp'),'sonobus':bool(sonopids()),'localMonitor':alive(local_pid),
+        'systemAudio':run(['systemctl','--user','is-active',SYSTEM_AUDIO_SERVICE],False,5).stdout.strip()=='active',
+        'airplay':run(['systemctl','is-active','shairport-sync.service'],False,5).stdout.strip()=='active',
+    }
+def apply_mode(name,password=None):
+    if name not in MODES:raise ValueError('Invalid audio mode')
+    label,source,local,sono=MODES[name]
+    if not alive(rpid(CAMPID),'camilladsp'):restart_camilla()
+    if source=='system':airplay(False);user_service('restart',SYSTEM_AUDIO_SERVICE)
+    else:user_service('stop',SYSTEM_AUDIO_SERVICE);stop_mpv();airplay(True)
+    start_local_monitor() if local else stop_local_monitor()
+    restart_sonobus(password) if sono else stop_sonobus()
+    MODE.write_text(name+'\n');return mode_state()
+def set_mode(name,password=None):
+    with LOCK:return apply_mode(name,password)
+def mpv(command):
+    with PLAYERLOCK:
+        for attempt in range(2):
+            try:
+                ensure_mpv();request_id=random.randint(1,2147483647);payload={'command':command,'request_id':request_id}
+                with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as client:
+                    client.settimeout(4);client.connect(str(MPVSOCK));client.sendall((json.dumps(payload)+'\n').encode());stream=client.makefile('rb')
+                    for line in stream:
+                        response=json.loads(line)
+                        if response.get('request_id')!=request_id:continue
+                        if response.get('error')!='success':raise RuntimeError(response.get('error') or 'mpv command failed')
+                        return response.get('data')
+                raise RuntimeError('mpv returned no matching response')
+            except (OSError,ValueError,RuntimeError):
+                if attempt:raise
+                stop_mpv()
+
+def play_list(name,shuffle=False):
+    rebuilt=rebuild(name)
+    if rebuilt['count']<1:raise ValueError('Playlist is empty')
+    playlist=MUSIC/(f'{name}-shuffled.m3u' if shuffle else f'{name}.m3u')
+    mpv(['loadlist',str(playlist),'replace'])
+    mpv(['set_property','pause',False])
+    deadline=time.monotonic()+5
+    last={}
+    while time.monotonic()<deadline:
+        last=player_state()
+        if last.get('available'):
+            return {'playlist':name,'shuffled':shuffle,'state':last}
+        time.sleep(.05)
+    # mpv accepted both commands; avoid a false failure if metadata is delayed.
+    return {'playlist':name,'shuffled':shuffle,'state':last,'pending':True}
+
+def full_state():
+    return {
+        'mode':mode_state(),
+        'profiles':{'profiles':[item.name for item in profiles()],'active':active(),'running':alive(rpid(CAMPID),'camilladsp')},
+        'player':player_state(),'systemMedia':system_state(),'groups':groups_state(),'playlists':lists(),
+    }
+
+def volatile_state():
+    return {'mode':mode_state(),'player':player_state(),'systemMedia':system_state()}
+
+PAGE='<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>CamillaDSP Studio</title><style>\n:root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display",sans-serif;--v:#865dff;--b:#3f8eff;--g:#35d6a0}*{box-sizing:border-box}body{margin:0;min-height:100svh;padding:22px 16px 36px;color:#fff;background:radial-gradient(900px 520px at 50% -150px,#6542a8,#211a38 44%,#070910);background-attachment:fixed}main{max-width:540px;margin:auto}.hidden{display:none!important}.hero,.card{border:1px solid #ffffff22;background:linear-gradient(145deg,#ffffff1c,#ffffff0d);box-shadow:inset 0 1px #ffffff22,0 20px 50px #0005;backdrop-filter:blur(22px)}.hero{padding:25px 22px;border-radius:29px}.card{padding:18px;border-radius:24px;margin:14px 0}.card+.grid{margin-top:14px}.eyebrow,.label,.section-title{color:#bcb7cb;text-transform:uppercase;letter-spacing:.1em;font-size:12px;font-weight:800}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--g);box-shadow:0 0 15px var(--g);margin-right:8px}h1{margin:10px 0 5px;font-size:32px;letter-spacing:-.04em}.subtitle,.details,.meta{color:#b9b4c5;font-size:13px}.section-title{margin:27px 3px 10px}.title{font-size:20px;font-weight:800;margin-top:6px;overflow-wrap:anywhere}.grid{display:grid;gap:10px}.two{grid-template-columns:1fr 1fr}.three{grid-template-columns:1fr 1.2fr 1fr}.pc-transport{margin-bottom:18px}.pc-library-actions{margin-top:18px}.wide{grid-column:1/-1}button,input{font:inherit}button{border:0;color:#fff;cursor:pointer}.action,.item,.transport,.back{width:100%;transition:transform .12s,filter .15s}.action:active,.item:active,.transport:active,.back:active{transform:scale(.96);filter:brightness(1.15)}.action{min-height:54px;border-radius:18px;background:#ffffff1b;font-weight:780}.primary{background:linear-gradient(135deg,var(--b),var(--v))}.green{background:linear-gradient(135deg,#24ae7c,#287d95)}.danger{background:linear-gradient(135deg,#e64e74,#8e2b4b)}.active{outline:2px solid #a783ff;background:linear-gradient(135deg,#4e82ff66,#8552ff77)!important}.search{width:100%;min-height:49px;border:1px solid #ffffff22;border-radius:17px;padding:12px 15px;color:#fff;background:#ffffff12;outline:0}.search:focus{border-color:#9b7aff;box-shadow:0 0 0 4px #825dff2e}.list{display:grid;gap:10px;margin-top:10px}.item{text-align:left;min-height:64px;padding:13px 15px;border-radius:19px;background:#ffffff16}.name{display:block;font-weight:780}.meta{display:block;margin-top:4px}.row{display:grid;grid-template-columns:minmax(0,1fr) 72px 72px;gap:8px}.header{display:grid;grid-template-columns:72px 1fr 72px;align-items:center}.header h1{text-align:center;font-size:23px}.back{min-height:43px;border-radius:15px;background:#ffffff18}.range{--fill:0%;width:100%;height:36px;background:transparent;appearance:none}.range::-webkit-slider-runnable-track{height:6px;border-radius:99px;background:linear-gradient(to right,#fff var(--fill),#ffffff2d var(--fill))}.range::-webkit-slider-thumb{appearance:none;width:21px;height:21px;margin-top:-7.5px;border-radius:50%;background:#fff;box-shadow:0 3px 10px #0008}.times{display:flex;justify-content:space-between;color:#aaa5b5;font-size:12px}.range-row{display:grid;grid-template-columns:24px 1fr 24px;align-items:center;gap:7px}.transport{display:grid;place-items:center;min-height:78px;border-radius:999px;background:#ffffff19}.transport.main{min-height:98px;background:linear-gradient(145deg,#9e68ff,#583ad2)}.media-icon{display:block;width:34px;height:34px;fill:none;stroke:#fff;stroke-width:2.15;stroke-linecap:round;stroke-linejoin:round;pointer-events:none}.transport.main .media-icon{width:42px;height:42px}.icon-fill{fill:#fff;stroke:#fff}.range{touch-action:none}.range.dragging::-webkit-slider-thumb{transform:scale(1.08)}.source-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}.status{position:sticky;bottom:12px;margin-top:14px;text-align:center}.status:not(:empty){padding:11px;border-radius:16px;background:#121322ee}.error{background:#711c34ee!important}\n\n/* Final interaction and consistency pass */\nbutton{position:relative;overflow:hidden;-webkit-user-select:none;user-select:none;touch-action:manipulation}\nbutton:focus-visible,.search:focus-visible,.range:focus-visible{outline:2px solid #b79cff;outline-offset:3px}\nbutton:disabled{opacity:.58;cursor:default}\n.action,.item,.transport,.back{will-change:transform}\n.action.busy::after,.item.busy::after{content:"";position:absolute;inset:0;background:linear-gradient(105deg,transparent 25%,#ffffff2e 50%,transparent 75%);animation:ui-shine .8s linear infinite}\n@keyframes ui-shine{from{transform:translateX(-100%)}to{transform:translateX(100%)}}\n.transport{transition:transform .12s ease,filter .15s ease,box-shadow .2s ease}\n.transport.main.playing{box-shadow:0 18px 42px #6b45dd77,inset 0 1px #ffffff35}\n.media-icon{transition:transform .16s ease}.transport:active .media-icon{transform:scale(.9)}\n.range{cursor:pointer}.range.dragging::-webkit-slider-thumb{transform:scale(1.1)}\n.range::-webkit-slider-runnable-track{transition:background .08s linear}\n.mode-active{outline:2px solid #72e5bc;background:linear-gradient(135deg,#24ae7c,#287d95)!important}\n#repeat.active,#shuffle.active{outline:2px solid #a783ff;background:linear-gradient(135deg,#4e82ff66,#8552ff77)!important}\n.status{pointer-events:none}\n@media (prefers-reduced-motion:reduce){*{animation-duration:.001ms!important;transition-duration:.001ms!important;scroll-behavior:auto!important}}\n</style></head><body><main>\n<section id="profiles"><div class="hero"><div class="eyebrow"><span class="dot"></span>Audio engine online</div><h1>CamillaDSP Studio</h1><div class="subtitle">System audio, AirPlay and PC Music through CamillaDSP and SonoBus.</div></div><div class="section-title">Audio source</div><div class="card"><div id="source-title" class="title">Loading…</div><div id="source-details" class="details"></div><div id="mode-grid" class="source-grid"></div></div><button id="open-pc" class="action green">Open PC Music Library</button><div class="section-title">SonoBus Group</div><div class="card"><select id="group-select" class="search"></select><input id="group-key" class="search" placeholder="Profile name"><input id="group-name" class="search" placeholder="Group name"><input id="group-user" class="search" placeholder="Username"><input id="group-server" class="search" value="aoo.sonobus.net:10998" placeholder="Connection server"><label class="details"><input id="group-required" type="checkbox"> Password required</label><input id="group-password" class="search" type="password" placeholder="Password (never saved)"><button id="save-group" class="action primary">Save Group Profile</button></div><div class="section-title">Active profile</div><div class="card"><div id="active-profile" class="title">Loading…</div><div id="active-state" class="details"></div></div><div class="grid two"><button id="restart-camilla" class="action">Restart CamillaDSP</button><button id="restart-sonobus" class="action">Restart SonoBus</button><button id="restart-airplay" class="action">Restart AirPlay</button><button id="restart-vnc" class="action">Restart VNC</button></div><div class="section-title">System media</div><div class="card"><div class="label">Active desktop player</div><div id="system-title" class="title">No system media</div><div id="system-details" class="details"></div><input id="system-seek" class="range" type="range" min="0" max="1" step=".1"><div class="times"><span id="system-elapsed">0:00</span><span id="system-duration">0:00</span></div><div class="range-row"><span>🔈</span><input id="system-volume" class="range" type="range" min="0" max="100" value="100"><span>🔊</span></div><div class="grid three"><button id="system-previous" class="transport" aria-label="Previous"><svg class="media-icon" viewBox="0 0 24 24"><path d="M6 5v14"></path><path d="M18 6.5 8.5 12 18 17.5z"></path></svg></button><button id="system-toggle" class="transport main" aria-label="Play"><svg class="media-icon" viewBox="0 0 24 24"><path id="system-play-shape" class="icon-fill" d="M8 5.5 19 12 8 18.5z"></path></svg></button><button id="system-next" class="transport" aria-label="Next"><svg class="media-icon" viewBox="0 0 24 24"><path d="M18 5v14"></path><path d="M6 6.5 15.5 12 6 17.5z"></path></svg></button></div></div><div class="section-title">Listening profiles</div><input id="profile-search" class="search" placeholder="Search profiles"><div id="profile-list"></div></section>\n<section id="pc" class="hidden"><div class="header"><button id="pc-back" class="back">Back</button><h1>PC Music</h1><div></div></div><div class="card"><div class="label">Now playing</div><div id="now-title" class="title">Nothing playing</div><div id="now-details" class="details"></div><input id="seek" class="range" type="range" min="0" max="1" step=".1"><div class="times"><span id="elapsed">0:00</span><span id="duration">0:00</span></div><div class="range-row"><span>🔈</span><input id="volume" class="range" type="range" min="0" max="100" value="100"><span>🔊</span></div><div class="grid two"><button id="repeat" class="action">Repeat Off</button><button id="shuffle" class="action">Shuffle Queue</button></div></div><div class="grid three pc-transport"><button data-cmd="previous" class="transport" aria-label="Previous"><svg class="media-icon" viewBox="0 0 24 24"><path d="M6 5v14"></path><path d="M18 6.5 8.5 12 18 17.5z"></path></svg></button><button data-cmd="toggle" class="transport main" aria-label="Play"><svg class="media-icon" viewBox="0 0 24 24"><path id="local-play-shape" class="icon-fill" d="M8 5.5 19 12 8 18.5z"></path></svg></button><button data-cmd="next" class="transport" aria-label="Next"><svg class="media-icon" viewBox="0 0 24 24"><path d="M18 5v14"></path><path d="M6 6.5 15.5 12 6 17.5z"></path></svg></button></div><div class="grid two pc-library-actions"><button id="all-songs" class="action primary">All Songs</button><button id="new-playlist" class="action green">New Playlist</button></div><div class="section-title">Playlists</div><div id="playlists" class="list"></div></section>\n<section id="songs" class="hidden"><div class="header"><button data-back="pc" class="back">Back</button><h1>All Songs</h1><div></div></div><input id="song-search" class="search" placeholder="Search all songs"><div id="song-list" class="list"></div></section>\n<section id="playlist" class="hidden"><div class="header"><button data-back="pc" class="back">Back</button><h1 id="playlist-title">Playlist</h1><div></div></div><input id="playlist-search" class="search" placeholder="Search this playlist"><div id="playlist-songs" class="list"></div></section><div id="status" class="status"></div>\n</main><script>const $=selector=>document.querySelector(selector);\nconst screens=[\'profiles\',\'pc\',\'songs\',\'playlist\'].map(id=>$(\'#\'+id));\nlet all=[],inside=[],current=\'\',statusTimer=null;\n\nconst state={\n  system:{slider:$(\'#system-seek\'),elapsed:$(\'#system-elapsed\'),durationLabel:$(\'#system-duration\'),volume:$(\'#system-volume\'),duration:0,dragging:false,polling:false,volumeHold:0,volumeTimer:null,volumePending:null},\n  local:{slider:$(\'#seek\'),elapsed:$(\'#elapsed\'),durationLabel:$(\'#duration\'),volume:$(\'#volume\'),duration:0,dragging:false,polling:false,volumeHold:0,volumeTimer:null,volumePending:null}\n};\n\nconst fmt=value=>{const v=Math.max(0,Number(value)||0);return Math.floor(v/60)+\':\'+String(Math.floor(v)%60).padStart(2,\'0\')};\nfunction show(id){screens.forEach(screen=>screen.classList.toggle(\'hidden\',screen.id!==id));scrollTo({top:0,behavior:\'smooth\'})}\nfunction note(message,error=false){const box=$(\'#status\');box.textContent=message;box.classList.toggle(\'error\',error);clearTimeout(statusTimer);if(message)statusTimer=setTimeout(()=>{if(box.textContent===message)box.textContent=\'\'},3200)}\nasync function api(url,options={}){const response=await fetch(url,{cache:\'no-store\',...options});const data=await response.json().catch(()=>({ok:false,error:\'Invalid server response\'}));if(!response.ok||data.ok===false)throw Error(data.error||\'Request failed\');return data}\nconst post=(url,data={})=>api(url,{method:\'POST\',headers:{\'Content-Type\':\'application/json\'},body:JSON.stringify(data)});\nfunction fill(element,value,maximum){const max=Number(maximum),v=Number(value);const percent=Number.isFinite(max)&&max>0&&Number.isFinite(v)?Math.max(0,Math.min(100,v/max*100)):0;element.style.setProperty(\'--fill\',percent+\'%\')}\nfunction renderTimeline(media,position,duration){\n  const total=Number.isFinite(Number(duration))?Math.max(0,Number(duration)):0;\n  const current=Number.isFinite(Number(position))?Math.max(0,Math.min(Number(position),total>0?total:Number(position))):0;\n  media.duration=total;\n  media.slider.max=String(total>0?total:1);\n  if(!media.dragging)media.slider.value=String(current);\n  const shown=media.dragging?Number(media.slider.value):current;\n  fill(media.slider,shown,total);\n  media.elapsed.textContent=fmt(shown);\n  media.durationLabel.textContent=fmt(total);\n}\n\nfunction friendly(name){return name.replace(/\\.ya?ml$/i,\'\').replace(/^\\d+-/,\'\').replace(/^(earpods|cloud3|cmf-buds-pro-2)-/i,\'\').replace(/-/g,\' \').replace(/\\b\\w/g,char=>char.toUpperCase())}\nfunction device(name){const lower=name.toLowerCase();return lower.includes(\'cloud3\')?\'HyperX Cloud III\':lower.includes(\'cmf-buds-pro-2\')?\'CMF Buds Pro 2\':\'Apple EarPods\'}\nasync function busy(button,work,label=\'Working…\'){if(button.disabled)return;const original=button.innerHTML;button.disabled=true;button.classList.add(\'busy\');button.textContent=label;try{return await work()}finally{button.disabled=false;button.classList.remove(\'busy\');button.innerHTML=original}}\nfunction setPlayIcon(shape,button,playing){shape.setAttribute(\'d\',playing?\'M8 5h3v14H8z M14 5h3v14h-3z\':\'M8 5.5 19 12 8 18.5z\');button.setAttribute(\'aria-label\',playing?\'Pause\':\'Play\');button.classList.toggle(\'playing\',playing)}\n\nasync function loadProfiles(){const data=await api(\'/api/profiles\'),query=$(\'#profile-search\').value.toLowerCase(),root=$(\'#profile-list\');$(\'#active-profile\').textContent=data.active?friendly(data.active):\'No profile\';$(\'#active-state\').textContent=data.running?\'Running\':\'Stopped\';root.replaceChildren();for(const group of [\'Apple EarPods\',\'CMF Buds Pro 2\',\'HyperX Cloud III\']){const matches=data.profiles.filter(profile=>device(profile)===group&&friendly(profile).toLowerCase().includes(query));if(!matches.length)continue;const heading=document.createElement(\'div\');heading.className=\'section-title\';heading.textContent=group;root.append(heading);const list=document.createElement(\'div\');list.className=\'list\';for(const profile of matches){const button=document.createElement(\'button\');button.className=\'item\'+(profile===data.active&&data.running?\' active\':\'\');button.innerHTML=\'<span class="name"></span><span class="meta"></span>\';button.children[0].textContent=friendly(profile);button.children[1].textContent=group;button.onclick=async()=>{try{await busy(button,()=>post(\'/api/select\',{profile}),\'Switching…\');await loadProfiles();note(\'Profile activated\')}catch(error){note(error.message,true)}};list.append(button)}root.append(list)}}\n\nasync function pollSystem(){const media=state.system;if(media.polling)return;media.polling=true;try{const data=await api(\'/api/system-media\');$(\'#system-title\').textContent=data.title||\'No system media\';$(\'#system-details\').textContent=[data.artist,data.player,data.status].filter(Boolean).join(\' • \');renderTimeline(media,data.position,data.duration);if(media.volumePending!==null&&Number.isFinite(data.volume)&&Math.abs(data.volume-media.volumePending)<=1){media.volumePending=null}if(media.volumePending===null&&performance.now()>=media.volumeHold&&document.activeElement!==media.volume&&Number.isFinite(data.volume)){media.volume.value=String(data.volume);fill(media.volume,data.volume,100)}setPlayIcon($(\'#system-play-shape\'),$(\'#system-toggle\'),data.playing)}catch(error){note(error.message,true)}finally{media.polling=false}}\nasync function pollLocal(){const media=state.local;if(media.polling)return;media.polling=true;try{if(!$(\'#pc\').classList.contains(\'hidden\')){const data=await api(\'/api/player\');$(\'#now-title\').textContent=data.title||\'Nothing playing\';$(\'#now-details\').textContent=data.path||\'\';renderTimeline(media,data.currentTime,data.duration);if(media.volumePending!==null&&Number.isFinite(data.volume)&&Math.abs(data.volume-media.volumePending)<=1){media.volumePending=null}if(media.volumePending===null&&performance.now()>=media.volumeHold&&document.activeElement!==media.volume&&Number.isFinite(data.volume)){media.volume.value=String(data.volume);fill(media.volume,data.volume,100)}$(\'#repeat\').textContent=\'Repeat \'+({off:\'Off\',all:\'All\',one:\'1\'}[data.repeat]||\'Off\');$(\'#repeat\').classList.toggle(\'active\',data.repeat!==\'off\');setPlayIcon($(\'#local-play-shape\'),document.querySelector(\'[data-cmd="toggle"]\'),data.playing)}}catch(error){note(error.message,true)}finally{media.polling=false}}\n\nfunction bindSeek(media,url){\n  const slider=media.slider;\n  const begin=()=>{media.dragging=true;slider.classList.add(\'dragging\')};\n  const end=()=>{media.dragging=false;slider.classList.remove(\'dragging\')};\n  slider.addEventListener(\'pointerdown\',begin);\n  slider.addEventListener(\'pointercancel\',end);\n  slider.addEventListener(\'touchstart\',begin,{passive:true});\n  slider.oninput=()=>{media.dragging=true;const value=Number(slider.value);fill(slider,value,media.duration);media.elapsed.textContent=fmt(value)};\n  slider.onchange=async()=>{const target=Math.max(0,Number(slider.value)||0);end();try{await post(url,{seconds:target})}catch(error){note(error.message,true)}};\n}\nfunction bindVolume(media,url){const control=media.volume;const send=()=>{const value=Math.max(0,Math.min(100,Number(control.value)||0));media.volumeHold=performance.now()+1000;media.volumePending=value;post(url,{volume:value}).catch(error=>note(error.message,true))};control.oninput=()=>{const value=Number(control.value);media.volumeHold=performance.now()+1000;media.volumePending=value;fill(control,value,100);clearTimeout(media.volumeTimer);media.volumeTimer=setTimeout(send,90)};control.onchange=()=>{clearTimeout(media.volumeTimer);send()}}\n\nfunction render(sel,data,query){const list=$(sel);list.replaceChildren();const filtered=data.filter(song=>!query||[song.title,song.relative].join(\' \').toLowerCase().includes(query.toLowerCase()));if(!filtered.length){const empty=document.createElement(\'div\');empty.className=\'card details\';empty.textContent=query?\'No matches\':\'Nothing here yet\';list.append(empty);return}for(const song of filtered){const button=document.createElement(\'button\');button.className=\'item\';button.innerHTML=\'<span class="name"></span><span class="meta"></span>\';button.children[0].textContent=song.title;button.children[1].textContent=song.relative;button.onclick=async()=>{try{await busy(button,()=>post(\'/api/play/song\',{path:song.path}),\'Playing…\');note(\'Playing \'+song.title)}catch(error){note(error.message,true)}};list.append(button)}}\nasync function loadLists(){const data=await api(\'/api/playlists\'),list=$(\'#playlists\');list.replaceChildren();for(const playlist of data.playlists){const row=document.createElement(\'div\');row.className=\'row\';const open=document.createElement(\'button\');open.className=\'item\';open.innerHTML=\'<span class="name"></span><span class="meta"></span>\';open.children[0].textContent=playlist.name;open.children[1].textContent=playlist.count+(playlist.count===1?\' song\':\' songs\');open.onclick=async()=>{current=playlist.name;inside=(await api(\'/api/playlist?name=\'+encodeURIComponent(playlist.name))).songs;$(\'#playlist-title\').textContent=playlist.name;show(\'playlist\');render(\'#playlist-songs\',inside,\'\')};const play=document.createElement(\'button\');play.className=\'action\';play.textContent=\'Play\';play.onclick=()=>busy(play,()=>post(\'/api/play/playlist\',{name:playlist.name,shuffle:false}),\'Loading…\').catch(error=>note(error.message,true));const shuffle=document.createElement(\'button\');shuffle.className=\'action primary\';shuffle.textContent=\'Shuffle\';shuffle.onclick=()=>busy(shuffle,()=>post(\'/api/play/playlist\',{name:playlist.name,shuffle:true}),\'Mixing…\').catch(error=>note(error.message,true));row.append(open,play,shuffle);list.append(row)}}\n\nconst MODE_LABELS={ipad_external:\'iPad → external\',laptop_external:\'Laptop → external\',ipad_ipad:\'iPad only\',ipad_laptop:\'iPad → laptop\',ipad_both:\'iPad → iPad + laptop\',laptop_ipad:\'Laptop → iPad\',laptop_laptop:\'Laptop only\',laptop_both:\'Laptop → iPad + laptop\',external_roundtrip:\'External round-trip\'};for(const [key,label] of Object.entries(MODE_LABELS)){const b=document.createElement(\'button\');b.className=\'action\';b.dataset.mode=key;b.textContent=label;b.onclick=async()=>{try{await busy(b,()=>post(\'/api/mode\',{mode:key,password:$(\'#group-password\').value}),\'Switching…\');await refreshAll()}catch(error){note(error.message,true)}};$(\'#mode-grid\').append(b)}function loadGroups(data){const state=data.groups,select=$(\'#group-select\');select.replaceChildren(...Object.entries(state.profiles).map(([key,g])=>new Option(key+\' • \'+g.group,key,key===state.active,key===state.active)));const show=()=>{const key=select.value||state.active,g=state.profiles[key];if(!g)return;$(\'#group-key\').value=key;$(\'#group-name\').value=g.group;$(\'#group-user\').value=g.username;$(\'#group-server\').value=g.server;$(\'#group-required\').checked=!!g.passwordRequired};select.onchange=show;show()}async function refreshAll(){try{const d=await api(\'/api/state\');$(\'#source-title\').textContent=d.mode.label;$(\'#source-details\').textContent=\'CamillaDSP \'+(d.mode.camilla?\'running\':\'stopped\')+\' • SonoBus \'+(d.mode.sonobus?\'on\':\'off\')+\' • local \'+(d.mode.localMonitor?\'on\':\'off\');document.querySelectorAll(\'[data-mode]\').forEach(b=>b.classList.toggle(\'mode-active\',b.dataset.mode===d.mode.mode));loadGroups(d);await loadProfiles();await pollSystem();await pollLocal();return d}catch(error){note(error.message,true)}}$(\'#save-group\').onclick=async()=>{try{await post(\'/api/groups/save\',{key:$(\'#group-key\').value,group:$(\'#group-name\').value,username:$(\'#group-user\').value,server:$(\'#group-server\').value,passwordRequired:$(\'#group-required\').checked});await refreshAll();note(\'Group profile saved\')}catch(error){note(error.message,true)}};$(\'#open-pc\').onclick=async()=>{try{await busy($(\'#open-pc\'),()=>post(\'/api/mode/pc\'),\'Opening…\');show(\'pc\');await loadLists();await pollLocal()}catch(error){note(error.message,true)}};\n$(\'#pc-back\').onclick=()=>show(\'profiles\');\n$(\'#all-songs\').onclick=async()=>{try{all=(await api(\'/api/songs\')).songs;show(\'songs\');render(\'#song-list\',all,\'\')}catch(error){note(error.message,true)}};\n$(\'#song-search\').oninput=()=>render(\'#song-list\',all,$(\'#song-search\').value);\n$(\'#playlist-search\').oninput=()=>render(\'#playlist-songs\',inside,$(\'#playlist-search\').value);\ndocument.querySelectorAll(\'[data-back]\').forEach(button=>button.onclick=()=>show(button.dataset.back));\n$(\'#new-playlist\').onclick=async()=>{const name=prompt(\'New playlist name\');if(name)try{await post(\'/api/playlist/create\',{name});await loadLists();note(\'Playlist created\')}catch(error){note(error.message,true)}};\ndocument.querySelectorAll(\'[data-cmd]\').forEach(button=>button.onclick=async()=>{try{await busy(button,()=>post(\'/api/player/command\',{command:button.dataset.cmd}),\'…\');await pollLocal()}catch(error){note(error.message,true)}});\n$(\'#repeat\').onclick=async()=>{try{const data=await api(\'/api/player\');await post(\'/api/player/repeat\',{mode:{off:\'all\',all:\'one\',one:\'off\'}[data.repeat]||\'off\'});await pollLocal()}catch(error){note(error.message,true)}};\n$(\'#shuffle\').onclick=async()=>{try{await busy($(\'#shuffle\'),()=>post(\'/api/player/command\',{command:\'shuffle\'}),\'Shuffling…\');note(\'Queue shuffled\')}catch(error){note(error.message,true)}};\nfor(const [id,command] of [[\'system-previous\',\'previous\'],[\'system-toggle\',\'toggle\'],[\'system-next\',\'next\']])$(\'#\'+id).onclick=async()=>{try{await busy($(\'#\'+id),()=>post(\'/api/system-media\',{command}),\'…\');await pollSystem()}catch(error){note(error.message,true)}};\n$(\'#restart-camilla\').onclick=()=>busy($(\'#restart-camilla\'),()=>post(\'/api/restart-camilladsp\'),\'Restarting…\').then(loadProfiles).catch(error=>note(error.message,true));\n$(\'#restart-sonobus\').onclick=()=>busy($(\'#restart-sonobus\'),()=>post(\'/api/restart-sonobus\'),\'Restarting…\').catch(error=>note(error.message,true));\n$(\'#restart-airplay\').onclick=()=>busy($(\'#restart-airplay\'),()=>post(\'/api/restart-airplay\'),\'Restarting…\').catch(error=>note(error.message,true));\n$(\'#restart-vnc\').onclick=()=>busy($(\'#restart-vnc\'),()=>post(\'/api/restart-vnc\'),\'Restarting…\').catch(error=>note(error.message,true));\n$(\'#profile-search\').oninput=loadProfiles;\nbindSeek(state.local,\'/api/player/seek\');bindSeek(state.system,\'/api/system-media/seek\');bindVolume(state.local,\'/api/player/volume\');bindVolume(state.system,\'/api/system-volume\');\nlet staticRefreshRunning=false,volatileRefreshRunning=false;\nfunction renderProfileSnapshot(data){\n  const query=$(\'#profile-search\').value.toLowerCase(),root=$(\'#profile-list\');\n  $(\'#active-profile\').textContent=data.active?friendly(data.active):\'No profile\';\n  $(\'#active-state\').textContent=data.running?\'Running\':\'Stopped\';root.replaceChildren();\n  const groups=[\n    {name:\'Filterless / Speakers\',test:p=>p.toLowerCase()===\'00-filterless.yml\'},\n    {name:\'Apple EarPods\',test:p=>device(p)===\'Apple EarPods\'&&p.toLowerCase()!==\'00-filterless.yml\'},\n    {name:\'CMF Buds Pro 2\',test:p=>device(p)===\'CMF Buds Pro 2\'},\n    {name:\'HyperX Cloud III\',test:p=>device(p)===\'HyperX Cloud III\'}\n  ];\n  for(const group of groups){\n    const matches=data.profiles.filter(p=>group.test(p)&&friendly(p).toLowerCase().includes(query));if(!matches.length)continue;\n    const heading=document.createElement(\'div\');heading.className=\'section-title\';heading.textContent=group.name;root.append(heading);\n    const list=document.createElement(\'div\');list.className=\'list\';\n    for(const profile of matches){\n      const button=document.createElement(\'button\');button.className=\'item\'+(profile===data.active&&data.running?\' active\':\'\');\n      button.innerHTML=\'<span class="name"></span><span class="meta"></span>\';button.children[0].textContent=friendly(profile);button.children[1].textContent=group.name;\n      button.onclick=async()=>{try{await busy(button,()=>post(\'/api/select\',{profile}),\'Switching…\');await refreshStatic();note(\'Profile activated\')}catch(error){note(error.message,true)}};list.append(button)\n    }root.append(list)\n  }\n}\nfunction renderPlaylistSnapshot(playlists){\n  const list=$(\'#playlists\');list.replaceChildren();\n  for(const playlist of playlists){\n    const row=document.createElement(\'div\');row.className=\'row\';\n    const open=document.createElement(\'button\');open.className=\'item\';open.innerHTML=\'<span class="name"></span><span class="meta"></span>\';open.children[0].textContent=playlist.name;open.children[1].textContent=playlist.count+(playlist.count===1?\' song\':\' songs\');\n    open.onclick=async()=>{current=playlist.name;inside=(await api(\'/api/playlist?name=\'+encodeURIComponent(playlist.name))).songs;$(\'#playlist-title\').textContent=playlist.name;show(\'playlist\');render(\'#playlist-songs\',inside,\'\')};\n    const play=document.createElement(\'button\');play.className=\'action\';play.textContent=\'Play\';play.onclick=()=>busy(play,()=>post(\'/api/play/playlist\',{name:playlist.name,shuffle:false}),\'Loading…\').then(refreshVolatile).catch(error=>note(error.message,true));\n    const shuffle=document.createElement(\'button\');shuffle.className=\'action primary\';shuffle.textContent=\'Shuffle\';shuffle.onclick=()=>busy(shuffle,()=>post(\'/api/play/playlist\',{name:playlist.name,shuffle:true}),\'Mixing…\').then(refreshVolatile).catch(error=>note(error.message,true));\n    row.append(open,play,shuffle);list.append(row)\n  }\n}\nfunction renderVolatile(data){\n  $(\'#source-title\').textContent=data.mode.label;$(\'#source-details\').textContent=\'CamillaDSP \'+(data.mode.camilla?\'running\':\'stopped\')+\' • SonoBus \'+(data.mode.sonobus?\'on\':\'off\')+\' • local \'+(data.mode.localMonitor?\'on\':\'off\');\n  document.querySelectorAll(\'[data-mode]\').forEach(button=>button.classList.toggle(\'mode-active\',button.dataset.mode===data.mode.mode));\n  const system=data.systemMedia,sm=state.system;$(\'#system-title\').textContent=system.title||\'No system media\';$(\'#system-details\').textContent=[system.artist,system.player,system.status].filter(Boolean).join(\' • \');renderTimeline(sm,system.position,system.duration);if(sm.volumePending===null&&document.activeElement!==sm.volume){sm.volume.value=String(system.volume);fill(sm.volume,system.volume,100)}setPlayIcon($(\'#system-play-shape\'),$(\'#system-toggle\'),system.playing);\n  const local=data.player,lm=state.local;$(\'#now-title\').textContent=local.title||\'Nothing playing\';$(\'#now-details\').textContent=local.path||\'\';renderTimeline(lm,local.currentTime,local.duration);if(lm.volumePending===null&&document.activeElement!==lm.volume){lm.volume.value=String(local.volume);fill(lm.volume,local.volume,100)}$(\'#repeat\').textContent=\'Repeat \'+({off:\'Off\',all:\'All\',one:\'1\'}[local.repeat]||\'Off\');$(\'#repeat\').classList.toggle(\'active\',local.repeat!==\'off\');setPlayIcon($(\'#local-play-shape\'),document.querySelector(\'[data-cmd="toggle"]\'),local.playing)\n}\nasync function refreshStatic(){if(staticRefreshRunning)return;staticRefreshRunning=true;try{const data=await api(\'/api/state\');renderProfileSnapshot(data.profiles);renderPlaylistSnapshot(data.playlists);loadGroups(data);renderVolatile(data);return data}catch(error){note(error.message,true)}finally{staticRefreshRunning=false}}\nasync function refreshVolatile(){if(volatileRefreshRunning||document.hidden)return;volatileRefreshRunning=true;try{renderVolatile(await api(\'/api/volatile\'))}catch(error){console.warn(\'volatile refresh failed\',error)}finally{volatileRefreshRunning=false}}\nloadProfiles=async()=>refreshStatic();loadLists=async()=>refreshStatic();refreshAll=async()=>refreshStatic();\nrefreshStatic();window.addEventListener(\'pageshow\',refreshStatic);document.addEventListener(\'visibilitychange\',()=>{if(!document.hidden){refreshStatic();refreshVolatile()}});setInterval(refreshVolatile,1000);\n</script></body></html>'
 class H(BaseHTTPRequestHandler):
     def data(self,n,t,b):self.send_response(n);self.send_header('Content-Type',t);self.send_header('Content-Length',str(len(b)));self.send_header('Cache-Control','no-store');self.end_headers();self.wfile.write(b)
     def out(self,n,d):self.data(n,'application/json; charset=utf-8',json.dumps(d,separators=(',',':')).encode())
@@ -286,8 +548,10 @@ class H(BaseHTTPRequestHandler):
         u=urlparse(self.path);p=u.path;q=parse_qs(u.query)
         try:
             if p=='/':self.data(200,'text/html; charset=utf-8',PAGE.encode());return
-            if p=='/api/profiles':r={'profiles':[x.name for x in profiles()],'active':active(),'running':alive(rpid(CAMPID),'camilladsp')}
-            elif p=='/api/mode':r={'mode':audio_mode(),'sonobus':bool(sonopids())}
+            if p=='/api/state':r=full_state()
+            elif p=='/api/volatile':r=volatile_state()
+            elif p=='/api/profiles':r={'profiles':[x.name for x in profiles()],'active':active(),'running':alive(rpid(CAMPID),'camilladsp')}
+            elif p=='/api/mode':r=mode_state()
             elif p=='/api/system-media':r=system_state()
             elif p=='/api/player':r=player_state()
             elif p=='/api/playlists':r={'playlists':lists()}
@@ -300,17 +564,19 @@ class H(BaseHTTPRequestHandler):
         p=urlparse(self.path).path
         try:
             d=self.body()
-            if p=='/api/select':r=switch_profile(d.get('profile'))
+            if p=='/api/mode':r=set_mode(d.get('mode'),d.get('password'))
+            elif p=='/api/groups/save':r=save_group(d)
+            elif p=='/api/select':r=switch_profile(d.get('profile'))
             elif p=='/api/restart-camilladsp':r=restart_camilla()
-            elif p=='/api/restart-sonobus':r=restart_sonobus()
+            elif p=='/api/restart-sonobus':r=restart_sonobus(d.get('password'))
             elif p=='/api/restart-airplay':airplay(True);r={'restarted':True}
             elif p=='/api/restart-vnc':r=restart_vnc()
             elif p=='/api/system-media':r=system_media(d.get('command'))
             elif p=='/api/system-media/seek':r=system_seek(d.get('seconds'))
             elif p=='/api/system-volume':r=set_system_volume(d.get('volume'))
-            elif p=='/api/mode/pc':r=set_mode('system');ensure_mpv();r['player']='mpv'
-            elif p=='/api/mode/system':r=set_mode('system')
-            elif p=='/api/mode/airplay':r=set_mode('airplay')
+            elif p=='/api/mode/pc':r=set_mode('laptop_external',d.get('password'));ensure_mpv();r['player']='mpv'
+            elif p=='/api/mode/system':r=set_mode('laptop_external',d.get('password'))
+            elif p=='/api/mode/airplay':r=set_mode('ipad_external',d.get('password'))
             elif p=='/api/player/command':
                 c=d.get('command');cmd={'toggle':['cycle','pause'],'next':['playlist-next','force'],'previous':['playlist-prev','force'],'shuffle':['playlist-shuffle']}.get(c)
                 if not cmd:raise ValueError('Invalid command')
@@ -328,12 +594,12 @@ class H(BaseHTTPRequestHandler):
     def log_message(self,*a):pass
 class S(ThreadingHTTPServer):allow_reuse_address=True;daemon_threads=True
 
-def reset_runtime():ensure();stop_mpv();stop_sonobus();stop_camilla()
+def reset_runtime():ensure();stop_local_monitor();stop_mpv();stop_sonobus();stop_camilla()
 def start_runtime():
     ensure();alsa100();ps=profiles();name=active() or (ps[0].name if ps else '')
     if not name:raise RuntimeError('No profiles')
-    start_camilla(profile(name));restart_sonobus();apply_mode(audio_mode())
-def cleanup():stop_mpv();stop_sonobus();stop_camilla()
+    start_camilla(profile(name));apply_mode(audio_mode())
+def cleanup():stop_local_monitor();stop_mpv();stop_sonobus();stop_camilla()
 def main():
     ensure();me=os.getpid();old=rpid(SERVERPID)
     if old and old!=me and alive(old):
