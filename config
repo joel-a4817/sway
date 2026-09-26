@@ -140,6 +140,7 @@ bindsym --no-repeat $mod+Mod1+k fullscreen disable; exec kicad
 bindsym --no-repeat $mod+Mod1+b fullscreen disable; exec bambu-studio
 bindsym --no-repeat $mod+Mod1+f fullscreen disable; exec bash -c 'appimage-run /home/joel/Downloads/Apps/FreeCAD.AppImage'
 bindsym --no-repeat $mod+Mod1+y fullscreen disable; exec bash -c 'appimage-run /home/joel/Downloads/Apps/Antra.AppImage'
+bindsym --no-repeat $mod+Mod1+v fullscreen disable, exec sonobus
 
 bindsym --no-repeat $mod+Mod5+l fullscreen disable; exec $term -e bash -c 'prismlauncher --launch "1.21.9(1)"'
 bindsym --no-repeat $mod+Mod5+h fullscreen disable; exec $term -e bash -c 'prismlauncher --launch "1.21.4"'
