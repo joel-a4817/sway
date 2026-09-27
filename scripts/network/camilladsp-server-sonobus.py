@@ -2,14 +2,15 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
-import json, os, random, re, shutil, signal, socket, subprocess, threading, time, uuid
+import base64, hashlib, json, math, os, random, re, shutil, signal, socket, struct, subprocess, threading, time, uuid
 
 HOME=Path('/home/joel'); PROFILES=HOME/'Documents/prefs/audio/camilladsp'; MUSIC=HOME/'Downloads/Music'
 STATE=HOME/'.local/state/sway/audio/camilladsp-webremote'; PORT=8766
 CAMILLA=Path('/run/current-system/sw/bin/camilladsp'); SONOBUS=Path('/run/current-system/sw/bin/sonobus')
 SONOSET=HOME/'.config/sonobus/SonoBus.settings'; EXTS={'.m4a','.aac','.mp3','.flac','.wav','.ogg','.opus'}
 CAMPID=STATE/'camilladsp.pid'; ACTIVE=STATE/'active-profile'; SERVERPID=STATE/'web-server.pid'
-MPVPID=STATE/'mpv.pid'; MPVSOCK=STATE/'mpv.sock'; MPVLOG=STATE/'mpv.log'; MPVVOLUME=STATE/'mpv-volume'; MODE=STATE/'mode'
+MPVPID=STATE/'mpv.pid'; MPVSOCK=STATE/'mpv.sock'; MPVLOG=STATE/'mpv.log'; MODE=STATE/'mode'
+MASTER_VOLUME=HOME/'.local/state/sway/audio/master-volume'; CAM_WS_PORT=8767
 LOCK=threading.RLock(); PLAYERLOCK=threading.RLock(); MPRISLOCK=threading.RLock(); LAST_MPRIS=None
 SYSTEM_AUDIO_SERVICE='camilladsp-system-audio.service'
 STOPPED=HOME/'.local/state/sway/audio/audio-stopped'
@@ -145,7 +146,7 @@ def start_camilla(p):
     with logpath.open('ab',buffering=0) as log:
         log.write(marker.encode())
         process=subprocess.Popen(
-            [str(CAMILLA),str(target)],stdin=subprocess.DEVNULL,
+            [str(CAMILLA),f'--port={CAM_WS_PORT}',f'--gain={master_db(master_volume()):.4f}',str(target)],stdin=subprocess.DEVNULL,
             stdout=log,stderr=subprocess.STDOUT,start_new_session=True,
         )
     CAMILLA_PROCESS=process;CAMPID.write_text(str(process.pid)+'\n')
@@ -190,7 +191,7 @@ def switch_profile(name):
         try:
             pid=start_camilla(target)
             if was_stopped:
-                apply_mode(audio_mode(),restore_camilla=False)
+                apply_mode(audio_mode(),restore_camilla=False,normalize=False)
                 STOPPED.unlink(missing_ok=True)
             elif local_wanted:
                 start_local_monitor()
@@ -207,6 +208,7 @@ def switch_profile(name):
                     pass
             raise
 
+        normalize_audio_volumes()
         invalidate_cache('profiles')
         return {'profile':target.name,'pid':pid,'mode':mode_state()}
 def restart_camilla():
@@ -217,6 +219,123 @@ def alsa100():
     r=run(['amixer','-c','Loopback','sset','PCM','100%'],False)
     if r.returncode:raise RuntimeError(r.stderr.strip() or r.stdout.strip() or 'Could not set Loopback PCM')
 
+# This file is shared with audio-switch.sh. It is the only saved master.
+def master_volume():
+    try:
+        value=float(MASTER_VOLUME.read_text().strip().rstrip('%'))
+        if 0<=value<=100:return value
+    except (OSError,ValueError):pass
+    try:
+        result=run([exe('pactl'),'get-sink-volume','@DEFAULT_SINK@'],False,5,media_env())
+        match=re.search(r'(\d+)%',result.stdout)
+        value=float(match.group(1)) if result.returncode==0 and match else 50.0
+    except (OSError,FileNotFoundError):value=50.0
+    value=max(0.0,min(100.0,value))
+    MASTER_VOLUME.parent.mkdir(parents=True,exist_ok=True)
+    atomic(MASTER_VOLUME,f'{value:.2f}%\n')
+    return value
+
+def master_db(value):
+    # 100% = 0 dB; 50% = -6.02 dB. CamillaDSP's minimum is -150 dB.
+    return -150.0 if value <= 0 else 20.0*math.log10(value/100.0)
+
+def _ws_read(sock, size):
+    data=b''
+    while len(data)<size:
+        chunk=sock.recv(size-len(data))
+        if not chunk:raise RuntimeError('CamillaDSP websocket closed unexpectedly')
+        data+=chunk
+    return data
+
+def camilla_command(command):
+    # Local-only RFC 6455 client: no third-party Python package is required.
+    key=base64.b64encode(os.urandom(16)).decode('ascii')
+    with socket.create_connection(('127.0.0.1',CAM_WS_PORT),timeout=2) as sock:
+        sock.settimeout(2)
+        request=(f'GET / HTTP/1.1\r\nHost: 127.0.0.1:{CAM_WS_PORT}\r\n'
+                 'Upgrade: websocket\r\nConnection: Upgrade\r\n'
+                 f'Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n')
+        sock.sendall(request.encode('ascii'))
+        header=b''
+        while b'\r\n\r\n' not in header:
+            if len(header)>8192:raise RuntimeError('CamillaDSP websocket handshake too large')
+            header+=_ws_read(sock,1)
+        expected=base64.b64encode(hashlib.sha1((key+'258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode()).digest())
+        if not header.startswith(b'HTTP/1.1 101 ') or b'sec-websocket-accept: '+expected.lower() not in header.lower():
+            raise RuntimeError('CamillaDSP websocket handshake failed')
+        payload=json.dumps(command,separators=(',',':')).encode('utf-8')
+        mask=os.urandom(4)
+        length=len(payload)
+        size=(bytes([length]) if length<126 else b'\x7e'+struct.pack('!H',length)
+              if length<65536 else b'\x7f'+struct.pack('!Q',length))
+        sock.sendall(b'\x81'+bytes([size[0]|128])+size[1:]+mask+
+                     bytes(byte^mask[i%4] for i,byte in enumerate(payload)))
+        first,second=_ws_read(sock,2)
+        if first & 15 != 1 or not first & 128:raise RuntimeError('Unexpected CamillaDSP websocket response')
+        count=second & 127
+        if count==126:count=struct.unpack('!H',_ws_read(sock,2))[0]
+        elif count==127:count=struct.unpack('!Q',_ws_read(sock,8))[0]
+        if count>65536:raise RuntimeError('CamillaDSP response too large')
+        response_mask=_ws_read(sock,4) if second & 128 else None
+        data=_ws_read(sock,count)
+        if response_mask:data=bytes(byte^response_mask[i%4] for i,byte in enumerate(data))
+    reply=json.loads(data.decode('utf-8'))
+    name=command if isinstance(command,str) else next(iter(command))
+    item=reply.get(name,{})
+    if item.get('result')!='Ok':raise RuntimeError(f'CamillaDSP {name} failed: {item}')
+    return item.get('value')
+
+def apply_master_volume(value):
+    # The CamillaDSP Main fader is after processing and before the shared
+    # output captured by SonoBus and the local monitor, regardless of device.
+    if alive(rpid(CAMPID),'camilladsp'):
+        try:camilla_command({'SetVolume':master_db(value)})
+        except (OSError,ValueError) as error:raise RuntimeError(f'Could not set CamillaDSP master: {error}') from error
+    elif not STOPPED.exists():
+        raise RuntimeError('CamillaDSP is not running; master volume was not changed')
+    # Remove stale per-sink attenuation from older versions. No second master.
+    for sink in _pactl_json('sinks'):
+        name=str(sink.get('name') or '') if isinstance(sink,dict) else ''
+        if not name:continue
+        result=run([exe('pactl'),'set-sink-volume',name,'100%'],False,8,media_env())
+        if result.returncode:raise RuntimeError(f'Could not set {name} to unity: {result.stderr.strip()}')
+
+def normalize_audio_volumes():
+    # ALSA hardware gain at 0 dB (playback and capture); only the CamillaDSP
+    # Main fader receives the saved master. Never alter mute/capture switches.
+    errors=[]
+    try:cards=Path('/proc/asound/cards').read_text()
+    except OSError:cards=''
+    for card in re.findall(r'^\s*(\d+)\s+\[',cards,re.M):
+        listing=run([exe('amixer'),'-c',card,'scontrols'],False,8)
+        if listing.returncode:
+            errors.append(f'ALSA card {card}: {listing.stderr.strip() or "could not list controls"}')
+            continue
+        for name,index in re.findall(r"^Simple mixer control '([^']+)',(\d+)$",listing.stdout,re.M):
+            control=f'{name},{index}'
+            info=run([exe('amixer'),'-c',card,'sget',control],False,8)
+            if info.returncode or not re.search(r'[-+]?\d+(?:\.\d+)?dB',info.stdout):continue
+            for direction in ('playback','capture'):
+                if not re.search(rf'^{direction} channels:',info.stdout,re.I|re.M):continue
+                result=run([exe('amixer'),'-c',card,'sset',control,direction,'0dB'],False,8)
+                if result.returncode:
+                    errors.append(f'ALSA card {card} {control} {direction}: {result.stderr.strip() or "0dB unavailable"}')
+    try:apply_master_volume(master_volume())
+    except RuntimeError as error:errors.append(str(error))
+    if errors:
+        raise RuntimeError('Audio normalization incomplete: '+'; '.join(errors[:4])+
+                           (f'; {len(errors)-4} more' if len(errors)>4 else ''))
+    return {'masterVolume':master_volume()}
+
+def set_master_volume(value):
+    try:value=float(value)
+    except (TypeError,ValueError):raise ValueError('Invalid master volume')
+    if not math.isfinite(value) or not 0<=value<=100:raise ValueError('Master volume must be between 0 and 100')
+    with LOCK:
+        apply_master_volume(value)
+        MASTER_VOLUME.parent.mkdir(parents=True,exist_ok=True)
+        atomic(MASTER_VOLUME,f'{value:.2f}%\n')
+    return {'volume':value}
 def sonopids():
     out=set()
     for n in ('sonobus','SonoBus'):
@@ -251,15 +370,12 @@ def stop_sonobus():
 
 
 def saved_mpv_volume():
-    try:return max(0.0,min(100.0,float(MPVVOLUME.read_text().strip())))
-    except (OSError,ValueError):return 100.0
-def save_mpv_volume(value):
-    value=max(0.0,min(100.0,float(value)));atomic(MPVVOLUME,f'{value:.2f}\n');return value
+    return master_volume()
 def stop_mpv():killpidfile(MPVPID,'mpv');MPVSOCK.unlink(missing_ok=True)
 def ensure_mpv():
     if alive(rpid(MPVPID),'mpv') and MPVSOCK.exists():return
     stop_mpv();log=MPVLOG.open('ab',buffering=0)
-    cmd=[exe('mpv'),'--idle=yes','--no-video','--no-terminal','--keep-open=no','--ao=alsa','--audio-device=alsa/camilladsp_input','--audio-samplerate=96000','--audio-channels=stereo','--audio-format=s32',f'--input-ipc-server={MPVSOCK}',f'--volume={saved_mpv_volume():.2f}','--volume-max=100']
+    cmd=[exe('mpv'),'--idle=yes','--no-video','--no-terminal','--keep-open=no','--ao=alsa','--audio-device=alsa/camilladsp_input','--audio-samplerate=96000','--audio-channels=stereo','--audio-format=s32',f'--input-ipc-server={MPVSOCK}','--volume=100','--volume-max=100']
     try:q=subprocess.Popen(cmd,stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
     finally:log.close()
     MPVPID.write_text(f'{q.pid}\n');deadline=time.monotonic()+5
@@ -329,7 +445,7 @@ def player_state():
         'artist':values.get('metadata/by-key/Artist') or values.get('metadata/by-key/Album_Artist') or '',
         'album':values.get('metadata/by-key/Album') or '',
         'currentTime':number(values.get('playback-time')),'duration':number(values.get('duration')),
-        'volume':number(values.get('volume')) if number(values.get('volume')) is not None else saved_mpv_volume(),
+        'volume':master_volume(),
         'repeat':repeat,
     }
 
@@ -354,11 +470,9 @@ def active_mpris():
 def pctl(p,*args,default=''):
     r=run([exe('playerctl'),'--player',p,*args],False,5,media_env());return r.stdout.strip() if r.returncode==0 else default
 def system_volume():
-    r=run([exe('pactl'),'get-sink-volume','@DEFAULT_SINK@'],False,5,media_env());m=re.search(r'(\d+)%',r.stdout);return int(m.group(1)) if m else 100
+    return master_volume()
 def set_system_volume(v):
-    v=max(0,min(100,float(v)));r=run([exe('pactl'),'set-sink-volume','@DEFAULT_SINK@',f'{v:.2f}%'],False,5,media_env())
-    if r.returncode:raise RuntimeError(r.stderr.strip() or 'Could not set system volume')
-    return {'volume':v}
+    return set_master_volume(v)
 
 def system_state():
     player=active_mpris()
@@ -573,7 +687,7 @@ def configure_sonobus(policy=None):
             raise RuntimeError(f'SonoBus setting {key} did not persist as {value}')
         verification[key]=value
     return {'policy':policy,'settings':verification}
-def restart_sonobus(password=None,policy=None):
+def restart_sonobus(password=None,policy=None,normalize=True):
     global SONOBUS_PROCESS
     with LOCK:
         stop_sonobus();alsa100();applied=configure_sonobus(policy)
@@ -601,6 +715,7 @@ def restart_sonobus(password=None,policy=None):
                 raise RuntimeError('SonoBus failed to start: '+tail)
             if process.pid in sonopids():break
             time.sleep(.05)
+        if normalize:normalize_audio_volumes()
         return {'pid':process.pid,'profile':state['active'],'group':item['group'],**applied}
 
 def stop_local_monitor():
@@ -693,30 +808,37 @@ def audio_topology():
         cards.append({'name':name,'index':index,'label':label,'profiles':profiles,'activeProfile':active_name,'sinks':sinks[:]})
     cards.sort(key=lambda item:item['label'].casefold())
     return {'cards':cards,'saved':saved}
-def set_output_profile(card,profile):
+def set_output_profile(card,profile,normalize=True):
     card=str(card or '').strip();profile=str(profile or '').strip()
     topology=audio_topology();item=next((x for x in topology['cards'] if x['name']==card),None)
     if item is None:raise ValueError('Selected audio card is unavailable')
     if profile not in {x['name'] for x in item['profiles']}:raise ValueError('Selected card profile is unavailable')
+    if item['activeProfile']==profile:
+        if normalize:normalize_audio_volumes()
+        return topology
     result=run([exe('pactl'),'set-card-profile',card,profile],False,10,media_env())
     if result.returncode:raise RuntimeError(result.stderr.strip() or 'Could not activate audio card profile')
     deadline=time.monotonic()+2.0
     while time.monotonic()<deadline:
         updated=audio_topology();current=next((x for x in updated['cards'] if x['name']==card),None)
-        if current and current['activeProfile']==profile:return updated
+        if current and current['activeProfile']==profile:
+            if normalize:normalize_audio_volumes()
+            return updated
         time.sleep(.1)
-    return audio_topology()
+    updated=audio_topology()
+    if normalize:normalize_audio_volumes()
+    return updated
 def choose_output_route(requested=None):
     requested=requested if isinstance(requested,dict) else saved_output_route()
     card=str(requested.get('card') or '');profile=str(requested.get('profile') or '')
-    if card and profile:set_output_profile(card,profile)
+    if card and profile:set_output_profile(card,profile,normalize=False)
     topology=audio_topology();cards=topology['cards']
     selected_card=next((x for x in cards if x['name']==card),None)
     if selected_card is None:
         selected_card=next((x for x in cards if x['sinks']),cards[0] if cards else None)
     if selected_card is None:raise RuntimeError('No physical laptop audio card was found')
     if not profile or profile not in {x['name'] for x in selected_card['profiles']}:
-        profile=selected_card['activeProfile'] or selected_card['profiles'][0]['name'];set_output_profile(selected_card['name'],profile);topology=audio_topology();selected_card=next(x for x in topology['cards'] if x['name']==selected_card['name'])
+        profile=selected_card['activeProfile'] or selected_card['profiles'][0]['name'];set_output_profile(selected_card['name'],profile,normalize=False);topology=audio_topology();selected_card=next(x for x in topology['cards'] if x['name']==selected_card['name'])
     sink_name=str(requested.get('sink') or '');sink=next((x for x in selected_card['sinks'] if x['name']==sink_name),None)
     if sink is None:
         if not selected_card['sinks']:raise RuntimeError('The selected card profile exposes no physical output sink')
@@ -757,7 +879,7 @@ def mode_state():
         'airplay':run(['systemctl','is-active','shairport-sync.service'],False,5).stdout.strip()=='active',
         'localOutput':saved_output_route(),'localOutputLabel':(_read_json(LOCALSINK,{}).get('label') or 'Automatic'),'sonobusPolicy':policy,
     }
-def apply_mode(name,password=None,restore_camilla=True,output=None):
+def apply_mode(name,password=None,restore_camilla=True,output=None,normalize=True):
     if name not in MODES:raise ValueError('Invalid audio mode')
     label,source,local,sono=MODES[name];policy=MODE_POLICIES[name]
     if STOPPED.exists():
@@ -773,9 +895,10 @@ def apply_mode(name,password=None,restore_camilla=True,output=None):
     apply_source_services(source)
     if local:start_local_monitor(output)
     else:stop_local_monitor()
-    if sono:restart_sonobus(password,policy)
+    if sono:restart_sonobus(password,policy,normalize=False)
     else:stop_sonobus()
     MODE.write_text(name+'\n')
+    if normalize:normalize_audio_volumes()
     STOPPED.unlink(missing_ok=True)
     return mode_state()
 def set_mode(name,password=None,output=None):
@@ -876,7 +999,7 @@ class H(BaseHTTPRequestHandler):
                 if not cmd:raise ValueError('Invalid command')
                 mpv(cmd);r={'command':c}
             elif p=='/api/player/seek':v=max(0,float(d.get('seconds')));mpv(['seek',v,'absolute+exact']);r={'seconds':v}
-            elif p=='/api/player/volume':v=save_mpv_volume(d.get('volume'));mpv(['set_property','volume',v]);r={'volume':v}
+            elif p=='/api/player/volume':r=set_master_volume(d.get('volume'))
             elif p=='/api/player/repeat':r={'mode':set_repeat(d.get('mode'))}
             elif p=='/api/play/song':x=song(d.get('path'));mpv(['loadfile',str(x),'replace']);r=sobj(x)
             elif p=='/api/play/playlist':r=play_list(d.get('name'),bool(d.get('shuffle')))
@@ -897,6 +1020,7 @@ def start_runtime():
         run(['systemctl','stop','shairport-sync.service','nqptp.service'],False,10)
         return
     alsa100()
+    master_volume()
     available=profiles()
     if not available:raise RuntimeError('No CamillaDSP profiles found in '+str(PROFILES))
     saved=active();selected=None
@@ -915,9 +1039,10 @@ def start_runtime():
         if 'exposes no physical output sink' not in str(error):raise
         label,source,local,sono=MODES[mode]
         apply_source_services(source);stop_local_monitor()
-        if sono:restart_sonobus(None,MODE_POLICIES[mode])
+        if sono:restart_sonobus(None,MODE_POLICIES[mode],normalize=False)
         else:stop_sonobus()
         MODE.write_text(mode+'\n')
+        normalize_audio_volumes()
     except ValueError as error:
         # A saved password-protected group cannot be joined unattended. Keep
         # CamillaDSP and the web UI alive so the password can be entered there.
@@ -927,6 +1052,7 @@ def start_runtime():
         if local:start_local_monitor()
         else:stop_local_monitor()
         stop_sonobus();MODE.write_text(mode+'\n')
+        normalize_audio_volumes()
 def stop_audio_from_switch():
     with LOCK:
         STOPPED.touch()

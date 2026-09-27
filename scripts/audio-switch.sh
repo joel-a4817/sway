@@ -179,9 +179,11 @@ stop_camilla() {
     rm -f -- "$PIDFILE"
 }
 start_camilla() {
-    local profile="$1" pid
+    local profile="$1" pid master gain
     "$CAMILLA" --check "$profile" >>"$ACTION_LOG" 2>&1 || return 1
-    "$CAMILLA" "$profile" >>"$LOCAL_CAMILLA_LOG" 2>&1 </dev/null 9>&- &
+    master="$(read_master_volume)"
+    gain="$(awk -v v="${master%\%}" 'BEGIN { if (v <= 0) print -150; else printf "%.4f", 20*log(v/100)/log(10) }')"
+    "$CAMILLA" --port=8767 --gain="$gain" "$profile" >>"$LOCAL_CAMILLA_LOG" 2>&1 </dev/null 9>&- &
     pid=$!
     printf '%s\n' "$pid" >"$PIDFILE"
     for ((i=0;i<20;i++)); do
@@ -349,33 +351,65 @@ resume_previously_playing_media() {
     rm -f "$MEDIA_RESUME_FILE" "$MEDIA_CAPTURED_FILE"
 }
 
-normalize_audio_volumes() {
-    local restore_volume="${1:-}" restore_sink="${2:-}" sof_card hyperx_card sink
-    pause_active_media
-    sof_card="$(aplay -l 2>/dev/null | awk -F': ' '/sof|SOF/ {print $1; exit}' | grep -o '[0-9]\+' || true)"
-    [[ -n "$sof_card" ]] && amixer -c "$sof_card" sset Headphone 100% >/dev/null 2>&1 || true
-    hyperx_card="$(aplay -l 2>/dev/null | awk -F': ' '/HyperX Cloud III/ {print $1; exit}' | grep -o '[0-9]\+' || true)"
-    [[ -n "$hyperx_card" ]] && amixer -c "$hyperx_card" sset 'Speaker Volume' 100% unmute >/dev/null 2>&1 || true
-    while read -r sink; do
-        [[ -n "$sink" ]] || continue
-        pactl set-sink-mute "$sink" 0 >/dev/null 2>&1 || true
-        pactl set-sink-volume "$sink" 100% >/dev/null 2>&1 || true
-    done < <(pactl list short sinks 2>/dev/null | awk '{print $2}')
-    if [[ -n "$restore_volume" && -n "$restore_sink" ]] &&
-       pactl list short sinks 2>/dev/null | awk '{print $2}' | grep -Fqx "$restore_sink"; then
-        pactl set-sink-volume "$restore_sink" "$restore_volume" >/dev/null 2>&1 || true
+# One persisted master, applied once at the CamillaDSP Main fader.
+MASTER_VOLUME_FILE="$STATE_DIR/master-volume"
+read_master_volume() {
+    local value
+    value="$(cat "$MASTER_VOLUME_FILE" 2>/dev/null || true)"
+    if [[ "$value" =~ ^([0-9]|[1-9][0-9]|100)(\.[0-9]+)?%$ ]]; then
+        printf '%s\n' "$value"
+        return
     fi
+    value="$(pactl get-sink-volume "$(pactl get-default-sink 2>/dev/null)" 2>/dev/null | grep -oE '[0-9]+%' | head -n1)"
+    [[ "$value" =~ ^([0-9]|[1-9][0-9]|100)%$ ]] || value=100%
+    printf '%s\n' "$value" >"$MASTER_VOLUME_FILE"
+    printf '%s\n' "$value"
 }
-export -f mpris_playback_status mpv_is_playing capture_media_resume_state pause_active_media resume_previously_playing_media normalize_audio_volumes
-
-ORIGINAL_SINK="$(pactl get-default-sink 2>/dev/null || true)"
-ORIGINAL_VOLUME=""
-if [[ -n "$ORIGINAL_SINK" ]] && pactl list short sinks 2>/dev/null | awk '{print $2}' | grep -Fqx "$ORIGINAL_SINK"; then
-    ORIGINAL_VOLUME="$(pactl get-sink-volume "$ORIGINAL_SINK" 2>/dev/null | grep -Po '[0-9]+%' | head -n1)"
-fi
-
-export RESULT_FILE ACTION_STARTED_FILE ACTION_LOG CARD_SELECTION_FILE PROFILE_SELECTION_FILE MEDIA_RESUME_FILE MEDIA_CAPTURED_FILE ORIGINAL_VOLUME ORIGINAL_SINK
-
+# Parse the kernel's ALSA card list, not playback-only aplay -l. This also
+# includes capture-only devices. Only controls advertising a dB scale qualify.
+normalize_alsa_controls() {
+    local card entry control info direction failures=0 count=0
+    while IFS= read -r card; do
+        [[ -n "$card" ]] || continue
+        while IFS= read -r entry; do
+            [[ -n "$entry" ]] || continue
+            control="${entry#*\'}"; control="${control%%\'*}"
+            # Include the index for identically named mixer controls.
+            if [[ "$entry" =~ ,([0-9]+)$ ]]; then control+=",${BASH_REMATCH[1]}"; fi
+            info="$(amixer -c "$card" sget "$control" 2>/dev/null)" || continue
+            [[ "$info" == *'dB'* ]] || continue
+            for direction in playback capture; do
+                [[ "$info" == *"${direction^} channels:"* ]] || continue
+                if amixer -c "$card" sset "$control" "$direction" 0dB >>"$ACTION_LOG" 2>&1; then
+                    ((count+=1))
+                else
+                    ((failures+=1))
+                    printf 'Warning: could not set card %s control %s %s to 0dB\n' "$card" "$control" "$direction" >>"$ACTION_LOG"
+                fi
+            done
+        done < <(amixer -c "$card" scontrols 2>/dev/null | sed -n "/^Simple mixer control /p")
+    done < <(awk '/^[[:space:]]*[0-9]+[[:space:]]+\[/{print $1}' /proc/asound/cards 2>/dev/null)
+    printf 'ALSA normalization: %s dB-capable playback/capture directions set to 0dB; %s failed\n' "$count" "$failures" >>"$ACTION_LOG"
+    (( failures == 0 ))
+}
+normalize_audio_volumes() {
+    local sink name master
+    pause_active_media
+    master="$(read_master_volume)"
+    normalize_alsa_controls || echo 'Warning: some ALSA controls could not reach 0dB; see action log.' >&2
+    while IFS= read -r sink; do
+        [[ -n "$sink" ]] || continue
+        name="${sink,,}"
+        # All sinks are unity: SonoBus and the local monitor read the same
+        # CamillaDSP output, whose Main fader holds the saved master.
+        pactl set-sink-volume "$sink" 100% >>"$ACTION_LOG" 2>&1 || true
+    done < <(pactl list short sinks 2>/dev/null | awk '{print $2}')
+    # Never alter hardware or software mute/capture switches during gain reset.
+}
+export -f mpris_playback_status mpv_is_playing capture_media_resume_state pause_active_media resume_previously_playing_media read_master_volume normalize_alsa_controls normalize_audio_volumes
+export MASTER_VOLUME_FILE
+MASTER_VOLUME="$(read_master_volume)"
+export RESULT_FILE ACTION_STARTED_FILE ACTION_LOG CARD_SELECTION_FILE PROFILE_SELECTION_FILE MEDIA_RESUME_FILE MEDIA_CAPTURED_FILE MASTER_VOLUME
 mapfile -t CARDS < <(pactl list cards 2>/dev/null | awk '
 function output_card(){if(card!=""){if(description=="")description=card;print card "|" description}}
 /^Card #[0-9]+/{output_card();card="";description="";next}
@@ -555,7 +589,7 @@ SELECTED_CARD_DESCRIPTION="${CARDS[$SELECTED_CARD_VALUE]#*|}"
 SELECTED_CARD_LABEL="$(card_display_label "$SELECTED_CARD" "$SELECTED_CARD_DESCRIPTION")"
 
 CURRENT_SINK="$(pactl get-default-sink 2>/dev/null || true)"
-normalize_audio_volumes "$ORIGINAL_VOLUME" "$CURRENT_SINK"
+normalize_audio_volumes
 
 mapfile -t PROFILES < <(pactl list cards | awk -v target="$SELECTED_CARD" '
 /^[[:space:]]*Name:/{current=$0;sub(/^[[:space:]]*Name:[[:space:]]*/,"",current);selected=(current==target);in_profiles=0;next}
@@ -760,7 +794,7 @@ rm -f -- "$STATE_DIR/audio-stopped"
 # Save route only after a successful start; webremote can reuse this route.
 jq -n --arg card "$SELECTED_CARD" --arg profile "$SELECTED_PROFILE" --arg sink "$PHYSICAL_SINK" --arg port "$SELECTED_PORT"     '{card:$card,profile:$profile,sink:$sink,port:$port}' >"$ROUTE_FILE.tmp.$$" &&
     mv -f "$ROUTE_FILE.tmp.$$" "$ROUTE_FILE"
-normalize_audio_volumes "$ORIGINAL_VOLUME" camilladsp
+normalize_audio_volumes
 resume_previously_playing_media
 echo; echo "Device: $SELECTED_CARD_LABEL"
 echo "Card profile: $SELECTED_PROFILE_LABEL"

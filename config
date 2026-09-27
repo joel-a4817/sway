@@ -121,7 +121,7 @@ bindsym --no-repeat $mod+shift+r fullscreen disable; exec bash -c 'mpv /home/joe
 bindsym --no-repeat $mod+shift+m fullscreen disable; exec bash -c 'mpv /home/joel/Downloads/Music/favourites.m3u'
 bindsym --no-repeat $mod+shift+a fullscreen disable; exec $term -T "$popup-update-a_music_server" -e bash -c 'trap "" INT; (trap - INT; /home/joel/.config/sway/scripts/network/start-ipad-webremote.sh); echo; read -n 1 -rsp "Press any key to close..."'
 bindsym --no-repeat $mod+shift+b fullscreen disable; exec $term -T "$popup-update-camilladsp_server" -e bash -c 'trap "" INT; (trap - INT; python3 /home/joel/.config/sway/scripts/network/camilladsp-server-sonobus.py); read -n 1 -rsp "Press any key to close..."'
-bindsym --no-repeat $mod+shift+d fullscreen disable; exec $term -T "$popup-update-a_profiles" -e bash -c 'python3 /home/joel/.config/sway/scripts/updaters/rebuild_pipewire_camilla.py; echo; read -n 1 -rsp "Press any key to close..."'
+bindsym --no-repeat $mod+shift+d fullscreen disable; exec $term -T "$popup-update-a_profiles" -e bash -c 'python3 /home/joel/.config/sway/scripts/updaters/rebuild-camilla.py; echo; read -n 1 -rsp "Press any key to close..."'
 
 #keybinds app
 bindsym --no-repeat $mod+F2 fullscreen disable; exec $term -T "$popup-tuis" -e clipse
@@ -166,7 +166,7 @@ bindsym --no-repeat $mod+F5 exec bash -c '~/.config/sway/scripts/screen-capture.
 #screenshot
 
 #audio device output switch
-bindsym --locked --no-repeat $mod+F7 fullscreen disable; exec $term -T "$popup-audio-switch" -e bash -c '~/.config/sway/scripts/audio/audio-switch.sh'
+bindsym --locked --no-repeat $mod+F7 fullscreen disable; exec $term -T "$popup-audio-switch" -e bash -c '~/.config/sway/scripts/audio-switch.sh'
 
 #mount dev
 bindsym --no-repeat $mod+F8 fullscreen disable; exec $term -T "$popup-mount" -e bash -c '/home/joel/.config/sway/scripts/mount/mount-swaynag.sh'
@@ -335,12 +335,3 @@ bindsym --no-repeat $mod+r mode "resize"
     # Special keys to adjust brightness via brightnessctl
      bindsym --locked XF86MonBrightnessDown exec brightnessctl set 5%-
      bindsym --locked XF86MonBrightnessUp exec brightnessctl set 5%+
-
-     bindsym --locked $mod+Control+Escape exec ~/.config/sway/scripts/audio/mpv-toggle.sh
-     bindsym --locked $mod+Shift+Escape exec bash -lc 'cur=$(pactl get-sink-volume @DEFAULT_SINK@ | grep -o "[0-9]\+%" | head -1 | tr -d "%"); new=$((cur + 5)); [ $new -gt 100 ] && new=100; pactl set-sink-volume @DEFAULT_SINK@ ${new}%'
-     bindsym --locked $mod+Control+Shift+Escape systemctl suspend
-
-     bindsym --locked $mod+Print exec bash -lc '/home/joel/.config/sway/scripts/audio/hotspot-toggle.sh'
-     bindsym --locked $mod+Shift+Print exec bash -lc '/home/joel/.config/sway/scripts/audio/hyperx-cloud3-select.sh'
-     bindsym --locked $mod+Control+Print exec bash -lc '/home/joel/.config/sway/scripts/audio/hyperx-earpods-select.sh'
-     bindsym --locked $mod+Control+Shift+Print exec bash -lc '/home/joel/.config/sway/scripts/audio/suspend-display-toggle.sh'
