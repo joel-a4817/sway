@@ -417,7 +417,7 @@ pipeline:
     return output_path, config
 
 def main():
-    """Reusable CamillaDSP profile rebuild; never reads, writes, or removes Nix files."""
+    """Reusable CamillaDSP profile rebuild"""
     hf = load_required_ash_helpers()
     report = []
     for index, folder in enumerate(PROFILES):

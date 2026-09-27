@@ -2,11 +2,36 @@
 set -u
 
 HOME_DIR="/home/joel"
-STATE_DIR="$HOME_DIR/.local/state/sway/audio"
+STATE_DIR="$HOME_DIR/.local/state/sway/audio-switch"
+REMOTE_STATE="$HOME_DIR/.local/state/sway/camilladsp-webremote"
+LEGACY_STATE="$HOME_DIR/.local/state/sway/audio"
 
 # Prevent overlapping selectors from changing the graph concurrently.
-mkdir -p "$STATE_DIR"
-# Lock lives under ~/.local/state/sway/audio; children close fd 9.
+mkdir -p "$STATE_DIR" "$REMOTE_STATE"
+# Do not migrate an active old server's PID/markers: restart the paired server first.
+legacy_server_pid="$(cat "$LEGACY_STATE/camilladsp-webremote/web-server.pid" 2>/dev/null || true)"
+if [[ "$legacy_server_pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$legacy_server_pid" 2>/dev/null; then
+    echo 'Restart the updated webremote server before using the updated audio switch.' >&2
+    exit 1
+fi
+# First-run migration: copy persistent values without overwriting new state.
+if [[ ! -e "$STATE_DIR/state-migrated" && -d "$LEGACY_STATE" ]]; then
+    for old in "$LEGACY_STATE"/*; do
+        [[ -f "$old" && ! -L "$old" ]] || continue
+        case "${old##*/}" in audio-stopped|audio-stop-complete|audio-stop-capable.pid) target="$REMOTE_STATE/${old##*/}" ;; *) target="$STATE_DIR/${old##*/}" ;; esac
+        [[ -e "$target" ]] || mv -- "$old" "$target" 2>/dev/null || true
+    done
+    if [[ -d "$LEGACY_STATE/camilladsp-webremote" ]]; then
+        for old in "$LEGACY_STATE/camilladsp-webremote"/*; do
+            [[ -f "$old" && ! -L "$old" ]] || continue
+            target="$REMOTE_STATE/${old##*/}"
+            [[ -e "$target" ]] || mv -- "$old" "$target" 2>/dev/null || true
+        done
+    fi
+    touch "$STATE_DIR/state-migrated"
+    rmdir "$LEGACY_STATE/camilladsp-webremote" "$LEGACY_STATE" 2>/dev/null || true
+fi
+# Lock lives under ~/.local/state/sway/audio-switch; children close fd 9.
 LOCK_FILE="$STATE_DIR/audio-switch-v3.lock"
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
@@ -128,7 +153,6 @@ move_application_inputs_to() {
 fail() { printf 'Error: %s\n' "$*" | tee -a "$ACTION_LOG" >&2; exit 1; }
 CAMILLA="$(command -v camilladsp || true)"
 PROFILES_DIR="$HOME_DIR/Documents/prefs/audio/camilladsp"
-REMOTE_STATE="$STATE_DIR/camilladsp-webremote"
 mkdir -p "$REMOTE_STATE"
 PIDFILE="$REMOTE_STATE/camilladsp.pid"
 ACTIVE="$REMOTE_STATE/active-profile"
@@ -545,20 +569,20 @@ if [[ "$SELECTED_CARD_VALUE" == stop-audio ]]; then
     server_pid="$(read_pid "$SERVERPID")"
     if valid_pid "$server_pid" &&
        tr '\0' ' ' <"/proc/$server_pid/cmdline" | grep -Fq 'camilladsp-server-sonobus.py'; then
-        if [[ "$(cat "$STATE_DIR/audio-stop-capable.pid" 2>/dev/null || true)" != "$server_pid" ]]; then
+        if [[ "$(cat "$REMOTE_STATE/audio-stop-capable.pid" 2>/dev/null || true)" != "$server_pid" ]]; then
             echo 'Webremote is still running old code; restart it with the patched server before Audio Stop.'
             exit 1
         fi
-        rm -f -- "$STATE_DIR/audio-stop-complete"
-        : >"$STATE_DIR/audio-stopped"
+        rm -f -- "$REMOTE_STATE/audio-stop-complete"
+        : >"$REMOTE_STATE/audio-stopped"
         kill -USR1 "$server_pid" || { echo 'Could not signal webremote to stop audio.'; exit 1; }
         for _ in {1..100}; do
-            [[ -f "$STATE_DIR/audio-stop-complete" ]] && break
+            [[ -f "$REMOTE_STATE/audio-stop-complete" ]] && break
             sleep 0.1
         done
-        [[ -f "$STATE_DIR/audio-stop-complete" ]] || { echo 'Webremote did not confirm audio stopped.'; exit 1; }
+        [[ -f "$REMOTE_STATE/audio-stop-complete" ]] || { echo 'Webremote did not confirm audio stopped.'; exit 1; }
     fi
-    : >"$STATE_DIR/audio-stopped"
+    : >"$REMOTE_STATE/audio-stopped"
     stop_monitor
     stop_camilla
     close_mpv_windows || true
@@ -751,14 +775,14 @@ arecord -L | awk '$1 == "camilladsp_output_shared" {found=1} END {exit !found}' 
 # This local selection is laptop-only. Stop competing inputs after all choices validate.
 server_pid="$(read_pid "$SERVERPID")"
 if valid_pid "$server_pid" && tr '\0' ' ' <"/proc/$server_pid/cmdline" | grep -Fq 'camilladsp-server-sonobus.py'; then
-    if [[ "$(cat "$STATE_DIR/audio-stop-capable.pid" 2>/dev/null || true)" != "$server_pid" ]]; then
+    if [[ "$(cat "$REMOTE_STATE/audio-stop-capable.pid" 2>/dev/null || true)" != "$server_pid" ]]; then
         echo 'Webremote is running old code; restart the patched server before local selection.'
         exit 1
     fi
-    rm -f -- "$STATE_DIR/audio-stop-complete"
+    rm -f -- "$REMOTE_STATE/audio-stop-complete"
     kill -USR1 "$server_pid" || { echo 'Could not release webremote audio engine.'; exit 1; }
-    for _ in {1..100}; do [[ -f "$STATE_DIR/audio-stop-complete" ]] && break; sleep 0.1; done
-    [[ -f "$STATE_DIR/audio-stop-complete" ]] || { echo 'Webremote did not release its audio engine.'; exit 1; }
+    for _ in {1..100}; do [[ -f "$REMOTE_STATE/audio-stop-complete" ]] && break; sleep 0.1; done
+    [[ -f "$REMOTE_STATE/audio-stop-complete" ]] || { echo 'Webremote did not release its audio engine.'; exit 1; }
 fi
 tracked="$(read_pid "$PIDFILE")"
 while read -r pid; do
@@ -790,7 +814,7 @@ if ! start_local_monitor "$PHYSICAL_SINK"; then
     exit 1
 fi
 printf 'laptop_laptop\n' >"$REMOTE_STATE/mode"
-rm -f -- "$STATE_DIR/audio-stopped"
+rm -f -- "$REMOTE_STATE/audio-stopped"
 # Save route only after a successful start; webremote can reuse this route.
 jq -n --arg card "$SELECTED_CARD" --arg profile "$SELECTED_PROFILE" --arg sink "$PHYSICAL_SINK" --arg port "$SELECTED_PORT"     '{card:$card,profile:$profile,sink:$sink,port:$port}' >"$ROUTE_FILE.tmp.$$" &&
     mv -f "$ROUTE_FILE.tmp.$$" "$ROUTE_FILE"
