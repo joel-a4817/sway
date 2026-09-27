@@ -1375,6 +1375,47 @@ def cleanup():
     # Stop only processes owned by this server instance. An older server's
     # cleanup can therefore never kill a replacement instance.
     stop_local_monitor();stop_mpv();stop_sonobus();stop_camilla()
+def sonobus_sway_windows(tree):
+    # The live Sway tree reports title="SonoBus", X11 class="SonoBus", app_id=null.
+    stack=[(tree,None)]
+    while stack:
+        node,workspace=stack.pop()
+        if not isinstance(node,dict):continue
+        if node.get('type')=='workspace':workspace=node.get('name')
+        for child in (node.get('nodes') or [])+(node.get('floating_nodes') or []):
+            stack.append((child,workspace))
+        if (node.get('type')!='con' or not isinstance(node.get('id'),int)
+                or node.get('name')!='SonoBus'
+                or (node.get('window_properties') or {}).get('class')!='SonoBus'):
+            continue
+        rect=node.get('rect') or {}
+        if rect.get('width',0)>0 and rect.get('height',0)>0:
+            yield node['id'],workspace
+
+def watch_sonobus_workspace(stop):
+    if not os.environ.get('SWAYSOCK'):return
+    seen={}
+    moved=set()
+    while not stop.is_set():
+        try:
+            result=run([exe('swaymsg'),'-r','-t','get_tree'],False,4)
+            if result.returncode:raise RuntimeError(result.stderr.strip() or 'Sway tree unavailable')
+            windows=dict(sonobus_sway_windows(json.loads(result.stdout)))
+            seen={wid:seen.get(wid,0)+1 for wid in windows}
+            moved.intersection_update(windows)
+            for wid,workspace in windows.items():
+                if wid in moved or seen[wid]<2:continue
+                if workspace=='1':moved.add(wid);continue
+                reply=run([exe('swaymsg'),'-r',f'[con_id={wid}] move container to workspace number 1'],False,4)
+                answers=json.loads(reply.stdout)
+                if reply.returncode or not isinstance(answers,list) or not answers or not all(x.get('success') for x in answers):
+                    raise RuntimeError(reply.stderr.strip() or f'Sway move failed: {answers}')
+                moved.add(wid)
+                print(f'Moved SonoBus window {wid} to workspace 1',flush=True)
+        except (OSError,ValueError,TypeError,RuntimeError,subprocess.TimeoutExpired) as error:
+            print(f'SonoBus workspace watcher: {error}',flush=True)
+        stop.wait(.5)
+
 def main():
     me=os.getpid()
     legacy_pid=HOME/'.local/state/sway/audio/camilladsp-webremote/web-server.pid'
@@ -1398,7 +1439,10 @@ def main():
             while alive(old) and time.monotonic()<deadline:time.sleep(.05)
         if alive(old):raise RuntimeError('Previous webremote instance did not exit')
     SERVERPID.unlink(missing_ok=True)
-    reset_runtime();start_runtime()
+    reset_runtime()
+    watcher_stop=threading.Event()
+    threading.Thread(target=watch_sonobus_workspace,args=(watcher_stop,),daemon=True).start()
+    start_runtime()
     server=S(('0.0.0.0',PORT),H);SERVERPID.write_text(str(me)+'\n');STOP_CAP.write_text(str(me)+'\n')
     def shut(*_):threading.Thread(target=server.shutdown,daemon=True).start()
     signal.signal(signal.SIGTERM,shut);signal.signal(signal.SIGHUP,shut)
@@ -1407,6 +1451,7 @@ def main():
     try:server.serve_forever()
     except KeyboardInterrupt:pass
     finally:
+        watcher_stop.set()
         server.server_close();cleanup()
         if rpid(SERVERPID)==me:SERVERPID.unlink(missing_ok=True)
         if rpid(STOP_CAP)==me:STOP_CAP.unlink(missing_ok=True)
