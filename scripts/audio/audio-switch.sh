@@ -5,7 +5,9 @@ HOME_DIR="/home/joel"
 STATE_DIR="$HOME_DIR/.local/state/sway/audio"
 
 # Prevent overlapping selectors from changing the graph concurrently.
-LOCK_FILE="$STATE_DIR/audio-switch.lock"
+mkdir -p "$STATE_DIR"
+# Lock lives under ~/.local/state/sway/audio; children close fd 9.
+LOCK_FILE="$STATE_DIR/audio-switch-v3.lock"
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
     echo "Audio switch is already running."
@@ -31,8 +33,10 @@ EXIT_HANDLER_RUNNING=0
 cleanup() { rm -f "$RESULT_FILE" "$ACTION_STARTED_FILE" "$CARD_SELECTION_FILE" "$PROFILE_SELECTION_FILE" "$SWAYNAG_LOG" "$MEDIA_RESUME_FILE" "$MEDIA_CAPTURED_FILE"; }
 pause_before_close() {
     FINAL_PAUSE_REACHED=1
+    flock -u 9 2>/dev/null || true
+    exec 9>&-
     echo
-    if [[ -r /dev/tty && -w /dev/tty ]]; then
+    if [[ -t 0 && -r /dev/tty && -w /dev/tty ]]; then
         read -n 1 -r -s -p "Press any key to close..." </dev/tty || true
         echo >/dev/tty
     else
@@ -46,10 +50,12 @@ handle_script_exit() {
     trap - EXIT INT TERM HUP QUIT
     if (( status != 0 && ! FINAL_PAUSE_REACHED )); then
         echo; echo "Audio script exited unexpectedly."; echo "Exit status: $status"
-        [[ -s "$ACTION_LOG" ]] && { echo; echo "Action log:"; echo "$ACTION_LOG"; echo; cat "$ACTION_LOG"; }
+        [[ -s "$ACTION_LOG" ]] && { echo; echo "Action log:"; echo "$ACTION_LOG"; echo; tail -n 45 "$ACTION_LOG"; }
         pause_before_close
     fi
     cleanup
+    flock -u 9 2>/dev/null || true
+    exec 9>&-
     builtin exit "$status"
 }
 trap handle_script_exit EXIT
@@ -97,87 +103,6 @@ set_card_profile_stable() {
     return 1
 }
 
-is_custom_sink() {
-    case "$1" in
-        earpods_*|cloud3_*) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
-selected_filter_output_node() {
-    local custom_sink="$1"
-
-    pw-dump 2>/dev/null |
-    jq -r --arg sink "$custom_sink" '
-        [
-            .[] |
-            select(.type == "PipeWire:Interface:Node") |
-            {
-                name: .info.props."node.name",
-                class: .info.props."media.class",
-                group: .info.props."node.link-group"
-            }
-        ] as $nodes |
-        ($nodes[] |
-            select(.name == $sink and .class == "Audio/Sink") |
-            .group
-        ) as $group |
-        $nodes[] |
-        select(
-            .class == "Stream/Output/Audio" and
-            .group == $group and
-            (.name | startswith("output.filter-chain-"))
-        ) |
-        .name
-    ' |
-    head -n1
-}
-
-filter_link_ids() {
-    pw-dump 2>/dev/null |
-    jq -r '
-        [
-            .[] |
-            select(.type == "PipeWire:Interface:Node") |
-            .info.props as $p |
-            select(
-                $p."media.class" == "Stream/Output/Audio" and
-                (($p."node.name" // "") | startswith("output.filter-chain-"))
-            ) |
-            .id
-        ] as $filter_ids |
-        .[] |
-        select(.type == "PipeWire:Interface:Link") |
-        select(.info."output-node-id" as $id | $filter_ids | index($id)) |
-        .id
-    '
-}
-
-disconnect_all_filter_outputs() {
-    local link_id
-    local _
-    local -a links=()
-
-    for _ in {1..20}; do
-        mapfile -t links < <(filter_link_ids)
-        ((${#links[@]} == 0)) && return 0
-
-        for link_id in "${links[@]}"; do
-            [[ -n "$link_id" ]] || continue
-            pw-link -d "$link_id" >>"$ACTION_LOG" 2>&1 || true
-        done
-        sleep 0.1
-    done
-
-    mapfile -t links < <(filter_link_ids)
-    if ((${#links[@]} != 0)); then
-        printf 'Warning: %s filter links remained after cleanup.\n' \
-            "${#links[@]}" >>"$ACTION_LOG"
-        return 1
-    fi
-    return 0
-}
-
 move_application_inputs_to() {
     local wanted="$1"
     local id
@@ -193,297 +118,113 @@ move_application_inputs_to() {
             }
             selected { print }
         ')"
-        grep -Eq 'node.name = "output\.filter-chain-|media.name = ".* output"' \
-            <<<"$block" && continue
         pactl move-sink-input "$id" "$wanted" \
             >>"$ACTION_LOG" 2>&1 || true
     done < <(pactl list short sink-inputs 2>/dev/null || true)
 }
 
-selected_filter_link_count() {
-    local output_node="$1"
-    local physical_sink="$2"
 
-    pw-dump 2>/dev/null |
-    jq -r --arg out "$output_node" --arg input "$physical_sink" '
-        [
-            .[] |
-            select(.type == "PipeWire:Interface:Node") |
-            {id: .id, name: .info.props."node.name"}
-        ] as $nodes |
-        ($nodes[] | select(.name == $out) | .id) as $out_id |
-        ($nodes[] | select(.name == $input) | .id) as $in_id |
-        [
-            .[] |
-            select(.type == "PipeWire:Interface:Link") |
-            select(
-                .info."output-node-id" == $out_id and
-                .info."input-node-id" == $in_id
-            )
-        ] |
-        length
-    '
+# Local laptop-only CamillaDSP state. The phone server remains independent.
+fail() { printf 'Error: %s\n' "$*" | tee -a "$ACTION_LOG" >&2; exit 1; }
+CAMILLA="$(command -v camilladsp || true)"
+PROFILES_DIR="$HOME_DIR/Documents/prefs/audio/camilladsp"
+REMOTE_STATE="$STATE_DIR/camilladsp-webremote"
+mkdir -p "$REMOTE_STATE"
+PIDFILE="$REMOTE_STATE/camilladsp.pid"
+ACTIVE="$REMOTE_STATE/active-profile"
+MONPID="$REMOTE_STATE/local-monitor.pid"
+SERVERPID="$REMOTE_STATE/web-server.pid"
+ROUTE_FILE="$REMOTE_STATE/local-output-route.json"
+LOCAL_CAMILLA_LOG="$STATE_DIR/camilladsp-local.log"
+read_pid() { [[ -f "$1" ]] && cat "$1" || true; }
+valid_pid() {
+    [[ "$1" =~ ^[1-9][0-9]*$ ]] && kill -0 "$1" 2>/dev/null || return 1
+    [[ "$(ps -o stat= -p "$1" 2>/dev/null)" != Z* ]]
 }
-
-custom_sink_description() {
-    local wanted="$1"
-
-    pactl list sinks 2>/dev/null |
-    awk -v wanted="$wanted" '
-        /^[[:space:]]*Name:/ {
-            name = $0
-            sub(/^[[:space:]]*Name:[[:space:]]*/, "", name)
-            selected = (name == wanted)
-            next
-        }
-        selected && /^[[:space:]]*Description:/ {
-            value = $0
-            sub(/^[[:space:]]*Description:[[:space:]]*/, "", value)
-            print value
-            exit
-        }
-    '
+# The webremote can own CamillaDSP independently. Do not kill its process.
+ensure_local_owner() {
+    local server_pid
+    server_pid="$(read_pid "$SERVERPID")"
+    if valid_pid "$server_pid" && [[ -r "/proc/$server_pid/cmdline" ]] &&
+        tr '\0' ' ' <"/proc/$server_pid/cmdline" | grep -Fq 'camilladsp-server-sonobus.py'; then
+        fail 'The phone webremote currently owns CamillaDSP. Stop it before local switching; this script never connects to port 8766.'
+    fi
 }
-
-sink_is_headphones() {
-    local sink="$1"
-    local description
-
-    description="$(custom_sink_description "$sink")"
-
-    [[ "$sink" == *Headphones* || "$description" == *Headphones* ]]
-}
-
-sink_is_excluded_physical_target() {
-    local sink="$1"
-    local description
-
-    description="$(custom_sink_description "$sink")"
-
-    is_custom_sink "$sink" && return 0
-
-    [[ "$sink" == *Speaker* || "$description" == *Speaker* ]] && return 0
-    [[ "$sink" == *HDMI* || "$sink" == *hdmi* ||
-       "$description" == *HDMI* || "$description" == *DisplayPort* ]] && return 0
-
-    [[ "$sink" == *snd_aloop* || "$sink" == *Loopback* ||
-       "$description" == *Loopback* ]] && return 0
-
-    return 1
-}
-
-preferred_physical_sink() {
-    local sink
-    local -a candidates=()
-
-    while read -r sink; do
-        [[ -n "$sink" ]] || continue
-        if sink_is_headphones "$sink"; then
-            printf '%s\n' "$sink"
-            return 0
+stop_monitor() {
+    local pid pgid cmd
+    pid="$(read_pid "$MONPID")"
+    if valid_pid "$pid"; then
+        cmd="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)"
+        [[ "$cmd" == *camilladsp_output_shared* ]] || fail "Monitor PID $pid is not our local monitor; refusing to kill it"
+        pgid="$(ps -o pgid= -p "$pid" | tr -d ' ')"
+        if [[ "$pgid" == "$pid" ]]; then
+            kill -TERM -- "-$pid" 2>/dev/null || true
+        else
+            kill -TERM "$pid" 2>/dev/null || true
         fi
-    done < <(
-        pactl list short sinks 2>/dev/null |
-        awk '{print $2}'
-    )
-
-    while read -r sink; do
-        [[ -n "$sink" ]] || continue
-
-        [[ "$sink" == alsa_output.* ]] || continue
-        sink_is_excluded_physical_target "$sink" && continue
-
-        candidates+=("$sink")
-    done < <(
-        pactl list short sinks 2>/dev/null |
-        awk '{print $2}'
-    )
-
-    if ((${#candidates[@]} == 1)); then
-        printf '%s\n' "${candidates[0]}"
-        return 0
+        for ((i=0;i<30;i++)); do valid_pid "$pid" || break; sleep 0.1; done
     fi
-
-    sink="$(pactl get-default-sink 2>/dev/null || true)"
-    if [[ -n "$sink" ]]; then
-        local candidate
-        for candidate in "${candidates[@]}"; do
-            if [[ "$candidate" == "$sink" ]]; then
-                printf '%s\n' "$candidate"
-                return 0
-            fi
-        done
-    fi
-
-    if ((${#candidates[@]} > 0)); then
-        printf '%s\n' "${candidates[0]}"
-        return 0
-    fi
-
-    return 1
+    rm -f -- "$MONPID"
 }
-
-startup_physical_sink() {
-    local sink
-
-    # Reuse the normal physical-output policy first:
-    # Headphones, then an eligible extra ALSA hardware output.
-    sink="$(preferred_physical_sink || true)"
-    if [[ -n "$sink" ]]; then
-        printf '%s\n' "$sink"
-        return 0
+stop_camilla() {
+    local pid comm
+    pid="$(read_pid "$PIDFILE")"
+    if valid_pid "$pid"; then
+        comm="$(cat "/proc/$pid/comm" 2>/dev/null || true)"
+        [[ "$comm" == camilladsp ]] || fail "PID file points to another process ($pid: $comm); refusing to kill it"
+        kill -TERM "$pid" 2>/dev/null || true
+        for ((i=0;i<30;i++)); do valid_pid "$pid" || break; sleep 0.1; done
+        valid_pid "$pid" && fail 'CamillaDSP did not stop; refusing to start a second instance'
     fi
-
-    # Last resort: the built-in Speaker sink.
-    while read -r sink; do
-        [[ -n "$sink" ]] || continue
-        if [[ "$sink" == *Speaker* ]] ||
-           [[ "$(custom_sink_description "$sink")" == *Speaker* ]]; then
-            printf '%s\n' "$sink"
-            return 0
-        fi
-    done < <(
-        pactl list short sinks 2>/dev/null |
-        awk '{print $2}'
-    )
-
-    return 1
+    rm -f -- "$PIDFILE"
 }
-
-switch_to_startup_physical_sink() {
-    local target="$1"
-    local current
-    local _
-
-    [[ -n "$target" ]] || return 1
-    wait_for_pulse || return 1
-    wait_for_sink "$target" || return 1
-
-    for _ in {1..50}; do
-        if pactl set-default-sink "$target" >>"$ACTION_LOG" 2>&1; then
-            current="$(pactl get-default-sink 2>/dev/null || true)"
-            [[ "$current" == "$target" ]] && break
-        fi
-        sleep 0.1
-    done
-
-    current="$(pactl get-default-sink 2>/dev/null || true)"
-    if [[ "$current" != "$target" ]]; then
-        printf 'Warning: post-profile physical sink did not settle: %s\n' \
-            "$target" >>"$ACTION_LOG"
-        return 1
-    fi
-
-    move_application_inputs_to "$target"
-    disconnect_all_filter_outputs || {
-        printf 'Warning: filter outputs remained linked during post-profile routing.\n' \
-            >>"$ACTION_LOG"
-        return 1
-    }
-
-    printf 'Post-profile physical sink: %s\n' "$target" >>"$ACTION_LOG"
-    return 0
-}
-
-route_selected_custom_output() {
-    local custom_sink="$1"
-    local physical_sink="$2"
-    local output_node=""
-    local link_count
-    local total_filter_links
-    local _
-
-    for _ in {1..50}; do
-        output_node="$(selected_filter_output_node "$custom_sink" || true)"
-        [[ -n "$output_node" ]] && break
-        sleep 0.1
-    done
-
-    if [[ -z "$output_node" ]]; then
-        printf 'Warning: could not resolve filter output for %s.\n' \
-            "$custom_sink" >>"$ACTION_LOG"
-        return 1
-    fi
-
-    disconnect_all_filter_outputs || return 1
-
-    if ! pw-link "$output_node:output_FL" "$physical_sink:playback_FL" \
-        >>"$ACTION_LOG" 2>&1; then
-        printf 'Warning: failed FL link: %s -> %s\n' \
-            "$output_node" "$physical_sink" >>"$ACTION_LOG"
-        return 1
-    fi
-
-    if ! pw-link "$output_node:output_FR" "$physical_sink:playback_FR" \
-        >>"$ACTION_LOG" 2>&1; then
-        pw-link -d "$output_node:output_FL" "$physical_sink:playback_FL" \
-            >>"$ACTION_LOG" 2>&1 || true
-        printf 'Warning: failed FR link: %s -> %s\n' \
-            "$output_node" "$physical_sink" >>"$ACTION_LOG"
-        return 1
-    fi
-
-    for _ in {1..30}; do
-        link_count="$(selected_filter_link_count "$output_node" "$physical_sink" || true)"
-        total_filter_links="$(filter_link_ids | wc -l)"
-
-        if [[ "$link_count" == "2" && "$total_filter_links" -eq 2 ]]; then
-            printf 'Custom route settled: %s (%s) -> %s\n' \
-                "$custom_sink" "$output_node" "$physical_sink" \
-                >>"$ACTION_LOG"
-            return 0
-        fi
-        sleep 0.1
-    done
-
-    printf 'Warning: custom route did not settle: %s (%s) -> %s; selected_links=%s total_filter_links=%s\n' \
-        "$custom_sink" "$output_node" "$physical_sink" \
-        "${link_count:-unknown}" "${total_filter_links:-unknown}" \
-        >>"$ACTION_LOG"
-    return 1
-}
-
-set_default_sink_stable() {
-    local wanted="$1"
-    local current
-    local physical_sink=""
-    local _
-
-    wait_for_pulse || return 1
-    wait_for_sink "$wanted" || return 1
-
-    if is_custom_sink "$wanted"; then
-        physical_sink="$(preferred_physical_sink || true)"
-        if [[ -z "$physical_sink" ]]; then
-            echo "No eligible Headphones or extra physical sink is available." \
-                >>"$ACTION_LOG"
+start_camilla() {
+    local profile="$1" pid
+    "$CAMILLA" --check "$profile" >>"$ACTION_LOG" 2>&1 || return 1
+    "$CAMILLA" "$profile" >>"$LOCAL_CAMILLA_LOG" 2>&1 </dev/null 9>&- &
+    pid=$!
+    printf '%s\n' "$pid" >"$PIDFILE"
+    for ((i=0;i<20;i++)); do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            rm -f -- "$PIDFILE"
+            tail -n 25 "$LOCAL_CAMILLA_LOG" >&2
             return 1
         fi
-    fi
-
-    for _ in {1..50}; do
-        if pulse_ready && sink_exists "$wanted"; then
-            if pactl set-default-sink "$wanted" \
-                >>"$ACTION_LOG" 2>&1; then
-                current="$(pactl get-default-sink 2>/dev/null || true)"
-                [[ "$current" == "$wanted" ]] && break
-            fi
-        fi
         sleep 0.1
     done
+    printf '%s\n' "$(basename "$profile")" >"$ACTIVE"
+}
 
-    [[ "$(pactl get-default-sink 2>/dev/null || true)" == "$wanted" ]] || return 1
-
-    if is_custom_sink "$wanted"; then
-        move_application_inputs_to "$wanted"
-
-        route_selected_custom_output "$wanted" "$physical_sink" || return 1
-    else
-        move_application_inputs_to "$wanted"
-        disconnect_all_filter_outputs || return 1
+camilla_sink_exists() { sink_exists camilladsp; }
+ensure_camilla_sink() {
+    if ! camilla_sink_exists; then
+        systemctl --user start camilladsp-system-audio.service >>"$ACTION_LOG" 2>&1 || return 1
+        wait_for_sink camilladsp || return 1
     fi
-
-    return 0
+    camilla_sink_exists
+}
+card_sinks() {
+    local card="$1" graph
+    graph="$(pw-dump 2>/dev/null)" || return 1
+    jq -r --arg card "$card" '
+      [.[] | select(.type == "PipeWire:Interface:Device" and .info.props."device.name" == $card) | (.id | tostring)] as $ids |
+      .[] | select(.type == "PipeWire:Interface:Node" and .info.props."media.class" == "Audio/Sink" and
+        .info.props."device.api" == "alsa" and .info.props."factory.name" == "api.alsa.pcm.sink") |
+      (.info.props."device.id" // "" | tostring) as $id |
+      select(($ids | index($id)) != null) | .info.props."node.name" // empty
+    ' <<<"$graph" | sort -u
+}
+start_local_monitor() {
+    local sink="$1" pid
+    setsid bash -c '
+      set -o pipefail
+      arecord -q -D camilladsp_output_shared -r 96000 -f S32_LE -c 2 -t raw |
+        pacat --playback --device="$1" --rate=96000 --format=s32le --channels=2
+    ' _ "$sink" >>"$ACTION_LOG" 2>&1 </dev/null 9>&- &
+    pid=$!
+    printf '%s\n' "$pid" >"$MONPID"
+    sleep 0.3
+    if ! valid_pid "$pid"; then rm -f "$MONPID"; return 1; fi
 }
 
 mpris_playback_status() {
@@ -633,7 +374,6 @@ if [[ -n "$ORIGINAL_SINK" ]] && pactl list short sinks 2>/dev/null | awk '{print
     ORIGINAL_VOLUME="$(pactl get-sink-volume "$ORIGINAL_SINK" 2>/dev/null | grep -Po '[0-9]+%' | head -n1)"
 fi
 
-normalize_audio_volumes "$ORIGINAL_VOLUME" "$ORIGINAL_SINK"
 export RESULT_FILE ACTION_STARTED_FILE ACTION_LOG CARD_SELECTION_FILE PROFILE_SELECTION_FILE MEDIA_RESUME_FILE MEDIA_CAPTURED_FILE ORIGINAL_VOLUME ORIGINAL_SINK
 
 mapfile -t CARDS < <(pactl list cards 2>/dev/null | awk '
@@ -643,6 +383,11 @@ function output_card(){if(card!=""){if(description=="")description=card;print ca
 /^[[:space:]]*device\.description[[:space:]]*=/{if(description==""){description=$0;sub(/^[[:space:]]*device\.description[[:space:]]*=[[:space:]]*/,"",description);gsub(/^"|"$/,"",description)}}
 END{output_card()}')
 
+if ((${#CARDS[@]})); then
+    printf '%s\n' "${CARDS[@]}" >"$STATE_DIR/audio-cards-last.txt"
+elif [[ -s "$STATE_DIR/audio-cards-last.txt" ]]; then
+    mapfile -t CARDS <"$STATE_DIR/audio-cards-last.txt"
+fi
 card_display_label() {
     local card="$1" description="$2" label="$2"
     case "$card $description" in
@@ -725,9 +470,6 @@ hotspot_active() { nmcli -t -f NAME connection show --active 2>/dev/null | grep 
 ARGS=(-t warning -y overlay -m "Audio Device Select")
 
 ARGS+=(
-    -z "Audio Start"
-    "touch '$ACTION_STARTED_FILE'; printf '%s\n' start-audio >'$CARD_SELECTION_FILE'; touch '$RESULT_FILE'"
-
     -z "Audio Stop"
     "touch '$ACTION_STARTED_FILE'; printf '%s\n' stop-audio >'$CARD_SELECTION_FILE'; touch '$RESULT_FILE'"
 )
@@ -749,7 +491,7 @@ for i in "${!CARDS[@]}"; do
     ARGS+=( -z "$(card_display_label "$card" "$description")" "touch '$ACTION_STARTED_FILE'; printf '%s\n' '$i' >'$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
 done
 
-swaynag "${ARGS[@]}" >"$SWAYNAG_LOG" 2>&1 &
+swaynag "${ARGS[@]}" >"$SWAYNAG_LOG" 2>&1 9>&- &
 SWAYNAG_PID=$!
 while [[ ! -f "$RESULT_FILE" ]]; do
     if kill -0 "$SWAYNAG_PID" 2>/dev/null; then sleep 0.1; continue; fi
@@ -763,103 +505,40 @@ wait "$SWAYNAG_PID" 2>/dev/null || true
 [[ -f "$CARD_SELECTION_FILE" ]] || { echo "No audio action was selected."; exit 1; }
 SELECTED_CARD_VALUE="$(cat "$CARD_SELECTION_FILE")"
 
-if [[ "$SELECTED_CARD_VALUE" == start-audio ]]; then
-    echo "Starting PipeWire and WirePlumber..." | tee -a "$ACTION_LOG"
-
-    systemctl --user reset-failed pipewire.socket pipewire.service pipewire-pulse.socket pipewire-pulse.service wireplumber.service >>"$ACTION_LOG" 2>&1 || true
-    if ! systemctl --user start \
-        pipewire.socket \
-        pipewire-pulse.socket \
-        pipewire.service \
-        pipewire-pulse.service \
-        wireplumber.service \
-        >>"$ACTION_LOG" 2>&1; then
-        echo "Failed to start the user audio services."
-        echo "See: $ACTION_LOG"
-        exit 1
-    fi
-
-    PIPEWIRE_READY=0
-
-    for _ in {1..100}; do
-        if pactl info >/dev/null 2>&1; then
-            PIPEWIRE_READY=1
-            break
-        fi
-
-        sleep 0.1
-    done
-
-    if (( ! PIPEWIRE_READY )); then
-        echo "PipeWire did not become ready."
-        echo "See: $ACTION_LOG"
-        exit 1
-    fi
-
-    for _ in {1..100}; do
-        if pactl list short sinks 2>/dev/null | grep -q .; then
-            break
-        fi
-
-        sleep 0.1
-    done
-
-    STARTED_SINK="$(pactl get-default-sink 2>/dev/null || true)"
-
-    normalize_audio_volumes "$ORIGINAL_VOLUME" "$STARTED_SINK"
-
-    if ! systemctl start nqptp.service >>"$ACTION_LOG" 2>&1; then
-        echo "Failed to start nqptp.service."
-        echo "See: $ACTION_LOG"
-        exit 1
-    fi
-
-    if ! systemctl start shairport-sync.service >>"$ACTION_LOG" 2>&1; then
-        echo "Failed to start shairport-sync.service."
-        echo "See: $ACTION_LOG"
-        exit 1
-    fi
-
-    echo "Audio and AirPlay services started."
-    echo
-    echo "All hardware controls and PipeWire sinks were normalized to 100%."
-
-    if [[ -n "$ORIGINAL_VOLUME" ]]; then
-        echo "Master volume restored to: $ORIGINAL_VOLUME"
-    fi
-
-    pause_before_close
-    exit 0
-fi
-
 if [[ "$SELECTED_CARD_VALUE" == stop-audio ]]; then
-    echo "Stopping AirPlay and audio services..." | tee -a "$ACTION_LOG"
-
-    close_mpv_windows || true
-
-    systemctl stop shairport-sync.service \
-        >>"$ACTION_LOG" 2>&1 || true
-
-    systemctl stop nqptp.service \
-        >>"$ACTION_LOG" 2>&1 || true
-
-    if ! systemctl --user stop \
-        wireplumber.service \
-        pipewire-pulse.service \
-        pipewire.service \
-        pipewire-pulse.socket \
-        pipewire.socket \
-        >>"$ACTION_LOG" 2>&1; then
-        echo "Failed to stop the user audio services."
-        echo "See: $ACTION_LOG"
-        exit 1
+    echo "Stopping all audio..." | tee -a "$ACTION_LOG"
+    # Marker is shared with the webremote; it must survive its restart.
+    server_pid="$(read_pid "$SERVERPID")"
+    if valid_pid "$server_pid" &&
+       tr '\0' ' ' <"/proc/$server_pid/cmdline" | grep -Fq 'camilladsp-server-sonobus.py'; then
+        if [[ "$(cat "$STATE_DIR/audio-stop-capable.pid" 2>/dev/null || true)" != "$server_pid" ]]; then
+            echo 'Webremote is still running old code; restart it with the patched server before Audio Stop.'
+            exit 1
+        fi
+        rm -f -- "$STATE_DIR/audio-stop-complete"
+        : >"$STATE_DIR/audio-stopped"
+        kill -USR1 "$server_pid" || { echo 'Could not signal webremote to stop audio.'; exit 1; }
+        for _ in {1..100}; do
+            [[ -f "$STATE_DIR/audio-stop-complete" ]] && break
+            sleep 0.1
+        done
+        [[ -f "$STATE_DIR/audio-stop-complete" ]] || { echo 'Webremote did not confirm audio stopped.'; exit 1; }
     fi
-
-    echo "Audio and AirPlay services stopped."
+    : >"$STATE_DIR/audio-stopped"
+    stop_monitor
+    stop_camilla
+    close_mpv_windows || true
+    # SonoBus may be running without the webremote. Stop those instances too.
+    for pid in $(pgrep -x sonobus 2>/dev/null; pgrep -x SonoBus 2>/dev/null); do
+        [[ "$pid" =~ ^[0-9]+$ ]] && kill -TERM "$pid" 2>/dev/null || true
+    done
+    systemctl stop shairport-sync.service nqptp.service >>"$ACTION_LOG" 2>&1 || true
+    systemctl --user stop camilladsp-system-audio.service >>"$ACTION_LOG" 2>&1 || true
+    systemctl --user stop wireplumber.service pipewire-pulse.service pipewire.service pipewire-pulse.socket pipewire.socket >>"$ACTION_LOG" 2>&1 || true
+    echo "Audio stopped. The webremote stays open; select a source or profile to resume."
     pause_before_close
     exit 0
 fi
-
 if [[ "$SELECTED_CARD_VALUE" == toggle-hotspot ]]; then
     if hotspot_active; then nmcli connection down "$HOTSPOT_CONNECTION" >>"$ACTION_LOG" 2>&1; echo "AirPlay hotspot stopped."
     else nmcli connection up "$HOTSPOT_CONNECTION" >>"$ACTION_LOG" 2>&1; echo "AirPlay hotspot started."; fi
@@ -867,6 +546,10 @@ if [[ "$SELECTED_CARD_VALUE" == toggle-hotspot ]]; then
 fi
 
 [[ "$SELECTED_CARD_VALUE" =~ ^[0-9]+$ ]] && (( SELECTED_CARD_VALUE < ${#CARDS[@]} )) || { echo "Invalid audio device selection."; exit 1; }
+if ! pulse_ready; then
+    systemctl --user start pipewire.socket pipewire-pulse.socket pipewire.service pipewire-pulse.service wireplumber.service >>"$ACTION_LOG" 2>&1 || { echo "PipeWire failed to start; see $ACTION_LOG"; exit 1; }
+    wait_for_pulse || { echo 'PipeWire did not become ready.'; exit 1; }
+fi
 SELECTED_CARD="${CARDS[$SELECTED_CARD_VALUE]%%|*}"
 SELECTED_CARD_DESCRIPTION="${CARDS[$SELECTED_CARD_VALUE]#*|}"
 SELECTED_CARD_LABEL="$(card_display_label "$SELECTED_CARD" "$SELECTED_CARD_DESCRIPTION")"
@@ -889,14 +572,14 @@ echo; echo "Selected Audio Device"; echo; echo "$SELECTED_CARD_LABEL"; echo; ech
 for i in "${!PROFILES[@]}"; do
     entry="${PROFILES[$i]}"; profile="${entry%%|*}"; remainder="${entry#*|}"; description="${remainder%%|*}"; availability="${remainder##*|}"
     label="$(profile_display_label "$SELECTED_CARD" "$profile" "$description")"
-    [[ "$profile" == "$ACTIVE_PROFILE" ]] && label+=" [active]"; [[ "$availability" == no ]] && label+=" [unavailable]"; [[ "$availability" == unknown ]] && label+=" [availability unknown]"
+    [[ "$availability" == no ]] && label+=" (unavailable)"
     echo "[$((i+1))] $label"
 done
 read -rp "Select profile: " profile_choice
 SELECTED_PROFILE="$ACTIVE_PROFILE"; SELECTED_PROFILE_LABEL="$ACTIVE_PROFILE_LABEL"
 if [[ "$profile_choice" != 0 ]]; then
     [[ "$profile_choice" =~ ^[0-9]+$ ]] || { echo "Invalid profile selection."; exit 1; }
-    profile_index=$((profile_choice-1)); (( profile_index >= 0 && profile_index < ${#PROFILES[@]} )) || { echo "Invalid profile selection."; exit 1; }
+    profile_index=$((10#$profile_choice-1)); (( profile_index >= 0 && profile_index < ${#PROFILES[@]} )) || { echo "Invalid profile selection."; exit 1; }
     profile_entry="${PROFILES[$profile_index]}"; SELECTED_PROFILE="${profile_entry%%|*}"; remainder="${profile_entry#*|}"; description="${remainder%%|*}"; availability="${remainder##*|}"
     [[ "$availability" != no ]] || { echo "That profile is currently marked unavailable by PipeWire."; exit 1; }
     SELECTED_PROFILE_LABEL="$(profile_display_label "$SELECTED_CARD" "$SELECTED_PROFILE" "$description")"
@@ -906,85 +589,182 @@ if [[ "$profile_choice" != 0 ]]; then
     (( PROFILE_OK )) || { echo "Warning: profile did not settle as '$SELECTED_PROFILE'." >>"$ACTION_LOG"; echo "Warning: profile switch did not settle. See: $ACTION_LOG"; }
 fi
 
-# The selected profile determines which physical sink nodes exist. Start from
-# hardware only after that graph has settled:
-# Headphones -> eligible extra ALSA hardware sink -> Speaker.
-PROFILE_PHYSICAL_SINK=""
-for _ in {1..50}; do
-    PROFILE_PHYSICAL_SINK="$(startup_physical_sink || true)"
-    [[ -n "$PROFILE_PHYSICAL_SINK" ]] && break
-    sleep 0.1
+# Like camilladsp-server-sonobus.py, show every eligible real output after
+# choosing the card/profile. A different card can own the selected sink.
+# Loopback cards remain visible in Swaynag, but their loopback sinks cannot
+# be final monitor targets (that would create a feedback loop).
+real_sinks() {
+    jq -r '.[] |
+        (.name // "") as $name |
+        ((.properties // {}) | [."device.description", ."node.description", ."node.nick", ."media.name"] | map(. // "") | join(" ") | ascii_downcase) as $label |
+        select($name != "" and
+          ($name | ascii_downcase | startswith("earpods_") or startswith("cloud3_") or startswith("cmf-buds-pro-2_") or
+            contains("snd_aloop") or contains("loopback") or contains("camilladsp") or contains("sonobus") or contains("silent output") or contains("filter-chain") or contains("null-sink") | not) and
+          ($label | contains("loopback") or contains("camilladsp") or contains("sonobus") or contains("silent output") or contains("filter-chain") or contains("null sink") | not)) |
+        $name' <<<"$SINKS_JSON" | sort -u
+}
+SINKS_JSON="$(pactl --format=json list sinks)" || { echo 'Could not list sinks.'; exit 1; }
+mapfile -t PHYSICAL_SINKS < <(real_sinks)
+((${#PHYSICAL_SINKS[@]})) || { echo 'No usable playback sinks are available.'; exit 1; }
+SAVED_CARD="$(jq -r '.card // ""' "$ROUTE_FILE" 2>/dev/null || true)"
+SAVED_SINK="$(jq -r '.sink // ""' "$ROUTE_FILE" 2>/dev/null || true)"
+CURRENT_PHYSICAL=""
+if [[ -n "$SAVED_SINK" ]]; then
+    for sink in "${PHYSICAL_SINKS[@]}"; do
+        [[ "$sink" == "$SAVED_SINK" ]] && CURRENT_PHYSICAL="$sink"
+    done
+fi
+if [[ -z "$CURRENT_PHYSICAL" ]]; then
+    default="$(pactl get-default-sink 2>/dev/null || true)"
+    for sink in "${PHYSICAL_SINKS[@]}"; do
+        [[ "$sink" == "$default" ]] && CURRENT_PHYSICAL="$sink"
+    done
+fi
+printf '\nPlayback outputs (all cards)\n' 
+printf '[0] Keep current output (%s)\n' "$(sink_display_label "${CURRENT_PHYSICAL:-none}")"
+for i in "${!PHYSICAL_SINKS[@]}"; do
+    sink="${PHYSICAL_SINKS[$i]}"
+    label="$(jq -r --arg name "$sink" '.[] | select(.name == $name) | .description // .name' <<<"$SINKS_JSON" | head -n1)"
+    printf '[%d] %s\n' "$((i+1))" "$(sink_display_label "$sink")"
 done
-
-if [[ -n "$PROFILE_PHYSICAL_SINK" ]]; then
-    if switch_to_startup_physical_sink "$PROFILE_PHYSICAL_SINK"; then
-        ORIGINAL_SINK="$PROFILE_PHYSICAL_SINK"
-    else
-        echo "Warning: post-profile physical-sink switch failed. See: $ACTION_LOG"
-    fi
+read -rp 'Select physical output: ' physical_choice
+[[ "$physical_choice" =~ ^[0-9]+$ ]] || { echo 'Invalid output selection.'; exit 1; }
+if [[ "$physical_choice" == 0 ]]; then
+    [[ -n "$CURRENT_PHYSICAL" ]] || { echo 'No current output for this card; select a numbered output.'; exit 1; }
+    PHYSICAL_SINK="$CURRENT_PHYSICAL"
 else
-    echo 'Warning: no Headphones, extra physical output, or Speaker sink was found after profile selection.'         >>"$ACTION_LOG"
+    index=$((10#$physical_choice-1))
+    ((index >= 0 && index < ${#PHYSICAL_SINKS[@]})) || { echo 'Invalid output selection.'; exit 1; }
+    PHYSICAL_SINK="${PHYSICAL_SINKS[$index]}"
 fi
-
-CURRENT_SINK="$(pactl get-default-sink 2>/dev/null || true)"
-for _ in {1..50}; do [[ -n "$CURRENT_SINK" ]] && pactl list short sinks | awk '{print $2}' | grep -Fqx "$CURRENT_SINK" && break; sleep 0.1; CURRENT_SINK="$(pactl get-default-sink 2>/dev/null || true)"; done
-normalize_audio_volumes "$ORIGINAL_VOLUME" "$CURRENT_SINK"
-RANDOM_PICK=0
-mapfile -t SINKS < <(pactl list short sinks | while read -r id sink rest; do printf '%s|%s\n' "$sink" "$(sink_display_label "$sink")"; done)
-CURRENT_DESC="Current Sink"; for entry in "${SINKS[@]}"; do [[ "${entry%%|*}" == "$CURRENT_SINK" ]] && { CURRENT_DESC="${entry#*|}"; break; }; done
-
-echo; echo "Available Audio Sinks"; echo; echo "[0] Keep current sink ($CURRENT_DESC)"
-for i in "${!SINKS[@]}"; do echo "[$((i+1))] ${SINKS[$i]#*|}"; done
-ACOUSTIC_RANDOM=$((${#SINKS[@]} + 1))
-echo "[$ACOUSTIC_RANDOM] Random Acoustic Environment"
-echo
-read -rp "Select sink: " choice
-if [[ "$choice" != 0 ]]; then
-    [[ "$choice" =~ ^[0-9]+$ ]] || { echo "Invalid selection."; exit 1; }
-    sink=""
-    if [[ "$choice" == "$ACOUSTIC_RANDOM" ]]; then
-        mapfile -t RANDOM_CANDIDATES < <(
-            printf '%s\n' "${SINKS[@]}" |
-                cut -d'|' -f1 |
-                grep -E '^earpods_' |
-                grep -Ev '(^|[-_])anechoic([-_]|$)' ||
-                true
-        )
-
-        if ((${#RANDOM_CANDIDATES[@]} == 0)); then
-            echo "No non-anechoic acoustic-environment sinks are currently available."
-            exit 1
+wait_for_sink "$PHYSICAL_SINK" || { echo "Output disappeared: $PHYSICAL_SINK"; exit 1; }
+# The server exposes sink ports as well; honor the saved port when available.
+mapfile -t OUTPUT_PORTS < <(jq -r --arg name "$PHYSICAL_SINK" '
+  .[] | select(.name == $name) | (.ports // []) |
+  if type == "array" then .[] | select((.availability // .available // "unknown" | tostring | ascii_downcase) != "no") | .name
+  else to_entries[] | select((.value.availability // .value.available // "unknown" | tostring | ascii_downcase) != "no") | .key end' <<<"$SINKS_JSON")
+SELECTED_PORT=""
+if ((${#OUTPUT_PORTS[@]})); then
+    saved_port="$(jq -r '.port // ""' "$ROUTE_FILE" 2>/dev/null || true)"
+    for port in "${OUTPUT_PORTS[@]}"; do
+        [[ "$port" == "$saved_port" ]] && SELECTED_PORT="$port"
+    done
+    [[ -n "$SELECTED_PORT" ]] || SELECTED_PORT="${OUTPUT_PORTS[0]}"
+    if ((${#OUTPUT_PORTS[@]} > 1)); then
+        printf '\nOutput port\n[0] Keep current (%s)\n' "$SELECTED_PORT"
+        for i in "${!OUTPUT_PORTS[@]}"; do
+            port_label="$(jq -r --arg sink "$PHYSICAL_SINK" --arg port "${OUTPUT_PORTS[$i]}" '.[] | select(.name == $sink) | (.ports // []) | if type == "array" then .[] | select(.name == $port) | .description // .name else .[$port].description // $port end' <<<"$SINKS_JSON")"
+            printf '[%d] %s\n' "$((i+1))" "${port_label:-${OUTPUT_PORTS[$i]}}"
+        done
+        read -rp 'Select output port: ' port_choice
+        [[ "$port_choice" =~ ^[0-9]+$ ]] || { echo 'Invalid port.'; exit 1; }
+        if [[ "$port_choice" != 0 ]]; then
+            index=$((10#$port_choice-1))
+            ((index >= 0 && index < ${#OUTPUT_PORTS[@]})) || { echo 'Invalid port.'; exit 1; }
+            SELECTED_PORT="${OUTPUT_PORTS[$index]}"
         fi
+    fi
+    pactl set-sink-port "$PHYSICAL_SINK" "$SELECTED_PORT" >>"$ACTION_LOG" 2>&1 || { echo 'Failed to set output port.'; exit 1; }
+fi
 
-        sink="$(printf '%s\n' "${RANDOM_CANDIDATES[@]}" | shuf -n 1)"
-        RANDOM_PICK=1
-        echo "Random acoustic environment selected."
-    else
-        index=$((choice-1)); (( index >= 0 && index < ${#SINKS[@]} )) || { echo "Invalid selection."; exit 1; }; sink="${SINKS[$index]%%|*}"
-    fi
-    wait_for_sink "$sink" || { echo "Selected sink is no longer available: $sink"; exit 1; }
-    if set_default_sink_stable "$sink"; then
-        SWITCH_OK=1
-        normalize_audio_volumes "$ORIGINAL_VOLUME" "$sink"
-    else
-        SWITCH_OK=0
-        echo "Warning: failed to switch to sink '$sink'." >>"$ACTION_LOG"
-        echo "Warning: sink switch did not settle. See: $ACTION_LOG"
-    fi
+# One local CamillaDSP profile menu. CMF profiles remain available to the
+# webremote but are deliberately excluded from this laptop selector.
+[[ -n "$CAMILLA" && -d "$PROFILES_DIR" ]] || { echo 'CamillaDSP executable or profile directory missing.'; exit 1; }
+CURRENT_DSP="$(cat "$ACTIVE" 2>/dev/null || true)"
+short_profile_name() {
+    local file="$1" stem
+    case "$file" in
+        00-filterless.y*ml) printf 'Filterless\n'; return ;;
+        *-cloud3-*.y*ml) printf 'Cloud III Anechoic\n'; return ;;
+        *-earpods-*.y*ml) stem="${file#*-earpods-}" ;;
+        *) printf '%s\n' "$file"; return ;;
+    esac
+    stem="${stem%.yaml}"; stem="${stem%.yml}"
+    stem="${stem//-/ }"
+    printf 'EarPods %s\n' "$stem" | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) substr($i,2); print}'
+}
+# Sort by the generated prefix: 00 filterless, 01 anechoics, then the
+# EarPods environments. Never include CMF in the local selector.
+mapfile -t DSP_PROFILES < <(find "$PROFILES_DIR" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) -printf '%f\n' |
+    grep -E '^(00-filterless|[0-9][0-9]-(earpods|cloud3)-).*\.ya?ml$' | sort -u)
+((${#DSP_PROFILES[@]})) || { echo 'No local CamillaDSP profiles found.'; exit 1; }
+CURRENT_VALID=0
+for dsp in "${DSP_PROFILES[@]}"; do
+    [[ "$dsp" == "$CURRENT_DSP" ]] && CURRENT_VALID=1
+done
+echo; echo 'CamillaDSP profiles'; echo
+if ((CURRENT_VALID)); then
+    printf '[0] Keep current (%s)\n' "$(short_profile_name "$CURRENT_DSP")"
 else
-    echo "Keeping current sink."
+    echo '[0] No current local profile; choose a number'
 fi
-
-FINAL_SINK="$(pactl get-default-sink 2>/dev/null || true)"
-normalize_audio_volumes "$ORIGINAL_VOLUME" "$FINAL_SINK"
+for i in "${!DSP_PROFILES[@]}"; do
+    printf '[%d] %s\n' "$((i+1))" "$(short_profile_name "${DSP_PROFILES[$i]}")"
+done
+read -rp 'Select CamillaDSP profile: ' dsp_choice
+[[ "$dsp_choice" =~ ^[0-9]+$ ]] || { echo 'Invalid CamillaDSP selection.'; exit 1; }
+if [[ "$dsp_choice" == 0 ]]; then
+    ((CURRENT_VALID)) || { echo 'No current local profile; choose a number.'; exit 1; }
+    DSP_PROFILE="$CURRENT_DSP"
+else
+    index=$((10#$dsp_choice-1))
+    ((index >= 0 && index < ${#DSP_PROFILES[@]})) || { echo 'Invalid CamillaDSP selection.'; exit 1; }
+    DSP_PROFILE="${DSP_PROFILES[$index]}"
+fi
+"$CAMILLA" --check "$PROFILES_DIR/$DSP_PROFILE" >>"$ACTION_LOG" 2>&1 || { echo "Invalid CamillaDSP profile: $DSP_PROFILE"; exit 1; }
+command -v arecord >/dev/null && command -v pacat >/dev/null || { echo 'arecord or pacat missing.'; exit 1; }
+arecord -L | awk '$1 == "camilladsp_output_shared" {found=1} END {exit !found}' || { echo 'camilladsp_output_shared ALSA capture is missing.'; exit 1; }
+# This local selection is laptop-only. Stop competing inputs after all choices validate.
+server_pid="$(read_pid "$SERVERPID")"
+if valid_pid "$server_pid" && tr '\0' ' ' <"/proc/$server_pid/cmdline" | grep -Fq 'camilladsp-server-sonobus.py'; then
+    if [[ "$(cat "$STATE_DIR/audio-stop-capable.pid" 2>/dev/null || true)" != "$server_pid" ]]; then
+        echo 'Webremote is running old code; restart the patched server before local selection.'
+        exit 1
+    fi
+    rm -f -- "$STATE_DIR/audio-stop-complete"
+    kill -USR1 "$server_pid" || { echo 'Could not release webremote audio engine.'; exit 1; }
+    for _ in {1..100}; do [[ -f "$STATE_DIR/audio-stop-complete" ]] && break; sleep 0.1; done
+    [[ -f "$STATE_DIR/audio-stop-complete" ]] || { echo 'Webremote did not release its audio engine.'; exit 1; }
+fi
+tracked="$(read_pid "$PIDFILE")"
+while read -r pid; do
+    [[ -z "$pid" ]] && continue
+    valid_pid "$pid" || continue
+    [[ "$pid" == "$tracked" ]] || { echo "Untracked CamillaDSP process $pid is running; refusing to replace it."; exit 1; }
+done < <(pgrep -x camilladsp || true)
+systemctl stop shairport-sync.service nqptp.service >>"$ACTION_LOG" 2>&1 || true
+for pid in $(pgrep -x sonobus 2>/dev/null; pgrep -x SonoBus 2>/dev/null); do
+    [[ "$pid" =~ ^[0-9]+$ ]] && kill -TERM "$pid" 2>/dev/null || true
+done
+# Pause/resume and volume normalization remain the original functions.
+stop_monitor
+if ! ensure_camilla_sink; then echo "camilladsp desktop sink is unavailable. See: $ACTION_LOG"; exit 1; fi
+if [[ "$(pactl get-default-sink 2>/dev/null || true)" != camilladsp ]]; then
+    pactl set-default-sink camilladsp >>"$ACTION_LOG" 2>&1 || { echo 'Failed to select CamillaDSP desktop sink.'; exit 1; }
+fi
+move_application_inputs_to camilladsp
+stop_camilla
+if ! start_camilla "$PROFILES_DIR/$DSP_PROFILE"; then
+    if [[ -n "$CURRENT_DSP" && "$CURRENT_DSP" != "$DSP_PROFILE" && -f "$PROFILES_DIR/$CURRENT_DSP" ]]; then
+        start_camilla "$PROFILES_DIR/$CURRENT_DSP" || true
+    fi
+    echo "Failed to start CamillaDSP. See: $LOCAL_CAMILLA_LOG"
+    exit 1
+fi
+if ! start_local_monitor "$PHYSICAL_SINK"; then
+    echo "Local playback monitor failed. See: $ACTION_LOG"
+    exit 1
+fi
+printf 'laptop_laptop\n' >"$REMOTE_STATE/mode"
+rm -f -- "$STATE_DIR/audio-stopped"
+# Save route only after a successful start; webremote can reuse this route.
+jq -n --arg card "$SELECTED_CARD" --arg profile "$SELECTED_PROFILE" --arg sink "$PHYSICAL_SINK" --arg port "$SELECTED_PORT"     '{card:$card,profile:$profile,sink:$sink,port:$port}' >"$ROUTE_FILE.tmp.$$" &&
+    mv -f "$ROUTE_FILE.tmp.$$" "$ROUTE_FILE"
+normalize_audio_volumes "$ORIGINAL_VOLUME" camilladsp
 resume_previously_playing_media
-
-echo
-if (( RANDOM_PICK )); then echo "The sink is a secret!"; else
-    echo "Current sink:"; current_sink="$(pactl get-default-sink 2>/dev/null || true)"; current_label="$current_sink"
-    for entry in "${SINKS[@]}"; do [[ "${entry%%|*}" == "$current_sink" ]] && { current_label="${entry#*|}"; break; }; done
-    echo "$current_label"
-fi
-echo; echo "Current device:"; echo "$SELECTED_CARD_LABEL"
-echo; echo "Current profile:"; [[ -f "$PROFILE_SELECTION_FILE" ]] && cat "$PROFILE_SELECTION_FILE" || echo "${SELECTED_PROFILE_LABEL:-$SELECTED_PROFILE}"
+echo; echo "Device: $SELECTED_CARD_LABEL"
+echo "Card profile: $SELECTED_PROFILE_LABEL"
+echo "Physical output: $(sink_display_label "$PHYSICAL_SINK")"
+echo "CamillaDSP: $(short_profile_name "$DSP_PROFILE")"
+echo "Desktop default: $(pactl get-default-sink 2>/dev/null || true)"
 pause_before_close

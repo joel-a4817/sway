@@ -10,7 +10,6 @@ SAMPLE_RATE = 96000
 N_FFT = 65536
 CAMILLA_PLAYBACK_DEVICE = "hw:Loopback,0,1"
 CAMILLA_PLAYBACK_FORMAT = "S32_LE"
-PIPEWIRE_NIX = Path('/home/joel/nixos/rt4817/pipewire.nix')
 BRIR_ROOT = Path('/home/joel/Documents/prefs/audio/BRIRs')
 EARPODS_HPCF = Path('/home/joel/Documents/prefs/audio/Apple_EarPods_Ahastyle_Covers_Custom_Average_A+B.wav')
 CLOUD3_HPCF = Path('/home/joel/Documents/prefs/audio/HyperX_Cloud_III_Average.wav')
@@ -37,6 +36,16 @@ PROFILES = sorted(
     (path.name for path in BRIR_ROOT.iterdir() if path.is_dir()),
     key=profile_sort_key,
 )
+# Reserve 00 for filterless. Both anechoic device variants use 01;
+# subsequent reverberant environments advance once per environment.
+ANECHOIC_OE = '(0000ms) Anechoic (OE)'
+PROFILE_NUMBERS = {
+    folder: index for index, folder in enumerate(
+        (name for name in PROFILES if name != ANECHOIC_OE), 1
+    )
+}
+if ANECHOIC_OE in PROFILES:
+    PROFILE_NUMBERS[ANECHOIC_OE] = 1
 
 def slugify(value):
     value = value.lower().replace("'", '')
@@ -204,142 +213,6 @@ def calculate_gain(brir_file, hpcf_file, hf):
     gain = 10.0 ** (preamp_db / 20.0)
     return left_peak, right_peak, rounded_peak, preamp_db, gain
 
-
-def q(value):
-    value = str(value)
-    return value.replace('\\', '\\\\').replace('"', '\\"')
-
-
-def make_module(index, folder_name, hf):
-    cloud3 = folder_name == '(0000ms) Anechoic (OE)'
-    device = 'cloud3' if cloud3 else 'earpods'
-    hpcf = CLOUD3_HPCF if cloud3 else EARPODS_HPCF
-    brir = BRIR_ROOT / folder_name / 'BRIR_True_Stereo.wav'
-
-    if not brir.is_file():
-        raise SystemExit(f'Missing BRIR: {brir}')
-    if not hpcf.is_file():
-        raise SystemExit(f'Missing HpCF: {hpcf}')
-
-    left, right, peak, preamp, gain = calculate_gain(brir, hpcf, hf)
-    slug = slugify(folder_name)
-    key = f"{index:02d}-{device}-{slug}"
-    node_name = f"{device}_{slug}"
-    description = f"{device} - {folder_name}"
-    gain_text = f'{gain:.17f}'
-
-    module = f'''    extraConfig.pipewire."{key}" = {{
-      "context.modules" = [
-        {{
-          name = "libpipewire-module-filter-chain";
-
-          args = {{
-            "node.description" = "{q(description)}";
-
-            "filter.graph" = {{
-              nodes = [
-                {{ type = "builtin"; label = "copy"; name = "splitL"; }}
-                {{ type = "builtin"; label = "copy"; name = "splitR"; }}
-
-                {{
-                  type = "builtin";
-                  label = "convolver";
-                  name = "LL";
-                  config = {{ filename = "{q(str(brir))}"; channel = 0; }};
-                }}
-                {{
-                  type = "builtin";
-                  label = "convolver";
-                  name = "LR";
-                  config = {{ filename = "{q(str(brir))}"; channel = 1; }};
-                }}
-                {{
-                  type = "builtin";
-                  label = "convolver";
-                  name = "RL";
-                  config = {{ filename = "{q(str(brir))}"; channel = 2; }};
-                }}
-                {{
-                  type = "builtin";
-                  label = "convolver";
-                  name = "RR";
-                  config = {{ filename = "{q(str(brir))}"; channel = 3; }};
-                }}
-
-                {{
-                  type = "builtin";
-                  label = "mixer";
-                  name = "mixL";
-                  control = {{
-                    "Gain 1" = {gain_text};
-                    "Gain 2" = {gain_text};
-                  }};
-                }}
-                {{
-                  type = "builtin";
-                  label = "mixer";
-                  name = "mixR";
-                  control = {{
-                    "Gain 1" = {gain_text};
-                    "Gain 2" = {gain_text};
-                  }};
-                }}
-
-                {{
-                  type = "builtin";
-                  label = "convolver";
-                  name = "hpcfL";
-                  config = {{ filename = "{q(str(hpcf))}"; channel = 0; }};
-                }}
-                {{
-                  type = "builtin";
-                  label = "convolver";
-                  name = "hpcfR";
-                  config = {{ filename = "{q(str(hpcf))}"; channel = 1; }};
-                }}
-              ];
-
-              links = [
-                {{ output = "splitL:Out"; input = "LL:In"; }}
-                {{ output = "splitL:Out"; input = "LR:In"; }}
-                {{ output = "splitR:Out"; input = "RL:In"; }}
-                {{ output = "splitR:Out"; input = "RR:In"; }}
-                {{ output = "LL:Out"; input = "mixL:In 1"; }}
-                {{ output = "RL:Out"; input = "mixL:In 2"; }}
-                {{ output = "LR:Out"; input = "mixR:In 1"; }}
-                {{ output = "RR:Out"; input = "mixR:In 2"; }}
-                {{ output = "mixL:Out"; input = "hpcfL:In"; }}
-                {{ output = "mixR:Out"; input = "hpcfR:In"; }}
-              ];
-
-              inputs = [ "splitL:In" "splitR:In" ];
-              outputs = [ "hpcfL:Out" "hpcfR:Out" ];
-            }};
-
-            "capture.props" = {{
-              "node.name" = "{node_name}";
-              "node.description" = "{q(description)}";
-              "media.class" = "Audio/Sink";
-              "audio.channels" = 2;
-              "audio.position" = [ "FL" "FR" ];
-              "audio.rate" = {SAMPLE_RATE};
-            }};
-
-            "playback.props" = {{
-              "node.autoconnect" = false;
-              "node.dont-fallback" = true;
-              "stream.dont-remix" = true;
-              "state.restore-target" = false;
-              "audio.channels" = 2;
-              "audio.position" = [ "FL" "FR" ];
-              "audio.rate" = {SAMPLE_RATE};
-            }};
-          }};
-        }}
-      ];
-    }};'''
-
-    return module, (key, left, right, peak, preamp, gain, brir, hpcf)
 
 def yaml_string(value):
     """Return a safely quoted YAML string without requiring PyYAML."""
@@ -543,138 +416,39 @@ pipeline:
 
     return output_path, config
 
-def matching_brace(text, open_index):
-    depth = 0
-    in_string = False
-    escaped = False
-    for i in range(open_index, len(text)):
-        char = text[i]
-        if in_string:
-            if escaped:
-                escaped = False
-            elif char == '\\':
-                escaped = True
-            elif char == '"':
-                in_string = False
-            continue
-        if char == '"':
-            in_string = True
-        elif char == '{':
-            depth += 1
-        elif char == '}':
-            depth -= 1
-            if depth == 0:
-                return i
-    raise SystemExit('Unbalanced braces in Nix file')
-
-
-def find_filter_module_ranges(text):
-    pattern = re.compile(r'^[ \t]*extraConfig\.pipewire\."[^"]+"\s*=\s*\{', re.MULTILINE)
-    ranges = []
-    for match in pattern.finditer(text):
-        open_index = text.find('{', match.start(), match.end())
-        close_index = matching_brace(text, open_index)
-        semicolon = close_index + 1
-        while semicolon < len(text) and text[semicolon] in ' \t':
-            semicolon += 1
-        if semicolon < len(text) and text[semicolon] == ';':
-            semicolon += 1
-        block = text[match.start():semicolon]
-        if 'libpipewire-module-filter-chain' in block and '"media.class" = "Audio/Sink";' in block:
-            ranges.append((match.start(), semicolon))
-    return ranges
-
-
-def replace_only_sink_modules(text, generated):
-    ranges = find_filter_module_ranges(text)
-    if not ranges:
-        raise SystemExit('No existing PipeWire Audio/Sink filter modules found')
-
-    # Replace the full old sink region and consume its trailing whitespace so
-    # repeated rebuilds cannot accumulate empty lines after the final sink.
-    region_start = ranges[0][0]
-    region_end = ranges[-1][1]
-    while region_end < len(text) and text[region_end] in ' \t\r\n':
-        region_end += 1
-
-    generated_text = '\n\n'.join(generated)
-    suffix = text[region_end:]
-    separator = '\n\n' if suffix else '\n'
-    return text[:region_start] + generated_text + separator + suffix
-
-def verify_output(text):
-    ranges = find_filter_module_ranges(text)
-    expected_modules = len(PROFILES)
-    cloud3_count = sum(folder == '(0000ms) Anechoic (OE)' for folder in PROFILES)
-    earpods_count = expected_modules - cloud3_count
-    if len(ranges) != expected_modules:
-        raise SystemExit(
-            f'Output verification failed: expected {expected_modules} sink modules, '
-            f'found {len(ranges)}'
-        )
-    if text.count('"node.autoconnect" = false;') != expected_modules:
-        raise SystemExit(
-            'Output verification failed: node.autoconnect=false count mismatch'
-        )
-    if text.count('"node.dont-fallback" = true;') != expected_modules:
-        raise SystemExit(
-            'Output verification failed: node.dont-fallback=true count mismatch'
-        )
-    if text.count('"stream.dont-remix" = true;') != expected_modules:
-        raise SystemExit(
-            'Output verification failed: stream.dont-remix=true count mismatch'
-        )
-    if text.count('"state.restore-target" = false;') != expected_modules:
-        raise SystemExit(
-            'Output verification failed: state.restore-target=false count mismatch'
-        )
-    if '"node.passive" = true;' in text:
-        raise SystemExit('Output verification failed: node.passive found')
-    if text.count('Apple_EarPods_Ahastyle_Covers_Custom_Average_A+B.wav') != earpods_count * 2:
-        raise SystemExit('Output verification failed: incorrect EarPods HpCF reference count')
-    if text.count('HyperX_Cloud_III_Average.wav') != cloud3_count * 2:
-        raise SystemExit('Output verification failed: incorrect Cloud III HpCF reference count')
-    for folder in PROFILES:
-        expected_brir = f'{folder}/BRIR_True_Stereo.wav'
-        if text.count(expected_brir) != 4:
-            raise SystemExit(
-                f'Output verification failed: expected 4 references to {expected_brir}'
-            )
-
 def main():
-    if not PIPEWIRE_NIX.is_file():
-        raise SystemExit(f'Nix file not found: {PIPEWIRE_NIX}')
-
+    """Reusable CamillaDSP profile rebuild; never reads, writes, or removes Nix files."""
     hf = load_required_ash_helpers()
-    generated = []
     report = []
     for index, folder in enumerate(PROFILES):
-        module, row = make_module(index, folder, hf)
-        generated.append(module)
-        report.append(row)
-
-    original = PIPEWIRE_NIX.read_text()
-    updated = replace_only_sink_modules(original, generated)
-    verify_output(updated)
-    write_camilladsp_profiles(report)
-    PIPEWIRE_NIX.write_text(updated)
-
-    print(f'Calculation rate: {SAMPLE_RATE} Hz')
-    print(f'FFT size: {N_FFT}')
-    print()
-    for key, left, right, peak, preamp, gain, brir, hpcf in report:
-        print(key)
-        print(f'  BRIR      : {brir}')
-        print(f'  HpCF      : {hpcf}')
-        print(f'  left peak : {left:.15f} dB')
-        print(f'  right peak: {right:.15f} dB')
-        print(f'  ASH peak  : {peak:.1f} dB')
-        print(f'  preamp    : {preamp:.1f} dB')
-        print(f'  gain      : {gain:.17f}')
-        print()
-    print(f'Rebuilt {len(PROFILES)} sink modules: {PIPEWIRE_NIX}')
-
-
+        cloud3 = folder == '(0000ms) Anechoic (OE)'
+        brir = BRIR_ROOT / folder / 'BRIR_True_Stereo.wav'
+        hpcf = CLOUD3_HPCF if cloud3 else EARPODS_HPCF
+        if not brir.is_file() or not hpcf.is_file():
+            raise SystemExit(f'Missing BRIR/HpCF: {brir} / {hpcf}')
+        left, right, peak, preamp, gain = calculate_gain(brir, hpcf, hf)
+        key = f'{PROFILE_NUMBERS[folder]:02d}-{"cloud3" if cloud3 else "earpods"}-{slugify(folder)}'
+        report.append((key, left, right, peak, preamp, gain, brir, hpcf))
+    if not CMF_BUDS_PRO_2_HPCF.is_file():
+        raise SystemExit(f'Missing CMF Buds Pro 2 HpCF: {CMF_BUDS_PRO_2_HPCF}')
+    paths = write_camilladsp_profiles(report)
+    active_file = Path('/home/joel/.local/state/sway/audio/camilladsp-webremote/active-profile')
+    if active_file.is_file():
+        old_name = active_file.read_text(encoding='utf-8').strip()
+        for old_index, folder in enumerate(PROFILES):
+            if folder == ANECHOIC_OE:
+                devices = ('cloud3',)
+            else:
+                devices = ('earpods', 'cmf-buds-pro-2')
+            for device in devices:
+                old = f'{old_index:02d}-{device}-{slugify(folder)}.yml'
+                new = f'{PROFILE_NUMBERS[folder]:02d}-{device}-{slugify(folder)}.yml'
+                if old_name == old and old != new and (CAMILLA_ROOT / new).is_file():
+                    temporary = active_file.with_name(active_file.name + '.tmp')
+                    temporary.write_text(new + '\n', encoding='utf-8')
+                    temporary.replace(active_file)
+                    break
+    print(f'Rebuilt {len(paths)} CamillaDSP YAML profiles in {CAMILLA_ROOT}')
 
 def write_filterless_camilladsp_profile():
     CAMILLA_ROOT.mkdir(parents=True, exist_ok=True)
@@ -744,7 +518,7 @@ def write_camilladsp_profiles(report):
         )
 
         output_path, config = make_camilladsp_profile(
-            index=index,
+            index=PROFILE_NUMBERS[folder_name],
             folder_name=folder_name,
             gain=gain,
             brir=brir,
@@ -789,7 +563,7 @@ def write_camilladsp_profiles(report):
         )
 
         output_path, config = make_camilladsp_profile(
-            index=index,
+            index=PROFILE_NUMBERS[folder_name],
             folder_name=folder_name,
             gain=gain,
             brir=brir,
