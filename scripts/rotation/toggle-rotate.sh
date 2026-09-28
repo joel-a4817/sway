@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+mkdir -p "/home/joel/.local/state/sway/rotation"
+
 OUT="$(swaymsg -t get_outputs -r | jq -r '.[] | select(.focused) | .name')"
 
 ROTATOR="/home/joel/.config/sway/scripts/rotation/rotate-touchpad.py"
