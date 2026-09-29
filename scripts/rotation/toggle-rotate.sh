@@ -46,6 +46,7 @@ esac
 # --- Apply output transform first ------------------------------
 swaymsg -q "output $OUT transform $NEXT"
 
+
 # --- Apply pointer calibration matrix (ALL pointers) -----------
 case "$NEXT" in
   normal)
@@ -68,7 +69,7 @@ sudo -n "$SETSID" -f "$ROTATOR" \
   --dev "$TPDEV" \
   --rot "$TPROT" >>"$LOG" 2>&1 || {
     echo "Touchpad rotator failed. Check: $LOG" >&2
-    exit 0
+    exit 1
   }
 
 # --- Kick (restart) your mouse rotator -------------------------
@@ -77,5 +78,20 @@ sudo -n "$SETSID" -f "$MOUSE_ROTATOR" \
   --dev "$MOUSE_DEV" \
   --rot "$TPROT" >>"$MOUSE_LOG" 2>&1 || {
     echo "Mouse rotator failed. Check: $MOUSE_LOG" >&2
-    exit 0
+    exit 1
   }
+
+# Apply this last: earlier output/input changes (or a Sway reload) can reset mapping.
+# Check Sway's command reply rather than hiding it with -q.
+VNC_POINTER="0:0:wlr_virtual_pointer_v1"
+if ! swaymsg -t get_inputs -r | jq -e --arg id "$VNC_POINTER" \
+    'any(.[]; .identifier == $id)' >/dev/null; then
+  echo "wayvnc virtual pointer not present; map it after wayvnc connects" >&2
+  exit 1
+fi
+reply="$(swaymsg -r "input \"$VNC_POINTER\" map_to_output $OUT")"
+if ! printf '%s\n' "$reply" | jq -e \
+    'type == "array" and length > 0 and all(.[]; .success == true)' >/dev/null; then
+  echo "VNC pointer mapping failed: $reply" >&2
+  exit 1
+fi
