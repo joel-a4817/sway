@@ -296,46 +296,11 @@ start_local_monitor() {
     return 1
 }
 
-pause_active_media() {
-    local service
-
-    if [[ -S /tmp/mpvsocket ]] && command -v socat >/dev/null 2>&1; then
-        printf 'set pause yes\n' |
-            socat - /tmp/mpvsocket >>"$ACTION_LOG" 2>&1 || true
-    fi
-
-    # Webremote MPV has its own IPC socket, independent of /tmp/mpvsocket.
-    if [[ -S "$REMOTE_STATE/mpv.sock" ]] && command -v socat >/dev/null 2>&1; then
-        printf '%s\n' '{"command":["set_property","pause",true]}' |
-            socat -T 1 - "UNIX-CONNECT:$REMOTE_STATE/mpv.sock" >>"$ACTION_LOG" 2>&1 || true
-    fi
-    if command -v busctl >/dev/null 2>&1; then
-        while read -r service; do
-            [[ -n "$service" ]] || continue
-
-            if busctl --user call \
-                "$service" \
-                /org/mpris/MediaPlayer2 \
-                org.mpris.MediaPlayer2.Player \
-                Pause \
-                >>"$ACTION_LOG" 2>&1; then
-                printf 'Paused MPRIS player: %s\n' "$service" >>"$ACTION_LOG"
-            else
-                printf 'Failed to pause MPRIS player: %s\n' "$service" >>"$ACTION_LOG"
-            fi
-        done < <(
-            busctl --user --no-pager --no-legend list 2>/dev/null |
-            awk '$1 ~ /^org\.mpris\.MediaPlayer2\./ {print $1}'
-        )
-    fi
-}
-
 # Shared saved master: default PipeWire sink and direct-ALSA MPV.
 MASTER_VOLUME_FILE="$STATE_DIR/master-volume"
-# One normalization implementation shared with webremote. The switch alone
-# pauses desktop media; the server's normalizer never pauses playback.
+# Pausing, gain normalization, master restore and conditional resume all run
+# in the paired server's single transaction, once after the output commit.
 normalize_audio_volumes() {
-    pause_active_media
     python3 "$TOPOLOGY_SCRIPT" --normalize-audio >>"$ACTION_LOG" 2>&1 || {
         tail -n 8 "$ACTION_LOG" >&2
         return 1
@@ -412,11 +377,7 @@ close_mpv_windows() {
     return 1
 }
 
-# Opening the selector is itself a normalization checkpoint. This pauses
-# current media before any Swaynag button can be pressed. If Audio Stop left
-# PipeWire offline, ALSA normalization and media pausing still run; sink
-# normalization is retried after PipeWire starts for a selected card.
-# Audio actions normalize after selection; Away/display is controlled by the web button or Sway binding.
+# Only committed audio actions normalize; Away/display stays separate.
 commit_local_output() {
     local server_pid tracked pid
 # This local selection is laptop-only. Stop competing inputs after all choices validate.
@@ -442,7 +403,7 @@ systemctl stop shairport-sync.service nqptp.service >>"$ACTION_LOG" 2>&1 || true
 for pid in $(pgrep -x sonobus 2>/dev/null; pgrep -x SonoBus 2>/dev/null); do
     [[ "$pid" =~ ^[0-9]+$ ]] && kill -TERM "$pid" 2>/dev/null || true
 done
-# Normalization pauses media; nothing automatically resumes it.
+# Media resume is handled by the paired normalization transaction.
 stop_monitor
 systemctl --user start pipewire.socket pipewire-pulse.socket wireplumber.service >>"$ACTION_LOG" 2>&1 || fail 'Could not start PipeWire after handoff'
 wait_for_pulse || fail 'PipeWire did not become ready after handoff'
@@ -489,8 +450,11 @@ select_filter() {
     mapfile -t DSP_PROFILES < <(jq -r '.[] | select((ascii_downcase | contains("cmf")) | not)' <<<"$list")
     ((${#DSP_PROFILES[@]})) || fail 'No listening filters found'
     echo; echo 'CamillaDSP listening filter'; echo
+    local last_group='' group
     for i in "${!DSP_PROFILES[@]}"; do
+        group="$(jq -r --arg name "${DSP_PROFILES[$i]}" '.[$name].group // "Other"' <<<"$info")"
         label="$(jq -r --arg name "${DSP_PROFILES[$i]}" '.[$name].label // $name' <<<"$info")"
+        if [[ "$group" != "$last_group" ]]; then echo; echo "$group"; last_group="$group"; fi
         print_menu_item "$((i+1))" "$label"
     done
     while :; do
@@ -563,7 +527,11 @@ if ! pulse_ready; then
 fi
 # Save the actual master before profile activation changes the live graph.
 current_master="$(pactl get-sink-volume @DEFAULT_SINK@ 2>/dev/null | grep -oE '[0-9]+%' | head -n1)"
-if [[ "$current_master" =~ ^([0-9]|[1-9][0-9]|100)%$ ]]; then
+# A stopped or rebuilding audio graph can expose a fresh 100% default.
+# Keep the persisted master until a live CamillaDSP route is running.
+if [[ ! -e "$REMOTE_STATE/audio-stopped" ]] &&
+   valid_pid "$(read_pid "$PIDFILE")" &&
+   [[ "$current_master" =~ ^([0-9]|[1-9][0-9]|100)%$ ]]; then
     printf '%s\n' "$current_master" >"$STATE_DIR/master-volume"
 fi
 SELECTED_CARD="${CARDS[$SELECTED_CARD_VALUE]%%$'\t'*}"
@@ -628,9 +596,8 @@ ORIGINAL_PROFILE="$ACTIVE_PROFILE"
 if [[ "$SELECTED_PROFILE" != "$ACTIVE_PROFILE" ]]; then
     python3 "$TOPOLOGY_SCRIPT" --output-profile "$SELECTED_CARD" "$SELECTED_PROFILE" >/dev/null || fail 'Could not activate playback profile'
 fi
-TOPOLOGY_JSON="$(output_topology)" || fail 'Could not refresh sinks after profile activation'
 ACTIVE_PROFILE="$SELECTED_PROFILE"
-# The web picker and terminal now consume the same post-profile snapshot.
+# The web picker and terminal consume the same post-profile snapshot.
 TOPOLOGY_JSON="$(output_topology)" || fail 'Could not refresh output topology'
 mapfile -t PHYSICAL_SINKS < <(jq -r --arg card "$SELECTED_CARD" '.cards[0].sinks[]?.name' <<<"$TOPOLOGY_JSON")
 # [0] is the actual currently routed sink, not a profile recommendation.
