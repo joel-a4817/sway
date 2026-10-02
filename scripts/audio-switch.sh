@@ -32,7 +32,7 @@ if [[ ! -e "$STATE_DIR/state-migrated" && -d "$LEGACY_STATE" ]]; then
     rmdir "$LEGACY_STATE/camilladsp-webremote" "$LEGACY_STATE" 2>/dev/null || true
 fi
 # Lock lives under ~/.local/state/sway/audio-switch; children close fd 9.
-LOCK_FILE="$STATE_DIR/audio-switch-v3.lock"
+LOCK_FILE="$STATE_DIR/audio-switch.lock"
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
     echo "Audio switch is already running."
@@ -129,18 +129,8 @@ set_card_profile_stable() {
 move_application_inputs_to() {
     local wanted="$1"
     local id
-    local block
-
     while read -r id _; do
         [[ -n "$id" ]] || continue
-        block="$(pactl list sink-inputs 2>/dev/null | awk -v wanted="$id" '
-            /^Sink Input #[0-9]+/ {
-                current=$3
-                sub(/^#/, "", current)
-                selected=(current==wanted)
-            }
-            selected { print }
-        ')"
         pactl move-sink-input "$id" "$wanted" \
             >>"$ACTION_LOG" 2>&1 || true
     done < <(pactl list short sink-inputs 2>/dev/null || true)
@@ -201,9 +191,8 @@ stop_camilla() {
     rm -f -- "$PIDFILE"
 }
 start_camilla() {
-    local profile="$1" pid master gain
+    local profile="$1" pid gain
     "$CAMILLA" --check "$profile" >>"$ACTION_LOG" 2>&1 || return 1
-    master="$(read_master_volume)"
     gain="0.0"
     "$CAMILLA" --port=8767 --gain="$gain" "$profile" >>"$LOCAL_CAMILLA_LOG" 2>&1 </dev/null 9>&- &
     pid=$!
@@ -285,7 +274,7 @@ pause_active_media() {
     fi
 }
 
-# One persisted master, applied once at the CamillaDSP Main fader.
+# Shared saved master: default PipeWire sink and direct-ALSA MPV.
 MASTER_VOLUME_FILE="$STATE_DIR/master-volume"
 read_master_volume() {
     local value
@@ -338,7 +327,7 @@ normalize_audio_volumes() {
             pactl set-sink-volume "$sink" 100% >>"$ACTION_LOG" 2>&1 || true
         fi
     done < <(pactl list short sinks 2>/dev/null | awk '{print $2}')
-    if [[ -n "$default" ]]; then
+    if [[ -n "$default" ]] && ! valid_pid "$(read_pid "$PIDFILE")"; then
         pactl set-sink-volume @DEFAULT_SINK@ "$master" >>"$ACTION_LOG" 2>&1 || return 1
     fi
     # Webremote MPV bypasses pactl via ALSA. Restore its gain from the same
@@ -652,7 +641,6 @@ printf '\nPlayback sink (actual destination; may belong to another card)\n'
 printf '[0] Keep current output (%s)\n' "$(sink_display_label "${CURRENT_PHYSICAL:-none}")"
 for i in "${!PHYSICAL_SINKS[@]}"; do
     sink="${PHYSICAL_SINKS[$i]}"
-    label="$(jq -r --arg name "$sink" '.[] | select(.name == $name) | .description // .name' <<<"$SINKS_JSON" | head -n1)"
     printf '[%d] %s\n' "$((i+1))" "$(sink_display_label "$sink")"
 done
 read -rp 'Select playback sink: ' physical_choice
@@ -797,21 +785,33 @@ fi
 printf 'laptop_laptop\n' >"$REMOTE_STATE/mode"
 rm -f -- "$REMOTE_STATE/audio-stopped"  # successful switch clears the stopped marker
 # Save route only after a successful start; webremote can reuse this route.
-# pactl JSON does not consistently expose a sink.card field. Prefer the
-# selected card when its stable ALSA name matches the selected sink; otherwise
-# resolve via PipeWire device.id. Never fail AFTER audio has started.
-SINK_CARD="$SELECTED_CARD"; SINK_PROFILE="$SELECTED_PROFILE"
-SINK_CARD_INDEX="$(jq -r --arg name "$PHYSICAL_SINK" '.[] | select(.name == $name) | .card // empty' <<<"$SINKS_JSON" | head -n1)"
-if [[ -n "$SINK_CARD_INDEX" ]]; then
-    candidate="$(pactl --format=json list cards | jq -r --arg idx "$SINK_CARD_INDEX" '.[] | select((.index | tostring) == $idx) | .name' | head -n1)"
-    [[ -z "$candidate" ]] || SINK_CARD="$candidate"
+# Resolve the selected live sink's owning card via PipeWire device.id.
+# Only use the ALSA name stem if graph metadata is unavailable.
+PW_GRAPH="$(pw-dump 2>>"$ACTION_LOG" || true)"
+SINK_CARD=""
+if [[ -n "$PW_GRAPH" ]]; then
+    SINK_CARD="$(jq -r --arg sink "$PHYSICAL_SINK" '
+      . as $graph | ([$graph[] | select(.type == "PipeWire:Interface:Node" and .info.props."node.name" == $sink) | (.info.props."device.id" | tostring)] | first // "") as $id |
+      $graph[] | select($id != "" and .type == "PipeWire:Interface:Device" and (.id | tostring) == $id) | .info.props."device.name" // empty
+    ' <<<"$PW_GRAPH" 2>/dev/null | head -n1)"
 fi
-if [[ "$SINK_CARD" == "$SELECTED_CARD" && "$PHYSICAL_SINK" != "${SELECTED_CARD/alsa_card./alsa_output.}"* ]]; then
-    echo "Warning: sink owner not exposed by pactl; retaining selected card without forcing a different profile." >>"$ACTION_LOG"
-    SINK_CARD=""; SINK_PROFILE=""
+CARDS_JSON="$(pactl --format=json list cards 2>>"$ACTION_LOG" || printf '[]')"
+if [[ -n "$SINK_CARD" ]]; then
+    jq -e --arg name "$SINK_CARD" 'any(.[]; .name == $name)' <<<"$CARDS_JSON" >/dev/null || SINK_CARD=""
 fi
-if [[ -n "$SINK_CARD" && "$SINK_CARD" != "$SELECTED_CARD" ]]; then
-    SINK_PROFILE="$(pactl --format=json list cards | jq -r --arg name "$SINK_CARD" '.[] | select(.name == $name) | .active_profile | if type == "object" then (.name // "") else (. // "") end' | head -n1)"
+if [[ -z "$SINK_CARD" ]]; then
+    while IFS= read -r candidate; do
+        [[ "$candidate" == alsa_card.* ]] || continue
+        if [[ "$PHYSICAL_SINK" == "alsa_output.${candidate#alsa_card.}."* ]]; then
+            SINK_CARD="$candidate"; break
+        fi
+    done < <(jq -r '.[].name // empty' <<<"$CARDS_JSON")
+fi
+SINK_PROFILE=""
+if [[ -n "$SINK_CARD" ]]; then
+    SINK_PROFILE="$(jq -r --arg name "$SINK_CARD" '.[] | select(.name == $name) | .active_profile | if type == "object" then (.name // "") else (. // "") end' <<<"$CARDS_JSON" | head -n1)"
+else
+    echo "Warning: selected sink owner is unknown; saving sink and port without a guessed card." >>"$ACTION_LOG"
 fi
 jq -n --arg card "$SINK_CARD" --arg profile "$SINK_PROFILE" --arg sink "$PHYSICAL_SINK" --arg port "$SELECTED_PORT" --arg label "$(sink_display_label "$PHYSICAL_SINK")" '{card:$card,profile:$profile,sink:$sink,port:$port,label:$label}' >"$ROUTE_FILE.tmp.$$" &&
     mv -f "$ROUTE_FILE.tmp.$$" "$ROUTE_FILE"
