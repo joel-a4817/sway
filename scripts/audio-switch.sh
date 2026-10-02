@@ -51,7 +51,6 @@ switch_process() {
     [[ "$arg" == "$SCRIPT_PATH" ]] && return 0
     [[ "$arg" == */audio-switch.sh || "$arg" == audio-switch.sh ]] || return 1
     [[ "$(readlink -f -- "$arg" 2>/dev/null)" == "$SCRIPT_PATH" ]]
-    return 1
 }
 process_start() {
     local stat
@@ -562,17 +561,16 @@ if ! start_local_monitor "$PHYSICAL_SINK"; then
 fi
 printf 'laptop_laptop\n' >"$REMOTE_STATE/mode"
 rm -f -- "$REMOTE_STATE/audio-stopped"
-# Save only a newly selected output; filter-only changes retain its saved route.
-if [[ "${SAVE_OUTPUT_ROUTE:-0}" == 1 ]]; then
-# Resolve the selected live sink's owning card via PipeWire device.id.
-# If graph metadata is unavailable, leave ownership unknown rather than guessing.
-TOPOLOGY_JSON="$(output_topology)" || fail 'Could not verify selected route'
-SINK_CARD="$(jq -r --arg sink "$PHYSICAL_SINK" '[.cards[].sinks[] | select(.name==$sink) | .cardName][0] // ""' <<<"$TOPOLOGY_JSON")"
-SINK_PROFILE="$(jq -r --arg card "$SINK_CARD" '[.cards[] | select(.name==$card) | .activeProfile][0] // ""' <<<"$TOPOLOGY_JSON")"
-jq -n --arg card "$SELECTED_CARD" --arg profile "$SELECTED_PROFILE" --arg sinkCard "$SINK_CARD" --arg sinkProfile "$SINK_PROFILE" --arg sink "$PHYSICAL_SINK" --arg port "$SELECTED_PORT" --arg label "$(sink_display_label "$PHYSICAL_SINK")" '{card:$card,profile:$profile,sink:$sink,port:$port,label:$label,sinkCard:$sinkCard,sinkProfile:$sinkProfile}' >"$ROUTE_FILE.tmp.$$" &&
-    mv -f "$ROUTE_FILE.tmp.$$" "$ROUTE_FILE" || fail 'Could not save output route'
-fi
 normalize_audio_volumes || fail 'Could not restore saved master after route change'
+}
+save_selected_route() {
+    TOPOLOGY_JSON="$(output_topology)" || fail 'Could not refresh committed route'
+    jq -e --arg sink "$PHYSICAL_SINK" --arg port "$SELECTED_PORT" 'any(.cards[].sinks[]?; .name==$sink and ($port=="" or (.activePort==$port and any(.ports[]?; .name==$port and .available!="no" and .available!="false"))))' <<<"$TOPOLOGY_JSON" >/dev/null || fail 'Output changed before saving the route'
+    SINK_CARD="$(jq -r --arg sink "$PHYSICAL_SINK" '[.cards[].sinks[] | select(.name==$sink) | .cardName][0] // ""' <<<"$TOPOLOGY_JSON")"
+    SINK_PROFILE="$(jq -r --arg card "$SINK_CARD" '[.cards[] | select(.name==$card) | .activeProfile][0] // ""' <<<"$TOPOLOGY_JSON")"
+    jq -n --arg card "$SELECTED_CARD" --arg profile "$SELECTED_PROFILE" --arg sinkCard "$SINK_CARD" --arg sinkProfile "$SINK_PROFILE" --arg sink "$PHYSICAL_SINK" --arg port "$SELECTED_PORT" --arg label "$(sink_display_label "$PHYSICAL_SINK")" '{card:$card,profile:$profile,sink:$sink,port:$port,label:$label,sinkCard:$sinkCard,sinkProfile:$sinkProfile}' >"$ROUTE_FILE.tmp.$$" &&
+        mv -f "$ROUTE_FILE.tmp.$$" "$ROUTE_FILE" || fail 'Could not save output route'
+    python3 "$TOPOLOGY_SCRIPT" --remember-output "$(cat "$ROUTE_FILE")" >/dev/null || fail 'Could not remember output for this card/profile'
 }
 select_filter() {
 # Use the same CamillaDSP profile list as the web picker.
@@ -720,8 +718,13 @@ if [[ "$SELECTED_CARD_VALUE" == select-filter ]]; then
     SELECTED_CARD="$(jq -r '.card // ""' "$ROUTE_FILE")"
     SELECTED_PROFILE="$(jq -r '.profile // ""' "$ROUTE_FILE")"
     SELECTED_PORT="$(jq -r '.port // ""' "$ROUTE_FILE")"
+    SINK_CARD="$(jq -r --arg sink "$PHYSICAL_SINK" '[.cards[].sinks[]? | select(.name==$sink) | .cardName][0] // ""' <<<"$TOPOLOGY_JSON")"
+    SAVED_SINK_CARD="$(jq -r '.sinkCard // ""' "$ROUTE_FILE")"
+    if [[ -n "$SAVED_SINK_CARD" && "$SAVED_SINK_CARD" != "$SINK_CARD" ]]; then
+        fail 'Saved output now belongs to a different card; select the output again.'
+    fi
     if [[ -n "$SELECTED_PORT" ]]; then
-        jq -e --arg sink "$PHYSICAL_SINK" --arg port "$SELECTED_PORT" 'any(.cards[].sinks[]?; .name==$sink and any(.ports[]?; .name==$port and .available!="no" and .available!="false"))' <<<"$TOPOLOGY_JSON" >/dev/null || fail 'Saved output port is no longer available.'
+        jq -e --arg sink "$PHYSICAL_SINK" --arg port "$SELECTED_PORT" 'any(.cards[].sinks[]?; .name==$sink and .activePort==$port and any(.ports[]?; .name==$port and .available!="no" and .available!="false"))' <<<"$TOPOLOGY_JSON" >/dev/null || fail 'Saved output port is no longer available.'
     fi
     CURRENT_DSP="$(cat "$ACTIVE" 2>/dev/null || true)"
     SAVE_OUTPUT_ROUTE=0
@@ -849,13 +852,25 @@ while :; do
     fi
     [[ -n "$CAMILLA" && -n "$DSP_PROFILE" && -f "$PROFILES_DIR/$DSP_PROFILE" ]] || fail 'No usable listening filter exists.'
     "$CAMILLA" --check "$PROFILES_DIR/$DSP_PROFILE" >>"$ACTION_LOG" 2>&1 || fail 'Current listening filter is invalid.'
-    SELECTED_PORT=""
-    SAVE_OUTPUT_ROUTE=1
-    commit_local_output
+    # Discover ports from the current post-profile topology before changing
+    # the engine. A rejected port must not commit a half-selected route.
     # Use the live sink ports; option 0 retains the active port.
     mapfile -t OUTPUT_PORTS < <(jq -r --arg card "$SELECTED_CARD" --arg sink "$PHYSICAL_SINK" '.cards[] | select(.name==$card) | .sinks[] | select(.name==$sink) | .ports[].name' <<<"$TOPOLOGY_JSON")
     SELECTED_PORT=""
+    remembered_port="$(python3 "$TOPOLOGY_SCRIPT" --remembered-port "$SELECTED_CARD" "$SELECTED_PROFILE" "$PHYSICAL_SINK")" || fail 'Could not read remembered port'
+    SELECTED_PORT="$(jq -r --arg sink "$PHYSICAL_SINK" --arg preferred "$remembered_port" '[.cards[].sinks[] | select(.name==$sink) | . as $s | ([.ports[] | select(.name==$preferred and .available!="no" and .available!="false") | .name] + [.ports[] | select(.name==$s.activePort and .available!="no" and .available!="false") | .name] + [.ports[] | select(.available!="no" and .available!="false") | .name])[0]][0] // ""' <<<"$TOPOLOGY_JSON")"
+    if ((${#OUTPUT_PORTS[@]})) && [[ -z "$SELECTED_PORT" ]]; then
+        retry_selection 'No available port on that sink; choose another output.'
+        continue
+    fi
+    if [[ -n "$SELECTED_PORT" ]]; then
+        pactl set-sink-port "$PHYSICAL_SINK" "$SELECTED_PORT" >>"$ACTION_LOG" 2>&1 || fail 'Could not activate selected sink port'
+    fi
+    # Commit playback now; the later port menu only adjusts this active sink.
+    commit_local_output
+    save_selected_route
     if ((${#OUTPUT_PORTS[@]})); then
+        TOPOLOGY_JSON="$(output_topology)" || fail 'Could not refresh active sink'
         active_port="$(jq -r --arg card "$SELECTED_CARD" --arg name "$PHYSICAL_SINK" '.cards[] | select(.name==$card) | .sinks[] | select(.name==$name) | .activePort' <<<"$TOPOLOGY_JSON")"
         for port in "${OUTPUT_PORTS[@]}"; do
             [[ "$port" == "$active_port" ]] && SELECTED_PORT="$port"
@@ -910,18 +925,11 @@ while :; do
             normalize_audio_volumes || fail 'Normalization failed after changing output port'
         fi
     fi
+    normalize_audio_volumes || fail 'Normalization failed after output port selection'
     break
 done
-normalize_audio_volumes || fail "Normalization failed after output port selection"
-
-TOPOLOGY_JSON="$(output_topology)" || fail 'Could not verify output after port selection'
-jq -e --arg card "$SELECTED_CARD" --arg sink "$PHYSICAL_SINK" --arg port "$SELECTED_PORT" 'any(.cards[] | select(.name==$card) | .sinks[]?; .name==$sink and ($port=="" or any(.ports[]?; .name==$port)))' <<<"$TOPOLOGY_JSON" >/dev/null || fail 'Selected output or port disappeared'
-# Persist the selected port without restarting the already-running monitor.
-TOPOLOGY_JSON="$(output_topology)" || fail 'Could not refresh committed route'
-SINK_CARD="$(jq -r --arg sink "$PHYSICAL_SINK" '[.cards[].sinks[] | select(.name==$sink) | .cardName][0] // ""' <<<"$TOPOLOGY_JSON")"
-SINK_PROFILE="$(jq -r --arg card "$SINK_CARD" '[.cards[] | select(.name==$card) | .activeProfile][0] // ""' <<<"$TOPOLOGY_JSON")"
-jq -n --arg card "$SELECTED_CARD" --arg profile "$SELECTED_PROFILE" --arg sinkCard "$SINK_CARD" --arg sinkProfile "$SINK_PROFILE" --arg sink "$PHYSICAL_SINK" --arg port "$SELECTED_PORT" --arg label "$(sink_display_label "$PHYSICAL_SINK")" '{card:$card,profile:$profile,sink:$sink,port:$port,label:$label,sinkCard:$sinkCard,sinkProfile:$sinkProfile}' >"$ROUTE_FILE.tmp.$$" &&
-    mv -f "$ROUTE_FILE.tmp.$$" "$ROUTE_FILE" || fail 'Could not save output port'
+# A port change does not require a second CamillaDSP or monitor restart.
+save_selected_route
 # Output has already been committed. Closing now preserves it.
 echo; echo "Device: $SELECTED_CARD_LABEL"
 echo "Card profile: $SELECTED_PROFILE_LABEL"
