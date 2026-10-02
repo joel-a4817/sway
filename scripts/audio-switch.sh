@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -u
 
-HOME_DIR="/home/joel"
+HOME_DIR="${HOME:?HOME is required}"
 STATE_DIR="$HOME_DIR/.local/state/sway/audio-switch"
 REMOTE_STATE="$HOME_DIR/.local/state/sway/camilladsp-webremote"
 LEGACY_STATE="$HOME_DIR/.local/state/sway/audio"
@@ -46,8 +46,6 @@ ACTION_STARTED_FILE="$STATE_DIR/audio-toggle-started.$$"
 CARD_SELECTION_FILE="$STATE_DIR/audio-card-selected.$$"
 PROFILE_SELECTION_FILE="$STATE_DIR/audio-profile-selected.$$"
 SWAYNAG_LOG="$STATE_DIR/audio-switch-swaynag.$$"
-MEDIA_RESUME_FILE="$STATE_DIR/audio-media-resume.$$"
-MEDIA_CAPTURED_FILE="$STATE_DIR/audio-media-captured.$$"
 
 mkdir -p "$STATE_DIR"
 chmod 700 "$STATE_DIR" 2>/dev/null || true
@@ -55,7 +53,7 @@ printf '\n[%s] audio-switch pid=%s\n' "$(date -Iseconds 2>/dev/null || date)" "$
 FINAL_PAUSE_REACHED=0
 EXIT_HANDLER_RUNNING=0
 
-cleanup() { rm -f "$RESULT_FILE" "$ACTION_STARTED_FILE" "$CARD_SELECTION_FILE" "$PROFILE_SELECTION_FILE" "$SWAYNAG_LOG" "$MEDIA_RESUME_FILE" "$MEDIA_CAPTURED_FILE"; }
+cleanup() { rm -f "$RESULT_FILE" "$ACTION_STARTED_FILE" "$CARD_SELECTION_FILE" "$PROFILE_SELECTION_FILE" "$SWAYNAG_LOG"; }
 pause_before_close() {
     FINAL_PAUSE_REACHED=1
     flock -u 9 2>/dev/null || true
@@ -206,7 +204,7 @@ start_camilla() {
     local profile="$1" pid master gain
     "$CAMILLA" --check "$profile" >>"$ACTION_LOG" 2>&1 || return 1
     master="$(read_master_volume)"
-    gain="$(awk -v v="${master%\%}" 'BEGIN { if (v <= 0) print -150; else printf "%.4f", 20*log(v/100)/log(10) }')"
+    gain="0.0"
     "$CAMILLA" --port=8767 --gain="$gain" "$profile" >>"$LOCAL_CAMILLA_LOG" 2>&1 </dev/null 9>&- &
     pid=$!
     printf '%s\n' "$pid" >"$PIDFILE"
@@ -253,73 +251,19 @@ start_local_monitor() {
     if ! valid_pid "$pid"; then rm -f "$MONPID"; return 1; fi
 }
 
-mpris_playback_status() {
-    local service="$1"
-
-    busctl --user get-property \
-        "$service" \
-        /org/mpris/MediaPlayer2 \
-        org.mpris.MediaPlayer2.Player \
-        PlaybackStatus \
-        2>/dev/null |
-    awk -F'"' 'NF >= 2 {print $2; exit}'
-}
-
-mpv_is_playing() {
-    local reply
-
-    [[ -S /tmp/mpvsocket ]] || return 1
-    command -v socat >/dev/null 2>&1 || return 1
-
-    reply="$(
-        printf '%s\n' '{"command":["get_property","pause"]}' |
-            socat -T 1 - /tmp/mpvsocket 2>/dev/null |
-            head -n1
-    )"
-
-    grep -Eq '"data"[[:space:]]*:[[:space:]]*false' <<<"$reply"
-}
-
-capture_media_resume_state() {
-    local service
-    local status
-
-    [[ -e "$MEDIA_CAPTURED_FILE" ]] && return 0
-
-    : >"$MEDIA_RESUME_FILE"
-
-    if mpv_is_playing; then
-        printf '%s\n' '__MPV__' >>"$MEDIA_RESUME_FILE"
-    fi
-
-    if command -v busctl >/dev/null 2>&1; then
-        while read -r service; do
-            [[ -n "$service" ]] || continue
-            status="$(mpris_playback_status "$service" || true)"
-            if [[ "$status" == "Playing" ]]; then
-                printf '%s\n' "$service" >>"$MEDIA_RESUME_FILE"
-            fi
-        done < <(
-            busctl --user --no-pager --no-legend list 2>/dev/null |
-            awk '$1 ~ /^org\.mpris\.MediaPlayer2\./ {print $1}'
-        )
-    fi
-
-    touch "$MEDIA_CAPTURED_FILE"
-}
-
 pause_active_media() {
     local service
-
-    # Capture only once, before the first normalization. Later normalization
-    # passes keep media paused without changing what will be resumed.
-    capture_media_resume_state
 
     if [[ -S /tmp/mpvsocket ]] && command -v socat >/dev/null 2>&1; then
         printf 'set pause yes\n' |
             socat - /tmp/mpvsocket >>"$ACTION_LOG" 2>&1 || true
     fi
 
+    # Webremote MPV has its own IPC socket, independent of /tmp/mpvsocket.
+    if [[ -S "$REMOTE_STATE/mpv.sock" ]] && command -v socat >/dev/null 2>&1; then
+        printf '%s\n' '{"command":["set_property","pause",true]}' |
+            socat -T 1 - "UNIX-CONNECT:$REMOTE_STATE/mpv.sock" >>"$ACTION_LOG" 2>&1 || true
+    fi
     if command -v busctl >/dev/null 2>&1; then
         while read -r service; do
             [[ -n "$service" ]] || continue
@@ -339,40 +283,6 @@ pause_active_media() {
             awk '$1 ~ /^org\.mpris\.MediaPlayer2\./ {print $1}'
         )
     fi
-}
-
-resume_previously_playing_media() {
-    local entry
-
-    [[ -r "$MEDIA_RESUME_FILE" ]] || return 0
-
-    while IFS= read -r entry; do
-        [[ -n "$entry" ]] || continue
-
-        if [[ "$entry" == '__MPV__' ]]; then
-            if [[ -S /tmp/mpvsocket ]] && command -v socat >/dev/null 2>&1; then
-                printf 'set pause no\n' |
-                    socat - /tmp/mpvsocket >>"$ACTION_LOG" 2>&1 || true
-            fi
-            continue
-        fi
-
-        if command -v busctl >/dev/null 2>&1; then
-            if busctl --user call \
-                "$entry" \
-                /org/mpris/MediaPlayer2 \
-                org.mpris.MediaPlayer2.Player \
-                Play \
-                >>"$ACTION_LOG" 2>&1; then
-                printf 'Resumed MPRIS player: %s\n' "$entry" >>"$ACTION_LOG"
-            else
-                printf 'Warning: failed to resume MPRIS player: %s\n' \
-                    "$entry" >>"$ACTION_LOG"
-            fi
-        fi
-    done <"$MEDIA_RESUME_FILE"
-
-    rm -f "$MEDIA_RESUME_FILE" "$MEDIA_CAPTURED_FILE"
 }
 
 # One persisted master, applied once at the CamillaDSP Main fader.
@@ -417,23 +327,62 @@ normalize_alsa_controls() {
     (( failures == 0 ))
 }
 normalize_audio_volumes() {
-    local sink name master
+    local sink default master
     pause_active_media
     master="$(read_master_volume)"
     normalize_alsa_controls || echo 'Warning: some ALSA controls could not reach 0dB; see action log.' >&2
+    default="$(pactl get-default-sink 2>/dev/null || true)"
     while IFS= read -r sink; do
         [[ -n "$sink" ]] || continue
-        name="${sink,,}"
-        # All sinks are unity: SonoBus and the local monitor read the same
-        # CamillaDSP output, whose Main fader holds the saved master.
-        pactl set-sink-volume "$sink" 100% >>"$ACTION_LOG" 2>&1 || true
+        if [[ "$sink" != "$default" ]]; then
+            pactl set-sink-volume "$sink" 100% >>"$ACTION_LOG" 2>&1 || true
+        fi
     done < <(pactl list short sinks 2>/dev/null | awk '{print $2}')
-    # Never alter hardware or software mute/capture switches during gain reset.
+    if [[ -n "$default" ]]; then
+        pactl set-sink-volume @DEFAULT_SINK@ "$master" >>"$ACTION_LOG" 2>&1 || return 1
+    fi
+    if valid_pid "$(read_pid "$PIDFILE")"; then restore_saved_master || return 1; fi
 }
-export -f mpris_playback_status mpv_is_playing capture_media_resume_state pause_active_media resume_previously_playing_media read_master_volume normalize_alsa_controls normalize_audio_volumes
+restore_saved_master() {
+    local master
+    master="$(read_master_volume)"
+    if pulse_ready; then
+        pactl set-sink-volume @DEFAULT_SINK@ "$master" >>"$ACTION_LOG" 2>&1 || return 1
+    fi
+    if valid_pid "$(read_pid "$PIDFILE")"; then
+        CAMILLA_GAIN=0 python3 - <<'PYCODE' >>"$ACTION_LOG" 2>&1 || return 1
+import base64,hashlib,json,os,socket,struct
+key=base64.b64encode(os.urandom(16)).decode()
+with socket.create_connection(('127.0.0.1',8767),timeout=2) as sock:
+    sock.settimeout(2)
+    sock.sendall((f'GET / HTTP/1.1\r\nHost: 127.0.0.1:8767\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n').encode())
+    header=b''
+    while b'\r\n\r\n' not in header:
+        part=sock.recv(1)
+        if not part or len(header)>8192:raise RuntimeError('Websocket handshake failed')
+        header+=part
+    expected=base64.b64encode(hashlib.sha1((key+'258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode()).digest()).lower()
+    if not header.startswith(b'HTTP/1.1 101 ') or b'sec-websocket-accept: '+expected not in header.lower():raise RuntimeError('Unexpected websocket server')
+    payload=json.dumps({'SetVolume':0.0}).encode();mask=os.urandom(4);n=len(payload)
+    size=bytes([n]) if n<126 else b'\x7e'+struct.pack('!H',n)
+    sock.sendall(b'\x81'+bytes([size[0]|128])+size[1:]+mask+bytes(v^mask[i%4] for i,v in enumerate(payload)))
+    head=sock.recv(2)
+    if len(head)!=2 or head[0]&15!=1:raise RuntimeError('No CamillaDSP response')
+    n=head[1]&127
+    if n==126:n=struct.unpack('!H',sock.recv(2))[0]
+    data=b''
+    while len(data)<n:
+        chunk=sock.recv(n-len(data))
+        if not chunk:raise RuntimeError('CamillaDSP response closed')
+        data+=chunk
+    if json.loads(data).get('SetVolume',{}).get('result')!='Ok':raise RuntimeError('CamillaDSP unity failed')
+PYCODE
+    fi
+}
+export -f pause_active_media read_master_volume normalize_alsa_controls normalize_audio_volumes
 export MASTER_VOLUME_FILE
 MASTER_VOLUME="$(read_master_volume)"
-export RESULT_FILE ACTION_STARTED_FILE ACTION_LOG CARD_SELECTION_FILE PROFILE_SELECTION_FILE MEDIA_RESUME_FILE MEDIA_CAPTURED_FILE MASTER_VOLUME
+export RESULT_FILE ACTION_STARTED_FILE ACTION_LOG CARD_SELECTION_FILE PROFILE_SELECTION_FILE MASTER_VOLUME
 mapfile -t CARDS < <(pactl list cards 2>/dev/null | awk '
 function output_card(){if(card!=""){if(description=="")description=card;print card "|" description}}
 /^Card #[0-9]+/{output_card();card="";description="";next}
@@ -525,7 +474,17 @@ close_mpv_windows() {
 }
 hotspot_active() { nmcli -t -f NAME connection show --active 2>/dev/null | grep -Fqx "$HOTSPOT_CONNECTION"; }
 
-ARGS=(-t warning -y overlay -m "Audio Device Select")
+# Opening the selector is itself a normalization checkpoint. This pauses
+# current media before any Swaynag button can be pressed. If Audio Stop left
+# PipeWire offline, ALSA normalization and media pausing still run; sink
+# normalization is retried after PipeWire starts for a selected card.
+if pulse_ready; then
+    live="$(pactl get-sink-volume @DEFAULT_SINK@ 2>/dev/null | grep -oE '[0-9]+%' | head -n1)"
+    if [[ "$live" =~ ^([0-9]|[1-9][0-9]|100)%$ ]]; then printf '%s\n' "$live" >"$MASTER_VOLUME_FILE"; fi
+fi
+normalize_audio_volumes || fail 'Normalization failed while opening audio switch'
+
+ARGS=(-t warning -y overlay -m "Select audio card")
 
 ARGS+=(
     -z "Audio Stop"
@@ -562,6 +521,7 @@ kill "$SWAYNAG_PID" 2>/dev/null || true
 wait "$SWAYNAG_PID" 2>/dev/null || true
 [[ -f "$CARD_SELECTION_FILE" ]] || { echo "No audio action was selected."; exit 1; }
 SELECTED_CARD_VALUE="$(cat "$CARD_SELECTION_FILE")"
+normalize_audio_volumes || fail "Normalization failed after audio action selection"
 
 if [[ "$SELECTED_CARD_VALUE" == stop-audio ]]; then
     echo "Stopping all audio..." | tee -a "$ACTION_LOG"
@@ -600,6 +560,7 @@ fi
 if [[ "$SELECTED_CARD_VALUE" == toggle-hotspot ]]; then
     if hotspot_active; then nmcli connection down "$HOTSPOT_CONNECTION" >>"$ACTION_LOG" 2>&1; echo "AirPlay hotspot stopped."
     else nmcli connection up "$HOTSPOT_CONNECTION" >>"$ACTION_LOG" 2>&1; echo "AirPlay hotspot started."; fi
+    normalize_audio_volumes || fail "Normalization failed after hotspot selection"
     pause_before_close; exit 0
 fi
 
@@ -613,7 +574,7 @@ SELECTED_CARD_DESCRIPTION="${CARDS[$SELECTED_CARD_VALUE]#*|}"
 SELECTED_CARD_LABEL="$(card_display_label "$SELECTED_CARD" "$SELECTED_CARD_DESCRIPTION")"
 
 CURRENT_SINK="$(pactl get-default-sink 2>/dev/null || true)"
-normalize_audio_volumes
+normalize_audio_volumes || fail "Normalization failed after card selection"
 
 mapfile -t PROFILES < <(pactl list cards | awk -v target="$SELECTED_CARD" '
 /^[[:space:]]*Name:/{current=$0;sub(/^[[:space:]]*Name:[[:space:]]*/,"",current);selected=(current==target);in_profiles=0;next}
@@ -625,7 +586,7 @@ get_active_profile() { pactl list cards | awk -v target="$SELECTED_CARD" '/^[[:s
 ACTIVE_PROFILE="$(get_active_profile)"; ACTIVE_PROFILE_LABEL="$ACTIVE_PROFILE"
 for entry in "${PROFILES[@]}"; do profile="${entry%%|*}"; remainder="${entry#*|}"; description="${remainder%%|*}"; [[ "$profile" == "$ACTIVE_PROFILE" ]] && { ACTIVE_PROFILE_LABEL="$(profile_display_label "$SELECTED_CARD" "$profile" "$description")"; break; }; done
 
-echo; echo "Selected Audio Device"; echo; echo "$SELECTED_CARD_LABEL"; echo; echo "Profiles"; echo
+echo; echo "Card: $SELECTED_CARD_LABEL"; echo; echo "Card playback profile"; echo
 [[ -n "$ACTIVE_PROFILE" ]] && echo "[0] Keep current profile ($ACTIVE_PROFILE_LABEL)" || echo "[0] Keep current profile"
 for i in "${!PROFILES[@]}"; do
     entry="${PROFILES[$i]}"; profile="${entry%%|*}"; remainder="${entry#*|}"; description="${remainder%%|*}"; availability="${remainder##*|}"
@@ -646,6 +607,7 @@ if [[ "$profile_choice" != 0 ]]; then
     PROFILE_OK=0; for _ in {1..50}; do [[ "$(get_active_profile)" == "$SELECTED_PROFILE" ]] && { PROFILE_OK=1; break; }; sleep 0.1; done
     (( PROFILE_OK )) || { echo "Warning: profile did not settle as '$SELECTED_PROFILE'." >>"$ACTION_LOG"; echo "Warning: profile switch did not settle. See: $ACTION_LOG"; }
 fi
+normalize_audio_volumes || fail "Normalization failed after profile selection"
 
 # Like camilladsp-server-sonobus.py, show every eligible real output after
 # choosing the card/profile. A different card can own the selected sink.
@@ -653,12 +615,14 @@ fi
 # be final monitor targets (that would create a feedback loop).
 real_sinks() {
     jq -r '.[] |
-        (.name // "") as $name |
+        (.name // "") as $name | ($name | ascii_downcase) as $low |
         ((.properties // {}) | [."device.description", ."node.description", ."node.nick", ."media.name"] | map(. // "") | join(" ") | ascii_downcase) as $label |
         select($name != "" and
-          ($name | ascii_downcase | startswith("earpods_") or startswith("cloud3_") or startswith("cmf-buds-pro-2_") or
-            contains("snd_aloop") or contains("loopback") or contains("camilladsp") or contains("sonobus") or contains("silent output") or contains("filter-chain") or contains("null-sink") | not) and
-          ($label | contains("loopback") or contains("camilladsp") or contains("sonobus") or contains("silent output") or contains("filter-chain") or contains("null sink") | not)) |
+          ([$low | startswith("earpods_"), startswith("cloud3_"), startswith("cmf-buds-pro-2_"),
+            contains("snd_aloop"), contains("loopback"), contains("camilladsp"), contains("sonobus"),
+            contains("silent output"), contains("filter-chain"), contains("null-sink")] | any | not) and
+          ([$label | contains("loopback"), contains("camilladsp"), contains("sonobus"),
+            contains("silent output"), contains("filter-chain"), contains("null sink")] | any | not)) |
         $name' <<<"$SINKS_JSON" | sort -u
 }
 SINKS_JSON="$(pactl --format=json list sinks)" || { echo 'Could not list sinks.'; exit 1; }
@@ -678,14 +642,14 @@ if [[ -z "$CURRENT_PHYSICAL" ]]; then
         [[ "$sink" == "$default" ]] && CURRENT_PHYSICAL="$sink"
     done
 fi
-printf '\nPlayback outputs (all cards)\n' 
+printf '\nPlayback sink (actual destination; may belong to another card)\n' 
 printf '[0] Keep current output (%s)\n' "$(sink_display_label "${CURRENT_PHYSICAL:-none}")"
 for i in "${!PHYSICAL_SINKS[@]}"; do
     sink="${PHYSICAL_SINKS[$i]}"
     label="$(jq -r --arg name "$sink" '.[] | select(.name == $name) | .description // .name' <<<"$SINKS_JSON" | head -n1)"
     printf '[%d] %s\n' "$((i+1))" "$(sink_display_label "$sink")"
 done
-read -rp 'Select physical output: ' physical_choice
+read -rp 'Select playback sink: ' physical_choice
 [[ "$physical_choice" =~ ^[0-9]+$ ]] || { echo 'Invalid output selection.'; exit 1; }
 if [[ "$physical_choice" == 0 ]]; then
     [[ -n "$CURRENT_PHYSICAL" ]] || { echo 'No current output for this card; select a numbered output.'; exit 1; }
@@ -696,6 +660,7 @@ else
     PHYSICAL_SINK="${PHYSICAL_SINKS[$index]}"
 fi
 wait_for_sink "$PHYSICAL_SINK" || { echo "Output disappeared: $PHYSICAL_SINK"; exit 1; }
+normalize_audio_volumes || fail "Normalization failed after playback sink selection"
 # The server exposes sink ports as well; honor the saved port when available.
 mapfile -t OUTPUT_PORTS < <(jq -r --arg name "$PHYSICAL_SINK" '
   .[] | select(.name == $name) | (.ports // []) |
@@ -704,9 +669,17 @@ mapfile -t OUTPUT_PORTS < <(jq -r --arg name "$PHYSICAL_SINK" '
 SELECTED_PORT=""
 if ((${#OUTPUT_PORTS[@]})); then
     saved_port="$(jq -r '.port // ""' "$ROUTE_FILE" 2>/dev/null || true)"
-    for port in "${OUTPUT_PORTS[@]}"; do
-        [[ "$port" == "$saved_port" ]] && SELECTED_PORT="$port"
-    done
+    active_port="$(jq -r --arg name "$PHYSICAL_SINK" '.[] | select(.name == $name) | .active_port | if type == "object" then (.name // "") else (. // "") end' <<<"$SINKS_JSON" | head -n1)"
+    if [[ "$PHYSICAL_SINK" == "$SAVED_SINK" ]]; then
+        for port in "${OUTPUT_PORTS[@]}"; do
+            [[ "$port" == "$saved_port" ]] && SELECTED_PORT="$port"
+        done
+    fi
+    if [[ -z "$SELECTED_PORT" ]]; then
+        for port in "${OUTPUT_PORTS[@]}"; do
+            [[ "$port" == "$active_port" ]] && SELECTED_PORT="$port"
+        done
+    fi
     [[ -n "$SELECTED_PORT" ]] || SELECTED_PORT="${OUTPUT_PORTS[0]}"
     if ((${#OUTPUT_PORTS[@]} > 1)); then
         printf '\nOutput port\n[0] Keep current (%s)\n' "$SELECTED_PORT"
@@ -723,6 +696,7 @@ if ((${#OUTPUT_PORTS[@]})); then
         fi
     fi
     pactl set-sink-port "$PHYSICAL_SINK" "$SELECTED_PORT" >>"$ACTION_LOG" 2>&1 || { echo 'Failed to set output port.'; exit 1; }
+    normalize_audio_volumes || fail "Normalization failed after output port selection"
 fi
 
 # One local CamillaDSP profile menu. CMF profiles remain available to the
@@ -750,7 +724,7 @@ CURRENT_VALID=0
 for dsp in "${DSP_PROFILES[@]}"; do
     [[ "$dsp" == "$CURRENT_DSP" ]] && CURRENT_VALID=1
 done
-echo; echo 'CamillaDSP profiles'; echo
+echo; echo 'CamillaDSP filters (before the playback sink)'; echo
 if ((CURRENT_VALID)); then
     printf '[0] Keep current (%s)\n' "$(short_profile_name "$CURRENT_DSP")"
 else
@@ -769,6 +743,7 @@ else
     ((index >= 0 && index < ${#DSP_PROFILES[@]})) || { echo 'Invalid CamillaDSP selection.'; exit 1; }
     DSP_PROFILE="${DSP_PROFILES[$index]}"
 fi
+normalize_audio_volumes || fail "Normalization failed after CamillaDSP filter selection"
 "$CAMILLA" --check "$PROFILES_DIR/$DSP_PROFILE" >>"$ACTION_LOG" 2>&1 || { echo "Invalid CamillaDSP profile: $DSP_PROFILE"; exit 1; }
 command -v arecord >/dev/null && command -v pacat >/dev/null || { echo 'arecord or pacat missing.'; exit 1; }
 arecord -L | awk '$1 == "camilladsp_output_shared" {found=1} END {exit !found}' || { echo 'camilladsp_output_shared ALSA capture is missing.'; exit 1; }
@@ -794,7 +769,7 @@ systemctl stop shairport-sync.service nqptp.service >>"$ACTION_LOG" 2>&1 || true
 for pid in $(pgrep -x sonobus 2>/dev/null; pgrep -x SonoBus 2>/dev/null); do
     [[ "$pid" =~ ^[0-9]+$ ]] && kill -TERM "$pid" 2>/dev/null || true
 done
-# Pause/resume and volume normalization remain the original functions.
+# Normalization pauses media; nothing automatically resumes it.
 stop_monitor
 if ! ensure_camilla_sink; then echo "camilladsp desktop sink is unavailable. See: $ACTION_LOG"; exit 1; fi
 if [[ "$(pactl get-default-sink 2>/dev/null || true)" != camilladsp ]]; then
@@ -814,12 +789,27 @@ if ! start_local_monitor "$PHYSICAL_SINK"; then
     exit 1
 fi
 printf 'laptop_laptop\n' >"$REMOTE_STATE/mode"
-rm -f -- "$REMOTE_STATE/audio-stopped"
+: >"$REMOTE_STATE/audio-stopped"  # switch owns this engine; server must not restart it
 # Save route only after a successful start; webremote can reuse this route.
-jq -n --arg card "$SELECTED_CARD" --arg profile "$SELECTED_PROFILE" --arg sink "$PHYSICAL_SINK" --arg port "$SELECTED_PORT"     '{card:$card,profile:$profile,sink:$sink,port:$port}' >"$ROUTE_FILE.tmp.$$" &&
+# pactl JSON does not consistently expose a sink.card field. Prefer the
+# selected card when its stable ALSA name matches the selected sink; otherwise
+# resolve via PipeWire device.id. Never fail AFTER audio has started.
+SINK_CARD="$SELECTED_CARD"; SINK_PROFILE="$SELECTED_PROFILE"
+SINK_CARD_INDEX="$(jq -r --arg name "$PHYSICAL_SINK" '.[] | select(.name == $name) | .card // empty' <<<"$SINKS_JSON" | head -n1)"
+if [[ -n "$SINK_CARD_INDEX" ]]; then
+    candidate="$(pactl --format=json list cards | jq -r --arg idx "$SINK_CARD_INDEX" '.[] | select((.index | tostring) == $idx) | .name' | head -n1)"
+    [[ -z "$candidate" ]] || SINK_CARD="$candidate"
+fi
+if [[ "$SINK_CARD" == "$SELECTED_CARD" && "$PHYSICAL_SINK" != "${SELECTED_CARD/alsa_card./alsa_output.}"* ]]; then
+    echo "Warning: sink owner not exposed by pactl; retaining selected card without forcing a different profile." >>"$ACTION_LOG"
+    SINK_CARD=""; SINK_PROFILE=""
+fi
+if [[ -n "$SINK_CARD" && "$SINK_CARD" != "$SELECTED_CARD" ]]; then
+    SINK_PROFILE="$(pactl --format=json list cards | jq -r --arg name "$SINK_CARD" '.[] | select(.name == $name) | .active_profile | if type == "object" then (.name // "") else (. // "") end' | head -n1)"
+fi
+jq -n --arg card "$SINK_CARD" --arg profile "$SINK_PROFILE" --arg sink "$PHYSICAL_SINK" --arg port "$SELECTED_PORT" --arg label "$(sink_display_label "$PHYSICAL_SINK")" '{card:$card,profile:$profile,sink:$sink,port:$port,label:$label}' >"$ROUTE_FILE.tmp.$$" &&
     mv -f "$ROUTE_FILE.tmp.$$" "$ROUTE_FILE"
-normalize_audio_volumes
-resume_previously_playing_media
+normalize_audio_volumes || fail 'Could not restore saved master after normalization'
 echo; echo "Device: $SELECTED_CARD_LABEL"
 echo "Card profile: $SELECTED_PROFILE_LABEL"
 echo "Physical output: $(sink_display_label "$PHYSICAL_SINK")"
