@@ -341,6 +341,12 @@ normalize_audio_volumes() {
     if [[ -n "$default" ]]; then
         pactl set-sink-volume @DEFAULT_SINK@ "$master" >>"$ACTION_LOG" 2>&1 || return 1
     fi
+    # Webremote MPV bypasses pactl via ALSA. Restore its gain from the same
+    # master-volume file without changing playback state or routing.
+    if [[ -S "$REMOTE_STATE/mpv.sock" ]] && command -v socat >/dev/null 2>&1; then
+        printf '{"command":["set_property","volume",%s]}\n' "${master%\%}" |
+            socat -T 2 - "UNIX-CONNECT:$REMOTE_STATE/mpv.sock" >>"$ACTION_LOG" 2>&1 || true
+    fi
     if valid_pid "$(read_pid "$PIDFILE")"; then restore_saved_master || return 1; fi
 }
 restore_saved_master() {
@@ -789,7 +795,7 @@ if ! start_local_monitor "$PHYSICAL_SINK"; then
     exit 1
 fi
 printf 'laptop_laptop\n' >"$REMOTE_STATE/mode"
-: >"$REMOTE_STATE/audio-stopped"  # switch owns this engine; server must not restart it
+rm -f -- "$REMOTE_STATE/audio-stopped"  # successful switch clears the stopped marker
 # Save route only after a successful start; webremote can reuse this route.
 # pactl JSON does not consistently expose a sink.card field. Prefer the
 # selected card when its stable ALSA name matches the selected sink; otherwise
