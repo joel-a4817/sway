@@ -537,7 +537,7 @@ SELECTED_CARD="${CARDS[$SELECTED_CARD_VALUE]%%$'\t'*}"
 TOPOLOGY_JSON="$(output_topology)" || fail 'Could not refresh audio cards'
 jq -e --arg card "$SELECTED_CARD" 'any(.cards[]; .name==$card)' <<<"$TOPOLOGY_JSON" >/dev/null || fail "Selected card is no longer available: $SELECTED_CARD"
 SELECTED_CARD_DESCRIPTION="${CARDS[$SELECTED_CARD_VALUE]#*$'\t'}"
-SELECTED_CARD_LABEL="${SELECTED_CARD_DESCRIPTION}"
+SELECTED_CARD_LABEL="$(jq -r --arg card "$SELECTED_CARD" '[.cards[] | select(.name==$card) | .label][0] // $card' <<<"$TOPOLOGY_JSON")"
 
 normalize_audio_volumes || fail "Normalization failed after card selection"
 
@@ -563,6 +563,10 @@ while :; do
     if [[ "$profile_choice" == 0 ]]; then
         if [[ -z "$ACTIVE_PROFILE" ]]; then
             retry_selection 'No current profile. Select a numbered profile.'; continue
+        fi
+        active_available="$(jq -r --arg card "$SELECTED_CARD" --arg profile "$ACTIVE_PROFILE" '[.cards[] | select(.name==$card) | .profiles[] | select(.name==$profile) | .available][0] // "unknown"' <<<"$TOPOLOGY_JSON")"
+        if [[ "$active_available" == no || "$active_available" == false ]]; then
+            retry_selection 'Current profile is unavailable. Select a numbered profile.'; continue
         fi
         SELECTED_PROFILE="$ACTIVE_PROFILE"
         SELECTED_PROFILE_LABEL="$ACTIVE_PROFILE_LABEL"
@@ -651,7 +655,7 @@ while :; do
             [[ "$selected_available" != no && "$selected_available" != false ]] || SELECTED_PORT=""
         fi
         if ((${#OUTPUT_PORTS[@]} > 1)); then
-            if [[ -n "$SELECTED_PORT" ]]; then printf '\nOutput port\n[0] Keep current (%s)\n' "$SELECTED_PORT"; else printf '\nOutput port\nNo current available port; select a numbered port.\n'; fi
+            if [[ -n "$SELECTED_PORT" ]]; then printf '\nOutput port\n'; print_menu_item 0 "Keep current ($SELECTED_PORT)"; else printf '\nOutput port\nNo current available port; select a numbered port.\n'; fi
             for i in "${!OUTPUT_PORTS[@]}"; do
                 port_label="$(jq -r --arg card "$SELECTED_CARD" --arg sink "$PHYSICAL_SINK" --arg port "${OUTPUT_PORTS[$i]}" '.cards[] | select(.name==$card) | .sinks[] | select(.name==$sink) | .ports[] | select(.name==$port) | .label' <<<"$TOPOLOGY_JSON")"
                 availability="$(jq -r --arg card "$SELECTED_CARD" --arg sink "$PHYSICAL_SINK" --arg port "${OUTPUT_PORTS[$i]}" '[.cards[] | select(.name==$card) | .sinks[] | select(.name==$sink) | .ports[] | select(.name==$port) | .available][0] // "unknown"' <<<"$TOPOLOGY_JSON")"
@@ -704,13 +708,6 @@ jq -e --arg card "$SELECTED_CARD" --arg sink "$PHYSICAL_SINK" --arg port "$SELEC
 # Use the same CamillaDSP profile list as the web picker.
 [[ -n "$CAMILLA" && -d "$PROFILES_DIR" ]] || fail 'CamillaDSP executable or profile directory missing'
 CURRENT_DSP="$(cat "$ACTIVE" 2>/dev/null || true)"
-short_profile_name() {
-    local stem="${1%.yaml}"
-    stem="${stem%.yml}"
-    stem="${stem#[0-9][0-9]-}"
-    stem="${stem//-/ }"
-    printf '%s\n' "$stem" | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) substr($i,2); print}'
-}
 DSP_LIST_JSON="$(python3 "$TOPOLOGY_SCRIPT" --dsp-profiles)" || fail 'Could not list CamillaDSP profiles from paired server'
 mapfile -t DSP_PROFILES < <(jq -r '.[] | select((ascii_downcase | contains("cmf")) | not)' <<<"$DSP_LIST_JSON")
 ((${#DSP_PROFILES[@]})) || fail 'No CamillaDSP profiles found'
@@ -720,12 +717,12 @@ for dsp in "${DSP_PROFILES[@]}"; do
 done
 echo; echo 'CamillaDSP listening profile (filter before the playback sink)'; echo
 if ((CURRENT_VALID)); then
-    print_menu_item 0 "Keep current ($(short_profile_name "$CURRENT_DSP"))"
+    print_menu_item 0 "Keep current ($CURRENT_DSP)"
 else
     echo 'No current local profile; choose a numbered filter.'
 fi
 for i in "${!DSP_PROFILES[@]}"; do
-    print_menu_item "$((i+1))" "$(short_profile_name "${DSP_PROFILES[$i]}")"
+    print_menu_item "$((i+1))" "${DSP_PROFILES[$i]}"
 done
 while :; do
     read -rp 'Select CamillaDSP profile: ' dsp_choice || { echo 'Selection cancelled.'; pause_before_close; exit 0; }
@@ -807,6 +804,6 @@ normalize_audio_volumes || fail 'Could not restore saved master after normalizat
 echo; echo "Device: $SELECTED_CARD_LABEL"
 echo "Card profile: $SELECTED_PROFILE_LABEL"
 echo "Physical output: $(sink_display_label "$PHYSICAL_SINK")"
-echo "CamillaDSP: $(short_profile_name "$DSP_PROFILE")"
+echo "CamillaDSP: $DSP_PROFILE"
 echo "Desktop default: $(pactl get-default-sink 2>/dev/null || true)"
 pause_before_close
