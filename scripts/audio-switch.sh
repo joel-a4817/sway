@@ -371,28 +371,38 @@ normalize_alsa_controls() {
     printf 'ALSA normalization: %s dB-capable playback/capture directions set to 0dB; %s failed\n' "$count" "$failures" >>"$ACTION_LOG"
     (( failures == 0 ))
 }
+normalize_pipewire_controls() {
+    local kind command field target listing failures=0
+    for kind in sinks sources sink-inputs source-outputs; do
+        case "$kind" in
+            sinks) command=set-sink-volume; field=name ;;
+            sources) command=set-source-volume; field=name ;;
+            sink-inputs) command=set-sink-input-volume; field=index ;;
+            source-outputs) command=set-source-output-volume; field=index ;;
+        esac
+        listing="$(pactl --format=json list "$kind" 2>>"$ACTION_LOG")" || { printf 'Warning: could not list %s\n' "$kind" >>"$ACTION_LOG"; ((failures+=1)); continue; }
+        while IFS= read -r target; do
+            [[ -n "$target" ]] || continue
+            if ! pactl "$command" "$target" 0dB >>"$ACTION_LOG" 2>&1; then
+                printf 'Warning: could not set %s %s to 0dB\n' "$kind" "$target" >>"$ACTION_LOG"
+                ((failures+=1))
+            fi
+        done < <(jq -r --arg field "$field" '.[] | .[$field] // empty' <<<"$listing" 2>>"$ACTION_LOG")
+    done
+    (( failures == 0 ))
+}
 normalize_audio_volumes() {
-    local sink default master
+    local master
     pause_active_media
     master="$(read_master_volume)"
     normalize_alsa_controls || echo 'Warning: some ALSA controls could not reach 0dB; see action log.' >&2
-    default="$(pactl get-default-sink 2>/dev/null || true)"
-    while IFS= read -r sink; do
-        [[ -n "$sink" ]] || continue
-        if [[ "$sink" != "$default" ]]; then
-            pactl set-sink-volume "$sink" 100% >>"$ACTION_LOG" 2>&1 || true
-        fi
-    done < <(pactl list short sinks 2>/dev/null | awk '{print $2}')
-    if [[ -n "$default" ]] && ! valid_pid "$(read_pid "$PIDFILE")"; then
-        pactl set-sink-volume @DEFAULT_SINK@ "$master" >>"$ACTION_LOG" 2>&1 || return 1
-    fi
-    # Webremote MPV bypasses pactl via ALSA. Restore its gain from the same
-    # master-volume file without changing playback state or routing.
+    normalize_pipewire_controls || echo 'Warning: some PipeWire controls could not reach 0dB; see action log.' >&2
+    # Direct-ALSA MPV has a separate gain stage; it shares the saved master.
     if [[ -S "$REMOTE_STATE/mpv.sock" ]] && command -v socat >/dev/null 2>&1; then
         printf '{"command":["set_property","volume",%s]}\n' "${master%\%}" |
             socat -T 2 - "UNIX-CONNECT:$REMOTE_STATE/mpv.sock" >/dev/null 2>>"$ACTION_LOG" || true
     fi
-    if valid_pid "$(read_pid "$PIDFILE")"; then restore_saved_master || return 1; fi
+    restore_saved_master || return 1
 }
 restore_saved_master() {
     local master

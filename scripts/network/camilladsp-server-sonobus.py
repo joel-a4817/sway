@@ -366,7 +366,7 @@ def restart_camilla():
     if not name:raise RuntimeError('No active profile')
     return switch_profile(name)
 def alsa100():
-    r=run(['amixer','-c','Loopback','sset','PCM','100%'],False)
+    r=run(['amixer','-c','Loopback','sset','PCM','0dB'],False)
     if r.returncode:raise RuntimeError(r.stderr.strip() or r.stdout.strip() or 'Could not set Loopback PCM')
 
 # This file is shared with audio-switch.sh. It is the only saved master.
@@ -472,7 +472,8 @@ def apply_master_volume(value,normalize_sinks=True):
         except (OSError,ValueError) as error:raise RuntimeError(f'Could not set CamillaDSP Main to unity: {error}') from error
 
 def normalize_audio_volumes():
-    # ALSA controls go to 0 dB; restore the saved default-sink and MPV master.
+    # Normalize every live ALSA/PipeWire gain stage to 0 dB, then restore the shared master.
+    # The server never pauses media.
     errors=[]
     try:cards=Path('/proc/asound/cards').read_text()
     except OSError:cards=''
@@ -495,8 +496,29 @@ def normalize_audio_volumes():
         # restore the persisted master, not that sink's fresh 100% default.
         try:value=float(MASTER_VOLUME.read_text().strip().rstrip('%'))
         except (OSError,ValueError):value=master_volume()
-        apply_master_volume(max(0.0,min(100.0,value)))
-    except RuntimeError as error:errors.append(str(error))
+        # A route/profile switch may recreate sinks. Enumerate live objects now,
+        # not at startup. PipeWire stream gains are distinct from device gains.
+        for kind,command,key in (('sinks','set-sink-volume','name'),
+                                 ('sources','set-source-volume','name'),
+                                 ('sink-inputs','set-sink-input-volume','index'),
+                                 ('source-outputs','set-source-output-volume','index')):
+            for item in _pactl_json(kind):
+                if not isinstance(item,dict):continue
+                target=item.get(key)
+                if target is None or target=='':continue
+                result=run([exe('pactl'),command,str(target),'0dB'],False,8,media_env())
+                if result.returncode:
+                    errors.append(f'{kind} {target}: {result.stderr.strip() or "0dB unavailable"}')
+        # Direct-ALSA MPV bypasses PipeWire; its gain is the same saved master.
+        sync_mpv_master(max(0.0,min(100.0,value)))
+        if alive(rpid(CAMPID),'camilladsp'):
+            camilla_command({'SetVolume':0.0})
+        default=run([exe('pactl'),'get-default-sink'],False,5,media_env())
+        if default.returncode or not default.stdout.strip():
+            raise RuntimeError(default.stderr.strip() or 'No default audio sink')
+        result=run([exe('pactl'),'set-sink-volume',default.stdout.strip(),f'{max(0.0,min(100.0,value)):.2f}%'],False,8,media_env())
+        if result.returncode:raise RuntimeError(result.stderr.strip() or 'Could not restore saved master')
+    except (RuntimeError,OSError,ValueError,subprocess.TimeoutExpired) as error:errors.append(str(error))
     if errors:
         raise RuntimeError('Audio normalization incomplete: '+'; '.join(errors[:4])+
                            (f'; {len(errors)-4} more' if len(errors)>4 else ''))
