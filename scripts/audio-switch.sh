@@ -31,13 +31,64 @@ if [[ ! -e "$STATE_DIR/state-migrated" && -d "$LEGACY_STATE" ]]; then
     touch "$STATE_DIR/state-migrated"
     rmdir "$LEGACY_STATE/camilladsp-webremote" "$LEGACY_STATE" 2>/dev/null || true
 fi
-# Lock lives under ~/.local/state/sway/audio-switch; children close fd 9.
+# Serialize new launches separately from the lock shared with webremote startup.
+LAUNCH_LOCK="$STATE_DIR/audio-switch-launch.lock"
+OWNER_FILE="$STATE_DIR/audio-switch-owner"
 LOCK_FILE="$STATE_DIR/audio-switch.lock"
+exec 8>"$LAUNCH_LOCK"
+flock -x 8 || exit 1
+# Match a switch process by its script argument, not by its terminal or audio engine.
+SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+switch_process() {
+    local pid="$1" arg comm
+    [[ "$pid" =~ ^[1-9][0-9]*$ && "$pid" != "$$" && -r "/proc/$pid/cmdline" ]] || return 1
+    comm="$(cat "/proc/$pid/comm" 2>/dev/null)"
+    [[ "$comm" == bash ]] || return 1
+    local -a args=()
+    mapfile -d '' -t args <"/proc/$pid/cmdline" 2>/dev/null || return 1
+    # The script must be Bash's script operand, not a path in unrelated arguments.
+    arg="${args[1]:-}"
+    [[ "$arg" == "$SCRIPT_PATH" ]] && return 0
+    [[ "$arg" == */audio-switch.sh || "$arg" == audio-switch.sh ]] || return 1
+    [[ "$(readlink -f -- "$arg" 2>/dev/null)" == "$SCRIPT_PATH" ]]
+    return 1
+}
+process_start() {
+    local stat
+    stat="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1
+    stat="${stat##*) }"
+    set -- $stat
+    printf '%s\n' "${20:-}"
+}
+# Replace only a verified switch process. The /proc start time protects
+# against PID reuse; the scan also covers the first launch after upgrading.
+for entry in /proc/[0-9]*; do
+    previous="${entry##*/}"
+    switch_process "$previous" || continue
+    [[ "$(stat -c %u "$entry" 2>/dev/null)" == "$(id -u)" ]] || continue
+    start="$(process_start "$previous")"
+    [[ -n "$start" ]] || continue
+    # Older copies do not handle USR2 and would leave their Swaynag child behind.
+    while read -r child; do
+        [[ "$child" =~ ^[1-9][0-9]*$ ]] && kill -TERM "$child" 2>/dev/null || true
+    done < <(pgrep -P "$previous" -x swaynag 2>/dev/null || true)
+    kill -USR2 "$previous" 2>/dev/null || kill -TERM "$previous" 2>/dev/null || true
+    for ((i=0;i<30;i++)); do
+        switch_process "$previous" || break
+        sleep 0.1
+    done
+    if switch_process "$previous" && [[ "$(process_start "$previous")" == "$start" ]]; then
+        kill -KILL "$previous" 2>/dev/null || true
+    fi
+done
 exec 9>"$LOCK_FILE"
-if ! flock -n 9; then
-    echo "Audio switch is already running."
-    exit 0
+if ! flock -w 10 9; then
+    echo 'Previous audio switch or webremote startup still holds the audio lock.' >&2
+    exit 1
 fi
+printf '%s %s\n' "$$" "$(process_start "$$")" >"$OWNER_FILE"
+flock -u 8
+exec 8>&-
 
 ACTION_LOG="$STATE_DIR/audio-switch.log"
 HOTSPOT_CONNECTION="AirPlay Direct"
@@ -53,7 +104,20 @@ printf '\n[%s] audio-switch pid=%s\n' "$(date -Iseconds 2>/dev/null || date)" "$
 FINAL_PAUSE_REACHED=0
 EXIT_HANDLER_RUNNING=0
 
-cleanup() { rm -f "$RESULT_FILE" "$ACTION_STARTED_FILE" "$CARD_SELECTION_FILE" "$PROFILE_SELECTION_FILE" "$SWAYNAG_LOG"; }
+cleanup() {
+    if [[ "${SWAYNAG_PID:-}" =~ ^[1-9][0-9]*$ ]] &&
+       [[ "$(ps -o ppid= -p "$SWAYNAG_PID" 2>/dev/null | tr -d ' ')" == "$$" ]] &&
+       [[ "$(cat "/proc/$SWAYNAG_PID/comm" 2>/dev/null)" == swaynag ]]; then
+        kill "$SWAYNAG_PID" 2>/dev/null || true
+        wait "$SWAYNAG_PID" 2>/dev/null || true
+    fi
+    rm -f "$RESULT_FILE" "$ACTION_STARTED_FILE" "$CARD_SELECTION_FILE" "$PROFILE_SELECTION_FILE" "$SWAYNAG_LOG"
+    local owner start
+    if [[ -r "$OWNER_FILE" ]]; then
+        read -r owner start <"$OWNER_FILE" || true
+        if [[ "$owner" == "$$" && "$start" == "$(process_start "$$")" ]]; then rm -f -- "$OWNER_FILE"; fi
+    fi
+}
 pause_before_close() {
     FINAL_PAUSE_REACHED=1
     flock -u 9 2>/dev/null || true
@@ -71,7 +135,7 @@ handle_script_exit() {
     (( EXIT_HANDLER_RUNNING )) && return
     EXIT_HANDLER_RUNNING=1
     trap - EXIT INT TERM HUP QUIT
-    if (( status != 0 && ! FINAL_PAUSE_REACHED )); then
+    if (( status != 0 && ! FINAL_PAUSE_REACHED && ! ${REPLACED:-0} )); then
         echo; echo "Audio script exited unexpectedly."; echo "Exit status: $status"
         [[ -s "$ACTION_LOG" ]] && { echo; echo "Action log:"; echo "$ACTION_LOG"; echo; tail -n 45 "$ACTION_LOG"; }
         pause_before_close
@@ -82,6 +146,7 @@ handle_script_exit() {
     builtin exit "$status"
 }
 trap handle_script_exit EXIT
+trap 'REPLACED=1; exit 0' USR2
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
