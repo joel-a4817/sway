@@ -368,12 +368,14 @@ with socket.create_connection(('127.0.0.1',8767),timeout=2) as sock:
 PYCODE
     fi
 }
-export -f pause_active_media read_master_volume normalize_alsa_controls normalize_audio_volumes
-export MASTER_VOLUME_FILE
-export RESULT_FILE ACTION_STARTED_FILE ACTION_LOG CARD_SELECTION_FILE PROFILE_SELECTION_FILE
 TOPOLOGY_SCRIPT="$HOME_DIR/.config/sway/scripts/network/camilladsp-server-sonobus.py"
 [[ -f "$TOPOLOGY_SCRIPT" ]] || fail "Paired server script missing: $TOPOLOGY_SCRIPT"
 output_topology() { python3 "$TOPOLOGY_SCRIPT" --output-topology; }
+retry_selection() {
+    printf '%s\n' "$1"
+    normalize_audio_volumes || fail 'Normalization failed while retrying selection'
+}
+
 if pulse_ready; then
     TOPOLOGY_JSON="$(output_topology)" || fail 'Could not discover audio cards using paired server logic'
     mapfile -t CARDS < <(jq -r '.cards[] | [.name,.label] | @tsv' <<<"$TOPOLOGY_JSON")
@@ -388,8 +390,23 @@ else
         done <"$STATE_DIR/audio-cards-last.txt"
     fi
 fi
-card_display_label() { printf '%s\n' "$2"; }
-profile_display_label() { printf '%s\n' "$3"; }
+# Keep wrapped menu labels aligned after the numeric choice column.
+print_menu_item() {
+    local prefix="[$1] " label="$2" columns width line first=1
+    columns="$(tput cols 2>/dev/null || true)"
+    [[ "$columns" =~ ^[0-9]+$ ]] || columns="${COLUMNS:-80}"
+    [[ "$columns" =~ ^[0-9]+$ ]] || columns=80
+    width=$((columns - ${#prefix}))
+    ((width >= 12)) || width=12
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if ((first)); then
+            printf '%s%s\n' "$prefix" "$line"
+            first=0
+        else
+            printf '%*s%s\n' "${#prefix}" '' "$line"
+        fi
+    done < <(printf '%s\n' "$label" | fold -s -w "$width")
+}
 sink_display_label() {
     jq -r --arg name "$1" '[.cards[].sinks[]? | select(.name==$name) | .label][0] // $name' <<<"$TOPOLOGY_JSON"
 }
@@ -452,7 +469,7 @@ fi
 
 for i in "${!CARDS[@]}"; do
     card="${CARDS[$i]%%$'\t'*}"; description="${CARDS[$i]#*$'\t'}"
-    ARGS+=( -z "$(card_display_label "$card" "$description")" "touch '$ACTION_STARTED_FILE'; printf '%s\n' '$i' >'$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
+    ARGS+=( -z "${description}" "touch '$ACTION_STARTED_FILE'; printf '%s\n' '$i' >'$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
 done
 
 swaynag "${ARGS[@]}" >"$SWAYNAG_LOG" 2>&1 9>&- &
@@ -520,7 +537,7 @@ SELECTED_CARD="${CARDS[$SELECTED_CARD_VALUE]%%$'\t'*}"
 TOPOLOGY_JSON="$(output_topology)" || fail 'Could not refresh audio cards'
 jq -e --arg card "$SELECTED_CARD" 'any(.cards[]; .name==$card)' <<<"$TOPOLOGY_JSON" >/dev/null || fail "Selected card is no longer available: $SELECTED_CARD"
 SELECTED_CARD_DESCRIPTION="${CARDS[$SELECTED_CARD_VALUE]#*$'\t'}"
-SELECTED_CARD_LABEL="$(card_display_label "$SELECTED_CARD" "$SELECTED_CARD_DESCRIPTION")"
+SELECTED_CARD_LABEL="${SELECTED_CARD_DESCRIPTION}"
 
 normalize_audio_volumes || fail "Normalization failed after card selection"
 
@@ -530,22 +547,41 @@ mapfile -t PROFILES < <(jq -r --arg card "$SELECTED_CARD" '.cards[] | select(.na
 ACTIVE_PROFILE="$(jq -r --arg card "$SELECTED_CARD" '.cards[] | select(.name==$card) | .activeProfile' <<<"$TOPOLOGY_JSON")"
 ACTIVE_PROFILE_LABEL="$(jq -r --arg card "$SELECTED_CARD" --arg profile "$ACTIVE_PROFILE" '[.cards[] | select(.name==$card) | .profiles[] | select(.name==$profile) | .label][0] // $profile' <<<"$TOPOLOGY_JSON")"
 echo; echo "Card: $SELECTED_CARD_LABEL"; echo; echo "Card playback profile"; echo
-[[ -n "$ACTIVE_PROFILE" ]] && echo "[0] Keep current profile ($ACTIVE_PROFILE_LABEL)" || echo "[0] Keep current profile"
+[[ -n "$ACTIVE_PROFILE" ]] && print_menu_item 0 "Keep current profile ($ACTIVE_PROFILE_LABEL)" || print_menu_item 0 "Keep current profile"
 for i in "${!PROFILES[@]}"; do
     IFS=$'\t' read -r profile description availability <<<"${PROFILES[$i]}"
-    label="$(profile_display_label "$SELECTED_CARD" "$profile" "$description")"
-    [[ "$availability" == no ]] && label+=" (unavailable)"
-    echo "[$((i+1))] $label"
+    label="${description}"
+    [[ "$availability" == no || "$availability" == false ]] && label+=" (unavailable)"
+    print_menu_item "$((i+1))" "$label"
 done
-read -rp "Select profile: " profile_choice
-SELECTED_PROFILE="$ACTIVE_PROFILE"; SELECTED_PROFILE_LABEL="$ACTIVE_PROFILE_LABEL"
-[[ "$profile_choice" != 0 || -n "$SELECTED_PROFILE" ]] || fail "No active profile; select a numbered profile."
-if [[ "$profile_choice" != 0 ]]; then
-    [[ "$profile_choice" =~ ^[0-9]+$ ]] || { echo "Invalid profile selection."; exit 1; }
-    profile_index=$((10#$profile_choice-1)); (( profile_index >= 0 && profile_index < ${#PROFILES[@]} )) || { echo "Invalid profile selection."; exit 1; }
-    IFS=$'\t' read -r SELECTED_PROFILE description availability <<<"${PROFILES[$profile_index]}"
-    [[ "$availability" != no ]] || { echo "That profile is currently marked unavailable by PipeWire."; exit 1; }
-    SELECTED_PROFILE_LABEL="$(profile_display_label "$SELECTED_CARD" "$SELECTED_PROFILE" "$description")"
+# Keep the menu visible while rejecting unavailable or invalid choices.
+while :; do
+    read -rp "Select profile: " profile_choice || { echo 'Selection cancelled.'; pause_before_close; exit 0; }
+    if [[ ! "$profile_choice" =~ ^[0-9]+$ ]]; then
+        retry_selection 'Enter one of the listed numbers.'; continue
+    fi
+    if [[ "$profile_choice" == 0 ]]; then
+        if [[ -z "$ACTIVE_PROFILE" ]]; then
+            retry_selection 'No current profile. Select a numbered profile.'; continue
+        fi
+        SELECTED_PROFILE="$ACTIVE_PROFILE"
+        SELECTED_PROFILE_LABEL="$ACTIVE_PROFILE_LABEL"
+        break
+    fi
+    [[ ${#profile_choice} -le 9 ]] || { retry_selection 'Enter one of the listed numbers.'; continue; }
+    profile_index=$((10#$profile_choice-1))
+    if (( profile_index < 0 || profile_index >= ${#PROFILES[@]} )); then
+        retry_selection 'Enter one of the listed numbers.'; continue
+    fi
+    IFS=$'\t' read -r candidate_profile description availability <<<"${PROFILES[$profile_index]}"
+    if [[ "$availability" == no || "$availability" == false ]]; then
+        retry_selection 'That profile is unavailable. Select another number.'; continue
+    fi
+    SELECTED_PROFILE="$candidate_profile"
+    SELECTED_PROFILE_LABEL="${description}"
+    break
+done
+if [[ "$SELECTED_PROFILE" != "$ACTIVE_PROFILE" ]]; then
     TOPOLOGY_JSON="$(python3 "$TOPOLOGY_SCRIPT" --output-profile "$SELECTED_CARD" "$SELECTED_PROFILE")" || fail "Could not activate profile: $SELECTED_PROFILE"
     printf '%s\n' "$SELECTED_PROFILE_LABEL" >"$PROFILE_SELECTION_FILE"
 fi
@@ -579,67 +615,88 @@ if [[ -n "$CURRENT_PHYSICAL" ]] && ! printf '%s\n' "${PHYSICAL_SINKS[@]}" | grep
 fi
 printf '\nPlayback sink (actual destination; may belong to another card)\n' 
 if [[ -n "$CURRENT_PHYSICAL" ]]; then
-    printf '[0] Keep current output (%s)\n' "$(sink_display_label "$CURRENT_PHYSICAL")"
+    print_menu_item 0 "Keep current output ($(sink_display_label "$CURRENT_PHYSICAL"))"
 else
     echo "No current physical output; select a numbered output."
 fi
 for i in "${!PHYSICAL_SINKS[@]}"; do
     sink="${PHYSICAL_SINKS[$i]}"
-    printf '[%d] %s\n' "$((i+1))" "$(sink_display_label "$sink")"
+    print_menu_item "$((i+1))" "$(sink_display_label "$sink")"
 done
-read -rp 'Select playback sink: ' physical_choice
-[[ "$physical_choice" =~ ^[0-9]+$ ]] || { echo 'Invalid output selection.'; exit 1; }
-if [[ "$physical_choice" == 0 ]]; then
-    [[ -n "$CURRENT_PHYSICAL" ]] || fail 'No current physical output; select a numbered output.'
-    PHYSICAL_SINK="$CURRENT_PHYSICAL"
-else
-    index=$((10#$physical_choice-1))
-    ((index >= 0 && index < ${#PHYSICAL_SINKS[@]})) || { echo 'Invalid output selection.'; exit 1; }
-    PHYSICAL_SINK="${PHYSICAL_SINKS[$index]}"
-fi
-TOPOLOGY_JSON="$(output_topology)" || fail 'Could not refresh output topology'
-jq -e --arg card "$SELECTED_CARD" --arg sink "$PHYSICAL_SINK" 'any(.cards[] | select(.name==$card) | .sinks[]?; .name==$sink)' <<<"$TOPOLOGY_JSON" >/dev/null || fail "Selected output disappeared: $PHYSICAL_SINK"
-normalize_audio_volumes || fail "Normalization failed after playback sink selection"
-# Use the live sink ports; option 0 retains the active port.
-mapfile -t OUTPUT_PORTS < <(jq -r --arg card "$SELECTED_CARD" --arg sink "$PHYSICAL_SINK" '.cards[] | select(.name==$card) | .sinks[] | select(.name==$sink) | .ports[].name' <<<"$TOPOLOGY_JSON")
-SELECTED_PORT=""
-if ((${#OUTPUT_PORTS[@]})); then
-    active_port="$(jq -r --arg card "$SELECTED_CARD" --arg name "$PHYSICAL_SINK" '.cards[] | select(.name==$card) | .sinks[] | select(.name==$name) | .activePort' <<<"$TOPOLOGY_JSON")"
-    for port in "${OUTPUT_PORTS[@]}"; do
-        [[ "$port" == "$active_port" ]] && SELECTED_PORT="$port"
-    done
-    if [[ -n "$SELECTED_PORT" ]]; then
-        selected_available="$(jq -r --arg card "$SELECTED_CARD" --arg sink "$PHYSICAL_SINK" --arg port "$SELECTED_PORT" '[.cards[] | select(.name==$card) | .sinks[] | select(.name==$sink) | .ports[] | select(.name==$port) | .available][0] // "unknown"' <<<"$TOPOLOGY_JSON")"
-        [[ "$selected_available" != no && "$selected_available" != false ]] || SELECTED_PORT=""
+while :; do
+    read -rp 'Select playback sink: ' physical_choice || { echo 'Selection cancelled.'; pause_before_close; exit 0; }
+    [[ "$physical_choice" =~ ^[0-9]+$ ]] || { retry_selection 'Enter one of the listed output numbers.'; continue; }
+    if [[ "$physical_choice" == 0 ]]; then
+        [[ -n "$CURRENT_PHYSICAL" ]] || { retry_selection 'No current physical output; select a numbered output.'; continue; }
+        PHYSICAL_SINK="$CURRENT_PHYSICAL"
+    else
+        [[ ${#physical_choice} -le 9 ]] || { retry_selection 'Enter one of the listed numbers.'; continue; }
+        index=$((10#$physical_choice-1))
+        ((index >= 0 && index < ${#PHYSICAL_SINKS[@]})) || { retry_selection 'Enter one of the listed output numbers.'; continue; }
+        PHYSICAL_SINK="${PHYSICAL_SINKS[$index]}"
     fi
-    if ((${#OUTPUT_PORTS[@]} > 1)); then
-        printf '\nOutput port\n[0] Keep current (%s)\n' "${SELECTED_PORT:-none}"
-        for i in "${!OUTPUT_PORTS[@]}"; do
-            port_label="$(jq -r --arg card "$SELECTED_CARD" --arg sink "$PHYSICAL_SINK" --arg port "${OUTPUT_PORTS[$i]}" '.cards[] | select(.name==$card) | .sinks[] | select(.name==$sink) | .ports[] | select(.name==$port) | .label' <<<"$TOPOLOGY_JSON")"
-            availability="$(jq -r --arg card "$SELECTED_CARD" --arg sink "$PHYSICAL_SINK" --arg port "${OUTPUT_PORTS[$i]}" '[.cards[] | select(.name==$card) | .sinks[] | select(.name==$sink) | .ports[] | select(.name==$port) | .available][0] // "unknown"' <<<"$TOPOLOGY_JSON")"
-            if [[ "$availability" == no || "$availability" == false ]]; then port_label+=" (unavailable)"; fi
-            printf '[%d] %s\n' "$((i+1))" "${port_label:-${OUTPUT_PORTS[$i]}}"
+    TOPOLOGY_JSON="$(output_topology)" || fail 'Could not refresh output topology'
+    jq -e --arg card "$SELECTED_CARD" --arg sink "$PHYSICAL_SINK" 'any(.cards[] | select(.name==$card) | .sinks[]?; .name==$sink)' <<<"$TOPOLOGY_JSON" >/dev/null || fail "Selected output disappeared: $PHYSICAL_SINK"
+    normalize_audio_volumes || fail "Normalization failed after playback sink selection"
+    # Use the live sink ports; option 0 retains the active port.
+    mapfile -t OUTPUT_PORTS < <(jq -r --arg card "$SELECTED_CARD" --arg sink "$PHYSICAL_SINK" '.cards[] | select(.name==$card) | .sinks[] | select(.name==$sink) | .ports[].name' <<<"$TOPOLOGY_JSON")
+    SELECTED_PORT=""
+    if ((${#OUTPUT_PORTS[@]})); then
+        active_port="$(jq -r --arg card "$SELECTED_CARD" --arg name "$PHYSICAL_SINK" '.cards[] | select(.name==$card) | .sinks[] | select(.name==$name) | .activePort' <<<"$TOPOLOGY_JSON")"
+        for port in "${OUTPUT_PORTS[@]}"; do
+            [[ "$port" == "$active_port" ]] && SELECTED_PORT="$port"
         done
-        read -rp 'Select output port: ' port_choice
-        [[ "$port_choice" =~ ^[0-9]+$ ]] || { echo 'Invalid port.'; exit 1; }
-        if [[ "$port_choice" == 0 && -z "$SELECTED_PORT" ]]; then
-            fail 'No currently active, available port; select a numbered port.'
+        if [[ -n "$SELECTED_PORT" ]]; then
+            selected_available="$(jq -r --arg card "$SELECTED_CARD" --arg sink "$PHYSICAL_SINK" --arg port "$SELECTED_PORT" '[.cards[] | select(.name==$card) | .sinks[] | select(.name==$sink) | .ports[] | select(.name==$port) | .available][0] // "unknown"' <<<"$TOPOLOGY_JSON")"
+            [[ "$selected_available" != no && "$selected_available" != false ]] || SELECTED_PORT=""
         fi
-        if [[ "$port_choice" != 0 ]]; then
-            index=$((10#$port_choice-1))
-            ((index >= 0 && index < ${#OUTPUT_PORTS[@]})) || { echo 'Invalid port.'; exit 1; }
-            SELECTED_PORT="${OUTPUT_PORTS[$index]}"
+        if ((${#OUTPUT_PORTS[@]} > 1)); then
+            if [[ -n "$SELECTED_PORT" ]]; then printf '\nOutput port\n[0] Keep current (%s)\n' "$SELECTED_PORT"; else printf '\nOutput port\nNo current available port; select a numbered port.\n'; fi
+            for i in "${!OUTPUT_PORTS[@]}"; do
+                port_label="$(jq -r --arg card "$SELECTED_CARD" --arg sink "$PHYSICAL_SINK" --arg port "${OUTPUT_PORTS[$i]}" '.cards[] | select(.name==$card) | .sinks[] | select(.name==$sink) | .ports[] | select(.name==$port) | .label' <<<"$TOPOLOGY_JSON")"
+                availability="$(jq -r --arg card "$SELECTED_CARD" --arg sink "$PHYSICAL_SINK" --arg port "${OUTPUT_PORTS[$i]}" '[.cards[] | select(.name==$card) | .sinks[] | select(.name==$sink) | .ports[] | select(.name==$port) | .available][0] // "unknown"' <<<"$TOPOLOGY_JSON")"
+                if [[ "$availability" == no || "$availability" == false ]]; then port_label+=" (unavailable)"; fi
+                print_menu_item "$((i+1))" "${port_label:-${OUTPUT_PORTS[$i]}}"
+            done
+            while :; do
+                read -rp 'Select output port: ' port_choice || { echo 'Selection cancelled.'; pause_before_close; exit 0; }
+                if [[ ! "$port_choice" =~ ^[0-9]+$ ]]; then
+                    retry_selection 'Enter one of the listed numbers.'; continue
+                fi
+                if [[ "$port_choice" == 0 ]]; then
+                    if [[ -z "$SELECTED_PORT" ]]; then
+                        retry_selection 'No currently active, available port. Select a numbered port.'; continue
+                    fi
+                    break
+                fi
+                [[ ${#port_choice} -le 9 ]] || { retry_selection 'Enter one of the listed numbers.'; continue; }
+                index=$((10#$port_choice-1))
+                if (( index < 0 || index >= ${#OUTPUT_PORTS[@]} )); then
+                    retry_selection 'Enter one of the listed numbers.'; continue
+                fi
+                candidate_port="${OUTPUT_PORTS[$index]}"
+                availability="$(jq -r --arg card "$SELECTED_CARD" --arg sink "$PHYSICAL_SINK" --arg port "$candidate_port" '[.cards[] | select(.name==$card) | .sinks[] | select(.name==$sink) | .ports[] | select(.name==$port) | .available][0] // "unknown"' <<<"$TOPOLOGY_JSON")"
+                if [[ "$availability" == no || "$availability" == false ]]; then
+                    retry_selection 'That port is unavailable. Select another number.'; continue
+                fi
+                SELECTED_PORT="$candidate_port"
+                break
+            done
+        fi
+        if [[ -z "$SELECTED_PORT" && ${#OUTPUT_PORTS[@]} -eq 1 ]]; then
+            SELECTED_PORT="${OUTPUT_PORTS[0]}"
+        fi
+        PORT_AVAILABILITY="$(jq -r --arg card "$SELECTED_CARD" --arg sink "$PHYSICAL_SINK" --arg port "$SELECTED_PORT" '[.cards[] | select(.name==$card) | .sinks[] | select(.name==$sink) | .ports[] | select(.name==$port) | .available][0] // "unknown"' <<<"$TOPOLOGY_JSON")"
+        if [[ "$PORT_AVAILABILITY" == no || "$PORT_AVAILABILITY" == false ]]; then
+            retry_selection 'That output port is unavailable. Select another playback sink.'
+            continue
+        fi
+        if [[ -n "$SELECTED_PORT" ]]; then
+            pactl set-sink-port "$PHYSICAL_SINK" "$SELECTED_PORT" >>"$ACTION_LOG" 2>&1 || fail 'Failed to set output port.'
         fi
     fi
-    if [[ -z "$SELECTED_PORT" && ${#OUTPUT_PORTS[@]} -eq 1 ]]; then
-        SELECTED_PORT="${OUTPUT_PORTS[0]}"
-    fi
-    PORT_AVAILABILITY="$(jq -r --arg card "$SELECTED_CARD" --arg sink "$PHYSICAL_SINK" --arg port "$SELECTED_PORT" '[.cards[] | select(.name==$card) | .sinks[] | select(.name==$sink) | .ports[] | select(.name==$port) | .available][0] // "unknown"' <<<"$TOPOLOGY_JSON")"
-    [[ "$PORT_AVAILABILITY" != no && "$PORT_AVAILABILITY" != false ]] || fail "Selected output port is reported unavailable: $SELECTED_PORT"
-    if [[ -n "$SELECTED_PORT" ]]; then
-        pactl set-sink-port "$PHYSICAL_SINK" "$SELECTED_PORT" >>"$ACTION_LOG" 2>&1 || fail 'Failed to set output port.'
-    fi
-fi
+    break
+done
 normalize_audio_volumes || fail "Normalization failed after output port selection"
 
 TOPOLOGY_JSON="$(output_topology)" || fail 'Could not verify output after port selection'
@@ -663,23 +720,33 @@ for dsp in "${DSP_PROFILES[@]}"; do
 done
 echo; echo 'CamillaDSP listening profile (filter before the playback sink)'; echo
 if ((CURRENT_VALID)); then
-    printf '[0] Keep current (%s)\n' "$(short_profile_name "$CURRENT_DSP")"
+    print_menu_item 0 "Keep current ($(short_profile_name "$CURRENT_DSP"))"
 else
-    echo '[0] No current local profile; choose a number'
+    echo 'No current local profile; choose a numbered filter.'
 fi
 for i in "${!DSP_PROFILES[@]}"; do
-    printf '[%d] %s\n' "$((i+1))" "$(short_profile_name "${DSP_PROFILES[$i]}")"
+    print_menu_item "$((i+1))" "$(short_profile_name "${DSP_PROFILES[$i]}")"
 done
-read -rp 'Select CamillaDSP profile: ' dsp_choice
-[[ "$dsp_choice" =~ ^[0-9]+$ ]] || { echo 'Invalid CamillaDSP selection.'; exit 1; }
-if [[ "$dsp_choice" == 0 ]]; then
-    ((CURRENT_VALID)) || { echo 'No current local profile; choose a number.'; exit 1; }
-    DSP_PROFILE="$CURRENT_DSP"
-else
+while :; do
+    read -rp 'Select CamillaDSP profile: ' dsp_choice || { echo 'Selection cancelled.'; pause_before_close; exit 0; }
+    if [[ ! "$dsp_choice" =~ ^[0-9]+$ ]]; then
+        retry_selection 'Enter one of the listed filter numbers.'; continue
+    fi
+    if [[ "$dsp_choice" == 0 ]]; then
+        if (( ! CURRENT_VALID )); then
+            retry_selection 'No current local profile; choose a number.'; continue
+        fi
+        DSP_PROFILE="$CURRENT_DSP"
+        break
+    fi
+    [[ ${#dsp_choice} -le 9 ]] || { retry_selection 'Enter one of the listed numbers.'; continue; }
     index=$((10#$dsp_choice-1))
-    ((index >= 0 && index < ${#DSP_PROFILES[@]})) || { echo 'Invalid CamillaDSP selection.'; exit 1; }
+    if (( index < 0 || index >= ${#DSP_PROFILES[@]} )); then
+        retry_selection 'Enter one of the listed filter numbers.'; continue
+    fi
     DSP_PROFILE="${DSP_PROFILES[$index]}"
-fi
+    break
+done
 normalize_audio_volumes || fail "Normalization failed after CamillaDSP filter selection"
 "$CAMILLA" --check "$PROFILES_DIR/$DSP_PROFILE" >>"$ACTION_LOG" 2>&1 || { echo "Invalid CamillaDSP profile: $DSP_PROFILE"; exit 1; }
 command -v arecord >/dev/null && command -v pacat >/dev/null || { echo 'arecord or pacat missing.'; exit 1; }
