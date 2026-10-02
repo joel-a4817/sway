@@ -114,18 +114,6 @@ wait_for_sink() {
     return 1
 }
 
-set_card_profile_stable() {
-    local card="$1" profile="$2" _
-    for _ in {1..30}; do
-        wait_for_pulse || continue
-        if pactl set-card-profile "$card" "$profile" >>"$ACTION_LOG" 2>&1; then
-            return 0
-        fi
-        sleep 0.1
-    done
-    return 1
-}
-
 move_application_inputs_to() {
     local wanted="$1"
     local id
@@ -154,14 +142,6 @@ valid_pid() {
     [[ "$(ps -o stat= -p "$1" 2>/dev/null)" != Z* ]]
 }
 # The webremote can own CamillaDSP independently. Do not kill its process.
-ensure_local_owner() {
-    local server_pid
-    server_pid="$(read_pid "$SERVERPID")"
-    if valid_pid "$server_pid" && [[ -r "/proc/$server_pid/cmdline" ]] &&
-        tr '\0' ' ' <"/proc/$server_pid/cmdline" | grep -Fq 'camilladsp-server-sonobus.py'; then
-        fail 'The phone webremote currently owns CamillaDSP. Stop it before local switching; this script never connects to port 8766.'
-    fi
-}
 stop_monitor() {
     local pid pgid cmd
     pid="$(read_pid "$MONPID")"
@@ -193,6 +173,16 @@ stop_camilla() {
 start_camilla() {
     local profile="$1" pid gain
     "$CAMILLA" --check "$profile" >>"$ACTION_LOG" 2>&1 || return 1
+    local existing
+    existing="$(pgrep -x camilladsp 2>/dev/null || true)"
+    if [[ -n "$existing" ]]; then
+        printf 'CamillaDSP still running (PID %s); refusing second instance\n' "$existing" >>"$ACTION_LOG"
+        return 1
+    fi
+    if (echo > /dev/tcp/127.0.0.1/8767) >/dev/null 2>&1; then
+        echo 'CamillaDSP websocket port 8767 is occupied; refusing second instance.' >>"$ACTION_LOG"
+        return 1
+    fi
     gain="0.0"
     "$CAMILLA" --port=8767 --gain="$gain" "$profile" >>"$LOCAL_CAMILLA_LOG" 2>&1 </dev/null 9>&- &
     pid=$!
@@ -216,17 +206,6 @@ ensure_camilla_sink() {
     fi
     camilla_sink_exists
 }
-card_sinks() {
-    local card="$1" graph
-    graph="$(pw-dump 2>/dev/null)" || return 1
-    jq -r --arg card "$card" '
-      [.[] | select(.type == "PipeWire:Interface:Device" and .info.props."device.name" == $card) | (.id | tostring)] as $ids |
-      .[] | select(.type == "PipeWire:Interface:Node" and .info.props."media.class" == "Audio/Sink" and
-        .info.props."device.api" == "alsa" and .info.props."factory.name" == "api.alsa.pcm.sink") |
-      (.info.props."device.id" // "" | tostring) as $id |
-      select(($ids | index($id)) != null) | .info.props."node.name" // empty
-    ' <<<"$graph" | sort -u
-}
 start_local_monitor() {
     local sink="$1" pid
     setsid bash -c '
@@ -236,8 +215,23 @@ start_local_monitor() {
     ' _ "$sink" >>"$ACTION_LOG" 2>&1 </dev/null 9>&- &
     pid=$!
     printf '%s\n' "$pid" >"$MONPID"
-    sleep 0.3
-    if ! valid_pid "$pid"; then rm -f "$MONPID"; return 1; fi
+    # Wait until pacat has registered a playback stream on the chosen sink.
+    local i inputs client target pgid
+    for ((i=0;i<40;i++)); do
+        valid_pid "$pid" || { rm -f -- "$MONPID"; return 1; }
+        target="$(pactl --format=json list sinks 2>/dev/null | jq -r --arg name "$sink" '.[] | select(.name==$name) | .index' | head -n1)"
+        inputs="$(pactl --format=json list sink-inputs 2>/dev/null || true)"
+        if [[ "$target" =~ ^[0-9]+$ && -n "$inputs" ]]; then
+            while read -r client; do
+                [[ "$client" =~ ^[0-9]+$ ]] || continue
+                pgid="$(ps -o pgid= -p "$client" 2>/dev/null | tr -d ' ')"
+                if [[ "$pgid" == "$pid" ]]; then return 0; fi
+            done < <(jq -r --argjson target "$target" '.[] | select(.sink==$target) | .properties."application.process.id" // empty' <<<"$inputs" 2>/dev/null)
+        fi
+        sleep 0.1
+    done
+    stop_monitor
+    return 1
 }
 
 pause_active_media() {
@@ -303,7 +297,7 @@ normalize_alsa_controls() {
             [[ "$info" == *'dB'* ]] || continue
             for direction in playback capture; do
                 [[ "$info" == *"${direction^} channels:"* ]] || continue
-                if amixer -c "$card" sset "$control" "$direction" 0dB >>"$ACTION_LOG" 2>&1; then
+                if amixer -c "$card" sset "$control" "$direction" 0dB >/dev/null 2>>"$ACTION_LOG"; then
                     ((count+=1))
                 else
                     ((failures+=1))
@@ -334,7 +328,7 @@ normalize_audio_volumes() {
     # master-volume file without changing playback state or routing.
     if [[ -S "$REMOTE_STATE/mpv.sock" ]] && command -v socat >/dev/null 2>&1; then
         printf '{"command":["set_property","volume",%s]}\n' "${master%\%}" |
-            socat -T 2 - "UNIX-CONNECT:$REMOTE_STATE/mpv.sock" >>"$ACTION_LOG" 2>&1 || true
+            socat -T 2 - "UNIX-CONNECT:$REMOTE_STATE/mpv.sock" >/dev/null 2>>"$ACTION_LOG" || true
     fi
     if valid_pid "$(read_pid "$PIDFILE")"; then restore_saved_master || return 1; fi
 }
@@ -376,71 +370,29 @@ PYCODE
 }
 export -f pause_active_media read_master_volume normalize_alsa_controls normalize_audio_volumes
 export MASTER_VOLUME_FILE
-MASTER_VOLUME="$(read_master_volume)"
-export RESULT_FILE ACTION_STARTED_FILE ACTION_LOG CARD_SELECTION_FILE PROFILE_SELECTION_FILE MASTER_VOLUME
-mapfile -t CARDS < <(pactl list cards 2>/dev/null | awk '
-function output_card(){if(card!=""){if(description=="")description=card;print card "|" description}}
-/^Card #[0-9]+/{output_card();card="";description="";next}
-/^[[:space:]]*Name:/{card=$0;sub(/^[[:space:]]*Name:[[:space:]]*/,"",card);next}
-/^[[:space:]]*device\.description[[:space:]]*=/{if(description==""){description=$0;sub(/^[[:space:]]*device\.description[[:space:]]*=[[:space:]]*/,"",description);gsub(/^"|"$/,"",description)}}
-END{output_card()}')
-
-if ((${#CARDS[@]})); then
+export RESULT_FILE ACTION_STARTED_FILE ACTION_LOG CARD_SELECTION_FILE PROFILE_SELECTION_FILE
+TOPOLOGY_SCRIPT="$HOME_DIR/.config/sway/scripts/network/camilladsp-server-sonobus.py"
+[[ -f "$TOPOLOGY_SCRIPT" ]] || fail "Paired server script missing: $TOPOLOGY_SCRIPT"
+output_topology() { python3 "$TOPOLOGY_SCRIPT" --output-topology; }
+if pulse_ready; then
+    TOPOLOGY_JSON="$(output_topology)" || fail 'Could not discover audio cards using paired server logic'
+    mapfile -t CARDS < <(jq -r '.cards[] | [.name,.label] | @tsv' <<<"$TOPOLOGY_JSON")
     printf '%s\n' "${CARDS[@]}" >"$STATE_DIR/audio-cards-last.txt"
-elif [[ -s "$STATE_DIR/audio-cards-last.txt" ]]; then
-    mapfile -t CARDS <"$STATE_DIR/audio-cards-last.txt"
+else
+    # Audio Stop deliberately leaves PipeWire offline; preserve its menu.
+    CARDS=()
+    if [[ -s "$STATE_DIR/audio-cards-last.txt" ]]; then
+        while IFS= read -r entry; do
+            [[ "$entry" == *$'\t'* ]] && CARDS+=("$entry")
+            [[ "$entry" != *$'\t'* && "$entry" == *'|'* ]] && CARDS+=("${entry%%|*}"$'\t'"${entry#*|}")
+        done <"$STATE_DIR/audio-cards-last.txt"
+    fi
 fi
-card_display_label() {
-    local card="$1" description="$2" label="$2"
-    case "$card $description" in
-        *HyperX_Cloud_III*|*"HyperX Cloud III"*) label="HyperX Cloud III" ;;
-        *sof*|*SOF*|*"sof-hda-dsp"*|*"Built-in Audio"*|*Chipset*) label="Built-in Audio" ;;
-        *HDMI*|*hdmi*) [[ "$description" == *HDMI* ]] || label="$description HDMI" ;;
-    esac
-    printf '%s\n' "$label"
-}
-profile_display_label() {
-    local card="$1" profile="$2" description="$3" label="$3" hdmi
-    if [[ "$description" == *Headphone* ]]; then label="Headphones"
-    elif [[ "$description" == *Speaker* ]]; then label="Speaker"
-    elif [[ "$description" == *"Pro Audio"* ]]; then label="Pro Audio"
-    elif [[ "$description" == *HDMI* ]]; then
-        hdmi=1; [[ "$description" == *"HDMI 2"* ]] && hdmi=2; [[ "$description" == *"HDMI 3"* ]] && hdmi=3
-        label="HDMI $hdmi"; [[ "$description" == *"7.1"* ]] && label+=" 7.1"; [[ "$description" == *"5.1"* ]] && label+=" 5.1"; [[ "$description" == *Input* ]] && label+=" + Mic"
-    elif [[ "$profile" == "input:analog-stereo" ]]; then label="Mic Only"
-    elif [[ "$description" == *Analog* ]]; then label="Analog"; [[ "$description" == *Input* || "$description" == *Duplex* ]] && label+=" + Mic"
-    fi
-    if [[ "$card" == *HyperX_Cloud_III* ]]; then
-        case "$profile" in
-            output:analog-stereo) label="Cloud III Analog" ;;
-            output:analog-stereo+input:mono-fallback) label="Cloud III Analog + Mic" ;;
-            output:iec958-stereo) label="Cloud III Digital" ;;
-            output:iec958-stereo+input:mono-fallback) label="Cloud III Digital + Mic" ;;
-            input:mono-fallback) label="Cloud III Mic" ;;
-            pro-audio) label="Cloud III Pro Audio" ;;
-        esac
-    fi
-    printf '%s\n' "$label"
-}
+card_display_label() { printf '%s\n' "$2"; }
+profile_display_label() { printf '%s\n' "$3"; }
 sink_display_label() {
-    local sink="$1" label="$1"
-
-    case "$sink" in
-        *usb-HP__Inc_HyperX_Cloud_III*.analog-stereo) label="Cloud III Analog" ;;
-        *usb-HP__Inc_HyperX_Cloud_III*.iec958-stereo) label="Cloud III Digital" ;;
-        *platform-snd_aloop.0.analog-stereo) label="ALSA Loopback" ;;
-        *HiFi__Headphones__sink*) label="Headphones" ;;
-        *HiFi__Speaker__sink*) label="Speaker" ;;
-        *HiFi__HDMI1__sink*) label="HDMI 1" ;;
-        *HiFi__HDMI2__sink*) label="HDMI 2" ;;
-        *HiFi__HDMI3__sink*) label="HDMI 3" ;;
-        *pro-output-[0-9]*) label="${sink##*.}" ;;
-        *hdmi*) label="HDMI" ;;
-    esac
-
-    printf '%s\n' "$label"
+    jq -r --arg name "$1" '[.cards[].sinks[]? | select(.name==$name) | .label][0] // $name' <<<"$TOPOLOGY_JSON"
 }
-
 close_mpv_windows() {
     local _
 
@@ -499,7 +451,7 @@ else
 fi
 
 for i in "${!CARDS[@]}"; do
-    card="${CARDS[$i]%%|*}"; description="${CARDS[$i]#*|}"
+    card="${CARDS[$i]%%$'\t'*}"; description="${CARDS[$i]#*$'\t'}"
     ARGS+=( -z "$(card_display_label "$card" "$description")" "touch '$ACTION_STARTED_FILE'; printf '%s\n' '$i' >'$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
 done
 
@@ -564,81 +516,73 @@ if ! pulse_ready; then
     systemctl --user start pipewire.socket pipewire-pulse.socket pipewire.service pipewire-pulse.service wireplumber.service >>"$ACTION_LOG" 2>&1 || { echo "PipeWire failed to start; see $ACTION_LOG"; exit 1; }
     wait_for_pulse || { echo 'PipeWire did not become ready.'; exit 1; }
 fi
-SELECTED_CARD="${CARDS[$SELECTED_CARD_VALUE]%%|*}"
-SELECTED_CARD_DESCRIPTION="${CARDS[$SELECTED_CARD_VALUE]#*|}"
+SELECTED_CARD="${CARDS[$SELECTED_CARD_VALUE]%%$'\t'*}"
+TOPOLOGY_JSON="$(output_topology)" || fail 'Could not refresh audio cards'
+jq -e --arg card "$SELECTED_CARD" 'any(.cards[]; .name==$card)' <<<"$TOPOLOGY_JSON" >/dev/null || fail "Selected card is no longer available: $SELECTED_CARD"
+SELECTED_CARD_DESCRIPTION="${CARDS[$SELECTED_CARD_VALUE]#*$'\t'}"
 SELECTED_CARD_LABEL="$(card_display_label "$SELECTED_CARD" "$SELECTED_CARD_DESCRIPTION")"
 
-CURRENT_SINK="$(pactl get-default-sink 2>/dev/null || true)"
 normalize_audio_volumes || fail "Normalization failed after card selection"
 
-mapfile -t PROFILES < <(pactl list cards | awk -v target="$SELECTED_CARD" '
-/^[[:space:]]*Name:/{current=$0;sub(/^[[:space:]]*Name:[[:space:]]*/,"",current);selected=(current==target);in_profiles=0;next}
-selected&&/^[[:space:]]*Profiles:/{in_profiles=1;next}
-selected&&in_profiles&&/^[[:space:]]*(Active Profile|Active Port|Ports):/{in_profiles=0;next}
-selected&&in_profiles&&index($0,"(sinks:"){line=$0;sub(/^[[:space:]]*/,"",line);separator=index(line,": ");if(!separator)next;profile=substr(line,1,separator-1);description=substr(line,separator+2);if(profile=="off")next;availability="unknown";if(line~/available:[[:space:]]*yes/)availability="yes";else if(line~/available:[[:space:]]*no/)availability="no";sub(/[[:space:]]+\(sinks:.*/,"",description);print profile "|" description "|" availability}')
-((${#PROFILES[@]})) || { echo "No profiles were found for: $SELECTED_CARD"; exit 1; }
-get_active_profile() { pactl list cards | awk -v target="$SELECTED_CARD" '/^[[:space:]]*Name:/{x=$0;sub(/^[[:space:]]*Name:[[:space:]]*/,"",x);s=(x==target);next}s&&/^[[:space:]]*Active Profile:/{x=$0;sub(/^[[:space:]]*Active Profile:[[:space:]]*/,"",x);print x;exit}'; }
-ACTIVE_PROFILE="$(get_active_profile)"; ACTIVE_PROFILE_LABEL="$ACTIVE_PROFILE"
-for entry in "${PROFILES[@]}"; do profile="${entry%%|*}"; remainder="${entry#*|}"; description="${remainder%%|*}"; [[ "$profile" == "$ACTIVE_PROFILE" ]] && { ACTIVE_PROFILE_LABEL="$(profile_display_label "$SELECTED_CARD" "$profile" "$description")"; break; }; done
-
+TOPOLOGY_JSON="$(output_topology)" || fail 'Could not refresh card profiles'
+mapfile -t PROFILES < <(jq -r --arg card "$SELECTED_CARD" '.cards[] | select(.name==$card) | .profiles[] | [.name,.label,.available] | @tsv' <<<"$TOPOLOGY_JSON")
+((${#PROFILES[@]})) || fail "No playback profiles for: $SELECTED_CARD"
+ACTIVE_PROFILE="$(jq -r --arg card "$SELECTED_CARD" '.cards[] | select(.name==$card) | .activeProfile' <<<"$TOPOLOGY_JSON")"
+ACTIVE_PROFILE_LABEL="$(jq -r --arg card "$SELECTED_CARD" --arg profile "$ACTIVE_PROFILE" '[.cards[] | select(.name==$card) | .profiles[] | select(.name==$profile) | .label][0] // $profile' <<<"$TOPOLOGY_JSON")"
 echo; echo "Card: $SELECTED_CARD_LABEL"; echo; echo "Card playback profile"; echo
 [[ -n "$ACTIVE_PROFILE" ]] && echo "[0] Keep current profile ($ACTIVE_PROFILE_LABEL)" || echo "[0] Keep current profile"
 for i in "${!PROFILES[@]}"; do
-    entry="${PROFILES[$i]}"; profile="${entry%%|*}"; remainder="${entry#*|}"; description="${remainder%%|*}"; availability="${remainder##*|}"
+    IFS=$'\t' read -r profile description availability <<<"${PROFILES[$i]}"
     label="$(profile_display_label "$SELECTED_CARD" "$profile" "$description")"
     [[ "$availability" == no ]] && label+=" (unavailable)"
     echo "[$((i+1))] $label"
 done
 read -rp "Select profile: " profile_choice
 SELECTED_PROFILE="$ACTIVE_PROFILE"; SELECTED_PROFILE_LABEL="$ACTIVE_PROFILE_LABEL"
+[[ "$profile_choice" != 0 || -n "$SELECTED_PROFILE" ]] || fail "No active profile; select a numbered profile."
 if [[ "$profile_choice" != 0 ]]; then
     [[ "$profile_choice" =~ ^[0-9]+$ ]] || { echo "Invalid profile selection."; exit 1; }
     profile_index=$((10#$profile_choice-1)); (( profile_index >= 0 && profile_index < ${#PROFILES[@]} )) || { echo "Invalid profile selection."; exit 1; }
-    profile_entry="${PROFILES[$profile_index]}"; SELECTED_PROFILE="${profile_entry%%|*}"; remainder="${profile_entry#*|}"; description="${remainder%%|*}"; availability="${remainder##*|}"
+    IFS=$'\t' read -r SELECTED_PROFILE description availability <<<"${PROFILES[$profile_index]}"
     [[ "$availability" != no ]] || { echo "That profile is currently marked unavailable by PipeWire."; exit 1; }
     SELECTED_PROFILE_LABEL="$(profile_display_label "$SELECTED_CARD" "$SELECTED_PROFILE" "$description")"
-    set_card_profile_stable "$SELECTED_CARD" "$SELECTED_PROFILE" || { echo "Failed to set profile '$SELECTED_PROFILE'. See: $ACTION_LOG"; exit 1; }
+    TOPOLOGY_JSON="$(python3 "$TOPOLOGY_SCRIPT" --output-profile "$SELECTED_CARD" "$SELECTED_PROFILE")" || fail "Could not activate profile: $SELECTED_PROFILE"
     printf '%s\n' "$SELECTED_PROFILE_LABEL" >"$PROFILE_SELECTION_FILE"
-    PROFILE_OK=0; for _ in {1..50}; do [[ "$(get_active_profile)" == "$SELECTED_PROFILE" ]] && { PROFILE_OK=1; break; }; sleep 0.1; done
-    (( PROFILE_OK )) || { echo "Warning: profile did not settle as '$SELECTED_PROFILE'." >>"$ACTION_LOG"; echo "Warning: profile switch did not settle. See: $ACTION_LOG"; }
 fi
 normalize_audio_volumes || fail "Normalization failed after profile selection"
-
-# Like camilladsp-server-sonobus.py, show every eligible real output after
-# choosing the card/profile. A different card can own the selected sink.
-# Loopback cards remain visible in Swaynag, but their loopback sinks cannot
-# be final monitor targets (that would create a feedback loop).
-real_sinks() {
-    jq -r '.[] |
-        (.name // "") as $name | ($name | ascii_downcase) as $low |
-        ((.properties // {}) | [."device.description", ."node.description", ."node.nick", ."media.name"] | map(. // "") | join(" ") | ascii_downcase) as $label |
-        select($name != "" and
-          ([$low | startswith("earpods_"), startswith("cloud3_"), startswith("cmf-buds-pro-2_"),
-            contains("snd_aloop"), contains("loopback"), contains("camilladsp"), contains("sonobus"),
-            contains("silent output"), contains("filter-chain"), contains("null-sink")] | any | not) and
-          ([$label | contains("loopback"), contains("camilladsp"), contains("sonobus"),
-            contains("silent output"), contains("filter-chain"), contains("null sink")] | any | not)) |
-        $name' <<<"$SINKS_JSON" | sort -u
-}
-SINKS_JSON="$(pactl --format=json list sinks)" || { echo 'Could not list sinks.'; exit 1; }
-mapfile -t PHYSICAL_SINKS < <(real_sinks)
-((${#PHYSICAL_SINKS[@]})) || { echo 'No usable playback sinks are available.'; exit 1; }
-SAVED_CARD="$(jq -r '.card // ""' "$ROUTE_FILE" 2>/dev/null || true)"
-SAVED_SINK="$(jq -r '.sink // ""' "$ROUTE_FILE" 2>/dev/null || true)"
+# The web picker and terminal now consume the same post-profile snapshot.
+TOPOLOGY_JSON="$(output_topology)" || fail 'Could not refresh output topology'
+mapfile -t PHYSICAL_SINKS < <(jq -r --arg card "$SELECTED_CARD" '.cards[] | select(.name==$card) | .sinks[]?.name' <<<"$TOPOLOGY_JSON")
+((${#PHYSICAL_SINKS[@]})) || fail 'No usable playback sinks are available.'
+# Prefer the running monitor, then the saved route, then a physical default.
 CURRENT_PHYSICAL=""
-if [[ -n "$SAVED_SINK" ]]; then
-    for sink in "${PHYSICAL_SINKS[@]}"; do
-        [[ "$sink" == "$SAVED_SINK" ]] && CURRENT_PHYSICAL="$sink"
-    done
+if valid_pid "$(read_pid "$MONPID")"; then
+    monitor_pid="$(read_pid "$MONPID")"
+    while IFS= read -r candidate_pid; do
+        [[ "$candidate_pid" =~ ^[0-9]+$ ]] || continue
+        [[ "$(cat "/proc/$candidate_pid/comm" 2>/dev/null)" == pacat ]] || continue
+        mapfile -d '' -t monitor_args <"/proc/$candidate_pid/cmdline" 2>/dev/null || continue
+        for arg in "${monitor_args[@]}"; do
+            [[ "$arg" == --device=* ]] && CURRENT_PHYSICAL="${arg#--device=}"
+        done
+    done < <(pgrep -g "$monitor_pid" 2>/dev/null || true)
 fi
 if [[ -z "$CURRENT_PHYSICAL" ]]; then
-    default="$(pactl get-default-sink 2>/dev/null || true)"
-    for sink in "${PHYSICAL_SINKS[@]}"; do
-        [[ "$sink" == "$default" ]] && CURRENT_PHYSICAL="$sink"
-    done
+    CURRENT_PHYSICAL="$(jq -r '.sink // ""' "$ROUTE_FILE" 2>/dev/null || true)"
+fi
+if [[ -z "$CURRENT_PHYSICAL" ]]; then
+    default_sink="$(pactl get-default-sink 2>/dev/null || true)"
+    if [[ "$default_sink" != camilladsp ]]; then CURRENT_PHYSICAL="$default_sink"; fi
+fi
+if [[ -n "$CURRENT_PHYSICAL" ]] && ! printf '%s\n' "${PHYSICAL_SINKS[@]}" | grep -Fqx -- "$CURRENT_PHYSICAL"; then
+    CURRENT_PHYSICAL=""
 fi
 printf '\nPlayback sink (actual destination; may belong to another card)\n' 
-printf '[0] Keep current output (%s)\n' "$(sink_display_label "${CURRENT_PHYSICAL:-none}")"
+if [[ -n "$CURRENT_PHYSICAL" ]]; then
+    printf '[0] Keep current output (%s)\n' "$(sink_display_label "$CURRENT_PHYSICAL")"
+else
+    echo "No current physical output; select a numbered output."
+fi
 for i in "${!PHYSICAL_SINKS[@]}"; do
     sink="${PHYSICAL_SINKS[$i]}"
     printf '[%d] %s\n' "$((i+1))" "$(sink_display_label "$sink")"
@@ -646,79 +590,78 @@ done
 read -rp 'Select playback sink: ' physical_choice
 [[ "$physical_choice" =~ ^[0-9]+$ ]] || { echo 'Invalid output selection.'; exit 1; }
 if [[ "$physical_choice" == 0 ]]; then
-    [[ -n "$CURRENT_PHYSICAL" ]] || { echo 'No current output for this card; select a numbered output.'; exit 1; }
+    [[ -n "$CURRENT_PHYSICAL" ]] || fail 'No current physical output; select a numbered output.'
     PHYSICAL_SINK="$CURRENT_PHYSICAL"
 else
     index=$((10#$physical_choice-1))
     ((index >= 0 && index < ${#PHYSICAL_SINKS[@]})) || { echo 'Invalid output selection.'; exit 1; }
     PHYSICAL_SINK="${PHYSICAL_SINKS[$index]}"
 fi
-wait_for_sink "$PHYSICAL_SINK" || { echo "Output disappeared: $PHYSICAL_SINK"; exit 1; }
+TOPOLOGY_JSON="$(output_topology)" || fail 'Could not refresh output topology'
+jq -e --arg card "$SELECTED_CARD" --arg sink "$PHYSICAL_SINK" 'any(.cards[] | select(.name==$card) | .sinks[]?; .name==$sink)' <<<"$TOPOLOGY_JSON" >/dev/null || fail "Selected output disappeared: $PHYSICAL_SINK"
 normalize_audio_volumes || fail "Normalization failed after playback sink selection"
-# The server exposes sink ports as well; honor the saved port when available.
-mapfile -t OUTPUT_PORTS < <(jq -r --arg name "$PHYSICAL_SINK" '
-  .[] | select(.name == $name) | (.ports // []) |
-  if type == "array" then .[] | select((.availability // .available // "unknown" | tostring | ascii_downcase) != "no") | .name
-  else to_entries[] | select((.value.availability // .value.available // "unknown" | tostring | ascii_downcase) != "no") | .key end' <<<"$SINKS_JSON")
+# Use the live sink ports; option 0 retains the active port.
+mapfile -t OUTPUT_PORTS < <(jq -r --arg card "$SELECTED_CARD" --arg sink "$PHYSICAL_SINK" '.cards[] | select(.name==$card) | .sinks[] | select(.name==$sink) | .ports[].name' <<<"$TOPOLOGY_JSON")
 SELECTED_PORT=""
 if ((${#OUTPUT_PORTS[@]})); then
-    saved_port="$(jq -r '.port // ""' "$ROUTE_FILE" 2>/dev/null || true)"
-    active_port="$(jq -r --arg name "$PHYSICAL_SINK" '.[] | select(.name == $name) | .active_port | if type == "object" then (.name // "") else (. // "") end' <<<"$SINKS_JSON" | head -n1)"
-    if [[ "$PHYSICAL_SINK" == "$SAVED_SINK" ]]; then
-        for port in "${OUTPUT_PORTS[@]}"; do
-            [[ "$port" == "$saved_port" ]] && SELECTED_PORT="$port"
-        done
+    active_port="$(jq -r --arg card "$SELECTED_CARD" --arg name "$PHYSICAL_SINK" '.cards[] | select(.name==$card) | .sinks[] | select(.name==$name) | .activePort' <<<"$TOPOLOGY_JSON")"
+    for port in "${OUTPUT_PORTS[@]}"; do
+        [[ "$port" == "$active_port" ]] && SELECTED_PORT="$port"
+    done
+    if [[ -n "$SELECTED_PORT" ]]; then
+        selected_available="$(jq -r --arg card "$SELECTED_CARD" --arg sink "$PHYSICAL_SINK" --arg port "$SELECTED_PORT" '[.cards[] | select(.name==$card) | .sinks[] | select(.name==$sink) | .ports[] | select(.name==$port) | .available][0] // "unknown"' <<<"$TOPOLOGY_JSON")"
+        [[ "$selected_available" != no && "$selected_available" != false ]] || SELECTED_PORT=""
     fi
-    if [[ -z "$SELECTED_PORT" ]]; then
-        for port in "${OUTPUT_PORTS[@]}"; do
-            [[ "$port" == "$active_port" ]] && SELECTED_PORT="$port"
-        done
-    fi
-    [[ -n "$SELECTED_PORT" ]] || SELECTED_PORT="${OUTPUT_PORTS[0]}"
     if ((${#OUTPUT_PORTS[@]} > 1)); then
-        printf '\nOutput port\n[0] Keep current (%s)\n' "$SELECTED_PORT"
+        printf '\nOutput port\n[0] Keep current (%s)\n' "${SELECTED_PORT:-none}"
         for i in "${!OUTPUT_PORTS[@]}"; do
-            port_label="$(jq -r --arg sink "$PHYSICAL_SINK" --arg port "${OUTPUT_PORTS[$i]}" '.[] | select(.name == $sink) | (.ports // []) | if type == "array" then .[] | select(.name == $port) | .description // .name else .[$port].description // $port end' <<<"$SINKS_JSON")"
+            port_label="$(jq -r --arg card "$SELECTED_CARD" --arg sink "$PHYSICAL_SINK" --arg port "${OUTPUT_PORTS[$i]}" '.cards[] | select(.name==$card) | .sinks[] | select(.name==$sink) | .ports[] | select(.name==$port) | .label' <<<"$TOPOLOGY_JSON")"
+            availability="$(jq -r --arg card "$SELECTED_CARD" --arg sink "$PHYSICAL_SINK" --arg port "${OUTPUT_PORTS[$i]}" '[.cards[] | select(.name==$card) | .sinks[] | select(.name==$sink) | .ports[] | select(.name==$port) | .available][0] // "unknown"' <<<"$TOPOLOGY_JSON")"
+            if [[ "$availability" == no || "$availability" == false ]]; then port_label+=" (unavailable)"; fi
             printf '[%d] %s\n' "$((i+1))" "${port_label:-${OUTPUT_PORTS[$i]}}"
         done
         read -rp 'Select output port: ' port_choice
         [[ "$port_choice" =~ ^[0-9]+$ ]] || { echo 'Invalid port.'; exit 1; }
+        if [[ "$port_choice" == 0 && -z "$SELECTED_PORT" ]]; then
+            fail 'No currently active, available port; select a numbered port.'
+        fi
         if [[ "$port_choice" != 0 ]]; then
             index=$((10#$port_choice-1))
             ((index >= 0 && index < ${#OUTPUT_PORTS[@]})) || { echo 'Invalid port.'; exit 1; }
             SELECTED_PORT="${OUTPUT_PORTS[$index]}"
         fi
     fi
-    pactl set-sink-port "$PHYSICAL_SINK" "$SELECTED_PORT" >>"$ACTION_LOG" 2>&1 || { echo 'Failed to set output port.'; exit 1; }
-    normalize_audio_volumes || fail "Normalization failed after output port selection"
+    if [[ -z "$SELECTED_PORT" && ${#OUTPUT_PORTS[@]} -eq 1 ]]; then
+        SELECTED_PORT="${OUTPUT_PORTS[0]}"
+    fi
+    PORT_AVAILABILITY="$(jq -r --arg card "$SELECTED_CARD" --arg sink "$PHYSICAL_SINK" --arg port "$SELECTED_PORT" '[.cards[] | select(.name==$card) | .sinks[] | select(.name==$sink) | .ports[] | select(.name==$port) | .available][0] // "unknown"' <<<"$TOPOLOGY_JSON")"
+    [[ "$PORT_AVAILABILITY" != no && "$PORT_AVAILABILITY" != false ]] || fail "Selected output port is reported unavailable: $SELECTED_PORT"
+    if [[ -n "$SELECTED_PORT" ]]; then
+        pactl set-sink-port "$PHYSICAL_SINK" "$SELECTED_PORT" >>"$ACTION_LOG" 2>&1 || fail 'Failed to set output port.'
+    fi
 fi
+normalize_audio_volumes || fail "Normalization failed after output port selection"
 
-# One local CamillaDSP profile menu. CMF profiles remain available to the
-# webremote but are deliberately excluded from this laptop selector.
-[[ -n "$CAMILLA" && -d "$PROFILES_DIR" ]] || { echo 'CamillaDSP executable or profile directory missing.'; exit 1; }
+TOPOLOGY_JSON="$(output_topology)" || fail 'Could not verify output after port selection'
+jq -e --arg card "$SELECTED_CARD" --arg sink "$PHYSICAL_SINK" --arg port "$SELECTED_PORT" 'any(.cards[] | select(.name==$card) | .sinks[]?; .name==$sink and any(.ports[]?; .name==$port))' <<<"$TOPOLOGY_JSON" >/dev/null || fail 'Selected output or port disappeared'
+# Use the same CamillaDSP profile list as the web picker.
+[[ -n "$CAMILLA" && -d "$PROFILES_DIR" ]] || fail 'CamillaDSP executable or profile directory missing'
 CURRENT_DSP="$(cat "$ACTIVE" 2>/dev/null || true)"
 short_profile_name() {
-    local file="$1" stem
-    case "$file" in
-        00-filterless.y*ml) printf 'Filterless\n'; return ;;
-        *-cloud3-*.y*ml) printf 'Cloud III Anechoic\n'; return ;;
-        *-earpods-*.y*ml) stem="${file#*-earpods-}" ;;
-        *) printf '%s\n' "$file"; return ;;
-    esac
-    stem="${stem%.yaml}"; stem="${stem%.yml}"
+    local stem="${1%.yaml}"
+    stem="${stem%.yml}"
+    stem="${stem#[0-9][0-9]-}"
     stem="${stem//-/ }"
-    printf 'EarPods %s\n' "$stem" | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) substr($i,2); print}'
+    printf '%s\n' "$stem" | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) substr($i,2); print}'
 }
-# Sort by the generated prefix: 00 filterless, 01 anechoics, then the
-# EarPods environments. Never include CMF in the local selector.
-mapfile -t DSP_PROFILES < <(find "$PROFILES_DIR" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) -printf '%f\n' |
-    grep -E '^(00-filterless|[0-9][0-9]-(earpods|cloud3)-).*\.ya?ml$' | sort -u)
-((${#DSP_PROFILES[@]})) || { echo 'No local CamillaDSP profiles found.'; exit 1; }
+DSP_LIST_JSON="$(python3 "$TOPOLOGY_SCRIPT" --dsp-profiles)" || fail 'Could not list CamillaDSP profiles from paired server'
+mapfile -t DSP_PROFILES < <(jq -r '.[] | select((ascii_downcase | contains("cmf")) | not)' <<<"$DSP_LIST_JSON")
+((${#DSP_PROFILES[@]})) || fail 'No CamillaDSP profiles found'
 CURRENT_VALID=0
 for dsp in "${DSP_PROFILES[@]}"; do
     [[ "$dsp" == "$CURRENT_DSP" ]] && CURRENT_VALID=1
 done
-echo; echo 'CamillaDSP filters (before the playback sink)'; echo
+echo; echo 'CamillaDSP listening profile (filter before the playback sink)'; echo
 if ((CURRENT_VALID)); then
     printf '[0] Keep current (%s)\n' "$(short_profile_name "$CURRENT_DSP")"
 else
@@ -778,6 +721,7 @@ if ! start_camilla "$PROFILES_DIR/$DSP_PROFILE"; then
     echo "Failed to start CamillaDSP. See: $LOCAL_CAMILLA_LOG"
     exit 1
 fi
+wait_for_sink "$PHYSICAL_SINK" || { echo "Output disappeared before monitor start: $PHYSICAL_SINK"; exit 1; }
 if ! start_local_monitor "$PHYSICAL_SINK"; then
     echo "Local playback monitor failed. See: $ACTION_LOG"
     exit 1
@@ -787,25 +731,10 @@ rm -f -- "$REMOTE_STATE/audio-stopped"  # successful switch clears the stopped m
 # Save route only after a successful start; webremote can reuse this route.
 # Resolve the selected live sink's owning card via PipeWire device.id.
 # If graph metadata is unavailable, leave ownership unknown rather than guessing.
-PW_GRAPH="$(pw-dump 2>>"$ACTION_LOG" || true)"
-SINK_CARD=""
-if [[ -n "$PW_GRAPH" ]]; then
-    SINK_CARD="$(jq -r --arg sink "$PHYSICAL_SINK" '
-      . as $graph | ([$graph[] | select(.type == "PipeWire:Interface:Node" and .info.props."node.name" == $sink) | (.info.props."device.id" | tostring)] | first // "") as $id |
-      $graph[] | select($id != "" and .type == "PipeWire:Interface:Device" and (.id | tostring) == $id) | .info.props."device.name" // empty
-    ' <<<"$PW_GRAPH" 2>/dev/null | head -n1)"
-fi
-CARDS_JSON="$(pactl --format=json list cards 2>>"$ACTION_LOG" || printf '[]')"
-if [[ -n "$SINK_CARD" ]]; then
-    jq -e --arg name "$SINK_CARD" 'any(.[]; .name == $name)' <<<"$CARDS_JSON" >/dev/null || SINK_CARD=""
-fi
-SINK_PROFILE=""
-if [[ -n "$SINK_CARD" ]]; then
-    SINK_PROFILE="$(jq -r --arg name "$SINK_CARD" '.[] | select(.name == $name) | .active_profile | if type == "object" then (.name // "") else (. // "") end' <<<"$CARDS_JSON" | head -n1)"
-else
-    echo "Warning: selected sink owner is unknown; saving sink and port without a guessed card." >>"$ACTION_LOG"
-fi
-jq -n --arg card "$SINK_CARD" --arg profile "$SINK_PROFILE" --arg sink "$PHYSICAL_SINK" --arg port "$SELECTED_PORT" --arg label "$(sink_display_label "$PHYSICAL_SINK")" '{card:$card,profile:$profile,sink:$sink,port:$port,label:$label}' >"$ROUTE_FILE.tmp.$$" &&
+TOPOLOGY_JSON="$(output_topology)" || fail 'Could not verify selected route'
+SINK_CARD="$(jq -r --arg sink "$PHYSICAL_SINK" '[.cards[].sinks[] | select(.name==$sink) | .cardName][0] // ""' <<<"$TOPOLOGY_JSON")"
+SINK_PROFILE="$(jq -r --arg card "$SINK_CARD" '[.cards[] | select(.name==$card) | .activeProfile][0] // ""' <<<"$TOPOLOGY_JSON")"
+jq -n --arg card "$SELECTED_CARD" --arg profile "$SELECTED_PROFILE" --arg sinkCard "$SINK_CARD" --arg sinkProfile "$SINK_PROFILE" --arg sink "$PHYSICAL_SINK" --arg port "$SELECTED_PORT" --arg label "$(sink_display_label "$PHYSICAL_SINK")" '{card:$card,profile:$profile,sink:$sink,port:$port,label:$label,sinkCard:$sinkCard,sinkProfile:$sinkProfile}' >"$ROUTE_FILE.tmp.$$" &&
     mv -f "$ROUTE_FILE.tmp.$$" "$ROUTE_FILE"
 normalize_audio_volumes || fail 'Could not restore saved master after normalization'
 echo; echo "Device: $SELECTED_CARD_LABEL"
