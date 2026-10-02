@@ -90,7 +90,6 @@ flock -u 8
 exec 8>&-
 
 ACTION_LOG="$STATE_DIR/audio-switch.log"
-HOTSPOT_CONNECTION="AirPlay Direct"
 RESULT_FILE="$STATE_DIR/audio-toggle-complete.$$"
 ACTION_STARTED_FILE="$STATE_DIR/audio-toggle-started.$$"
 CARD_SELECTION_FILE="$STATE_DIR/audio-card-selected.$$"
@@ -502,7 +501,6 @@ close_mpv_windows() {
 
     return 1
 }
-hotspot_active() { nmcli -t -f NAME connection show --active 2>/dev/null | grep -Fqx "$HOTSPOT_CONNECTION"; }
 
 # Opening the selector is itself a normalization checkpoint. This pauses
 # current media before any Swaynag button can be pressed. If Audio Stop left
@@ -512,8 +510,7 @@ if pulse_ready; then
     live="$(pactl get-sink-volume @DEFAULT_SINK@ 2>/dev/null | grep -oE '[0-9]+%' | head -n1)"
     if [[ "$live" =~ ^([0-9]|[1-9][0-9]|100)%$ ]]; then printf '%s\n' "$live" >"$MASTER_VOLUME_FILE"; fi
 fi
-normalize_audio_volumes || fail 'Normalization failed while opening audio switch'
-
+# Audio actions normalize after selection; Away/display is controlled by the web button or Sway binding.
 commit_local_output() {
     local server_pid tracked pid
 # This local selection is laptop-only. Stop competing inputs after all choices validate.
@@ -576,6 +573,8 @@ select_filter() {
 [[ -n "$CAMILLA" && -d "$PROFILES_DIR" ]] || fail 'CamillaDSP executable or profile directory missing'
 CURRENT_DSP="$(cat "$ACTIVE" 2>/dev/null || true)"
 DSP_LIST_JSON="$(python3 "$TOPOLOGY_SCRIPT" --dsp-profiles)" || fail 'Could not list CamillaDSP profiles from paired server'
+DSP_FILTER_INFO="$(python3 "$TOPOLOGY_SCRIPT" --dsp-filter-info)" || fail 'Could not read BRIR filter labels from paired server'
+filter_label() { jq -r --arg name "$1" '.[$name].label // $name' <<<"$DSP_FILTER_INFO"; }
 mapfile -t DSP_PROFILES < <(jq -r '.[] | select((ascii_downcase | contains("cmf")) | not)' <<<"$DSP_LIST_JSON")
 ((${#DSP_PROFILES[@]})) || fail 'No CamillaDSP profiles found'
 CURRENT_VALID=0
@@ -584,12 +583,12 @@ for dsp in "${DSP_PROFILES[@]}"; do
 done
 echo; echo 'CamillaDSP listening profile (filter before the playback sink)'; echo
 if ((CURRENT_VALID)); then
-    print_menu_item 0 "Keep current ($CURRENT_DSP)"
+    print_menu_item 0 "Keep current ($(filter_label "$CURRENT_DSP"))"
 else
     echo 'No current local profile; choose a numbered filter.'
 fi
 for i in "${!DSP_PROFILES[@]}"; do
-    print_menu_item "$((i+1))" "${DSP_PROFILES[$i]}"
+    print_menu_item "$((i+1))" "$(filter_label "${DSP_PROFILES[$i]}")"
 done
 while :; do
     read -rp 'Select CamillaDSP profile: ' dsp_choice || { echo 'Selection cancelled.'; pause_before_close; exit 0; }
@@ -627,18 +626,6 @@ ARGS+=(
     -z "Audio Stop"
     "touch '$ACTION_STARTED_FILE'; printf '%s\n' stop-audio >'$CARD_SELECTION_FILE'; touch '$RESULT_FILE'"
 )
-
-if hotspot_active; then
-    ARGS+=(
-        -z "Stop AirPlay Hotspot [active]"
-        "touch '$ACTION_STARTED_FILE'; printf '%s\n' toggle-hotspot >'$CARD_SELECTION_FILE'; touch '$RESULT_FILE'"
-    )
-else
-    ARGS+=(
-        -z "Start AirPlay Hotspot [inactive]"
-        "touch '$ACTION_STARTED_FILE'; printf '%s\n' toggle-hotspot >'$CARD_SELECTION_FILE'; touch '$RESULT_FILE'"
-    )
-fi
 
 ARGS+=(
     -z "CamillaDSP filters"
@@ -698,13 +685,6 @@ if [[ "$SELECTED_CARD_VALUE" == stop-audio ]]; then
     pause_before_close
     exit 0
 fi
-if [[ "$SELECTED_CARD_VALUE" == toggle-hotspot ]]; then
-    if hotspot_active; then nmcli connection down "$HOTSPOT_CONNECTION" >>"$ACTION_LOG" 2>&1; echo "AirPlay hotspot stopped."
-    else nmcli connection up "$HOTSPOT_CONNECTION" >>"$ACTION_LOG" 2>&1; echo "AirPlay hotspot started."; fi
-    normalize_audio_volumes || fail "Normalization failed after hotspot selection"
-    pause_before_close; exit 0
-fi
-
 if [[ "$SELECTED_CARD_VALUE" == select-filter ]]; then
     if ! pulse_ready; then
         echo 'Start PipeWire before selecting a listening filter.'
@@ -744,6 +724,13 @@ normalize_audio_volumes || fail "Normalization failed after card selection"
 # and an available sink, apply its last used output immediately; otherwise
 # leave the current playback alone and let the profile menu activate one.
 CARD_ACTIVE="$(jq -r --arg card "$SELECTED_CARD" '[.cards[] | select(.name==$card) | .activeProfile][0] // ""' <<<"$TOPOLOGY_JSON")"
+REMEMBERED_CARD_PROFILE="$(python3 "$TOPOLOGY_SCRIPT" --remembered-profile "$SELECTED_CARD")" || fail 'Could not read last card profile'
+if [[ -n "$REMEMBERED_CARD_PROFILE" && "$REMEMBERED_CARD_PROFILE" != "$CARD_ACTIVE" ]] &&
+   jq -e --arg card "$SELECTED_CARD" --arg profile "$REMEMBERED_CARD_PROFILE" 'any(.cards[]; .name==$card and any(.profiles[]; .name==$profile and .available!="no" and .available!="false"))' <<<"$TOPOLOGY_JSON" >/dev/null; then
+    TOPOLOGY_JSON="$(python3 "$TOPOLOGY_SCRIPT" --output-profile "$SELECTED_CARD" "$REMEMBERED_CARD_PROFILE")" || fail 'Could not restore last card profile'
+    CARD_ACTIVE="$REMEMBERED_CARD_PROFILE"
+    normalize_audio_volumes || fail 'Normalization failed after restoring card profile'
+fi
 if [[ -n "$CARD_ACTIVE" ]]; then
     CARD_AVAILABLE="$(jq -r --arg card "$SELECTED_CARD" --arg profile "$CARD_ACTIVE" '[.cards[] | select(.name==$card) | .profiles[] | select(.name==$profile) | .available][0] // "no"' <<<"$TOPOLOGY_JSON")"
     if [[ "$CARD_AVAILABLE" != no && "$CARD_AVAILABLE" != false ]]; then

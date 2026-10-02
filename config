@@ -122,7 +122,9 @@ bindsym --no-repeat $mod+shift+r fullscreen disable; exec bash -c 'mpv /home/joe
 bindsym --no-repeat $mod+shift+m fullscreen disable; exec bash -c 'mpv /home/joel/Downloads/Music/favourites.m3u'
 bindsym --no-repeat $mod+shift+a fullscreen disable; exec $term -T "$popup-server-ipad" -e bash -c 'trap "" INT; (trap - INT; /home/joel/.config/sway/scripts/network/start-ipad-webremote.sh); echo; read -n 1 -rsp "Press any key to close..."'
 bindsym --no-repeat $mod+shift+b fullscreen disable; exec $term -T "$popup-server-linux" -e bash -c 'trap "" INT; (trap - INT; python3 /home/joel/.config/sway/scripts/network/camilladsp-server-sonobus.py); read -n 1 -rsp "Press any key to close..."'
-bindsym --no-repeat $mod+shift+d fullscreen disable; exec $term -T "$popup-update-a_profiles" -e bash -c 'python3 /home/joel/.config/sway/scripts/updaters/rebuild-camilla.py; echo; read -n 1 -rsp "Press any key to close..."'
+bindsym --no-repeat $mod+shift+d fullscreen disable; exec python3 "/home/joel/.config/sway/scripts/network/camilladsp-server-sonobus.py" --toggle-away-display
+bindsym --no-repeat $mod+shift+f fullscreen disable; exec $term -T "$popup-update-a_profiles" -e bash -c 'python3 /home/joel/.config/sway/scripts/updaters/rebuild-camilla.py; echo; read -n 1 -rsp "Press any key to close..."'
+bindsym --no-repeat $mod+shift+w fullscreen disable; exec $term -T "$popup-update-a_profiles" -e bash -c '/home/joel/.config/sway/scripts/network/airplay-hotspot-toggle.sh; echo; read -n 1 -rsp "Press any key to close..."'
 
 #keybinds app
 bindsym --no-repeat $mod+F2 fullscreen disable; exec $term -T "$popup-tuis" -e clipse
