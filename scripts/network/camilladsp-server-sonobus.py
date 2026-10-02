@@ -1114,19 +1114,16 @@ def pipewire_sink_owners():
     except (OSError,ValueError,TypeError,subprocess.TimeoutExpired):return {}
 
 def sink_owner(sink,cards):
+    # A live card index or PipeWire device.name is evidence of ownership.
+    # Never infer ownership from the ALSA node name or selected UI card.
     index=sink.get('cardIndex')
     if index:
         owner=next((card for card in cards if card['index']==index),None)
         if owner:return owner
     name=sink.get('cardName')
     if name:
-        owner=next((card for card in cards if card['name']==name),None)
-        if owner:return owner
-    # Last resort only: exact ALSA device stem plus a dot separator.
-    matches=[card for card in cards if card['name'].startswith('alsa_card.') and
-             sink['name'].startswith('alsa_output.'+card['name'][len('alsa_card.'):] + '.')]
-    return matches[0] if len(matches)==1 else None
-
+        return next((card for card in cards if card['name']==name),None)
+    return None
 def audio_topology():
     cards_raw=_pactl_json('cards');sinks_raw=_pactl_json('sinks');saved=saved_output_route();pw_owners=pipewire_sink_owners()
     sinks=[]
@@ -1201,12 +1198,11 @@ def choose_output_route(requested=None):
         # A route copied from another laptop must not force its old card/profile.
         sinks=cards[0]['sinks']
         default=run([exe('pactl'),'get-default-sink'],False,5,media_env()).stdout.strip()
-        candidate=next((x for x in sinks if x['name']==default),None)
-        if candidate is None:candidate=next((x for x in sinks if x['name'].startswith('alsa_output.') and x['name']!=sink_name),None)
-        if candidate is None:candidate=next((x for x in sinks if x['name'].startswith('alsa_output.')),None)
-        if candidate is None:raise RuntimeError('No physical playback sink is available on this laptop')
+        candidate=next((x for x in sinks if x['name']==default and sink_owner(x,cards)),None)
+        if candidate is None:candidate=next((x for x in sinks if sink_owner(x,cards) and x['name']!=sink_name),None)
+        if candidate is None:candidate=next((x for x in sinks if sink_owner(x,cards)),None)
+        if candidate is None:raise RuntimeError('No playback sink with a verified card owner is available')
         selected_card=sink_owner(candidate,cards)
-        if selected_card is None:raise RuntimeError('Cannot identify the card owning '+candidate['name'])
         sink_name=candidate['name']
     profile_name=str(requested.get('profile') or '')
     if profile_name not in {x['name'] for x in selected_card['profiles']}:

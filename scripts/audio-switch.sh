@@ -786,7 +786,7 @@ printf 'laptop_laptop\n' >"$REMOTE_STATE/mode"
 rm -f -- "$REMOTE_STATE/audio-stopped"  # successful switch clears the stopped marker
 # Save route only after a successful start; webremote can reuse this route.
 # Resolve the selected live sink's owning card via PipeWire device.id.
-# Only use the ALSA name stem if graph metadata is unavailable.
+# If graph metadata is unavailable, leave ownership unknown rather than guessing.
 PW_GRAPH="$(pw-dump 2>>"$ACTION_LOG" || true)"
 SINK_CARD=""
 if [[ -n "$PW_GRAPH" ]]; then
@@ -798,14 +798,6 @@ fi
 CARDS_JSON="$(pactl --format=json list cards 2>>"$ACTION_LOG" || printf '[]')"
 if [[ -n "$SINK_CARD" ]]; then
     jq -e --arg name "$SINK_CARD" 'any(.[]; .name == $name)' <<<"$CARDS_JSON" >/dev/null || SINK_CARD=""
-fi
-if [[ -z "$SINK_CARD" ]]; then
-    while IFS= read -r candidate; do
-        [[ "$candidate" == alsa_card.* ]] || continue
-        if [[ "$PHYSICAL_SINK" == "alsa_output.${candidate#alsa_card.}."* ]]; then
-            SINK_CARD="$candidate"; break
-        fi
-    done < <(jq -r '.[].name // empty' <<<"$CARDS_JSON")
 fi
 SINK_PROFILE=""
 if [[ -n "$SINK_CARD" ]]; then
