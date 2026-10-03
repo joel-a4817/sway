@@ -117,6 +117,7 @@ cleanup() {
 }
 pause_before_close() {
     FINAL_PAUSE_REACHED=1
+    end_media_change
     flock -u 9 2>/dev/null || true
     exec 9>&-
     echo
@@ -137,6 +138,7 @@ handle_script_exit() {
         [[ -s "$ACTION_LOG" ]] && { echo; echo "Action log:"; echo "$ACTION_LOG"; echo; tail -n 45 "$ACTION_LOG"; }
         pause_before_close
     fi
+    end_media_change
     cleanup
     flock -u 9 2>/dev/null || true
     exec 9>&-
@@ -190,11 +192,12 @@ move_application_inputs_to() {
 # Local laptop-only CamillaDSP state. The phone server remains independent.
 fail() { printf 'Error: %s\n' "$*" | tee -a "$ACTION_LOG" >&2; exit 1; }
 CAMILLA="$(command -v camilladsp || true)"
-PROFILES_DIR="$HOME_DIR/Documents/prefs/audio/camilladsp"
+PROFILES_DIR="$HOME_DIR/Documents/prefs/audio-filters"
 mkdir -p "$REMOTE_STATE"
 PIDFILE="$REMOTE_STATE/camilladsp.pid"
 ACTIVE="$REMOTE_STATE/active-profile"
 MONPID="$REMOTE_STATE/local-monitor.pid"
+BYPASSPID="$REMOTE_STATE/no-filter-bridge.pid"
 SERVERPID="$REMOTE_STATE/web-server.pid"
 ROUTE_FILE="$REMOTE_STATE/local-output-route.json"
 LOCAL_CAMILLA_LOG="$STATE_DIR/camilladsp-local.log"
@@ -219,6 +222,28 @@ stop_monitor() {
         for ((i=0;i<30;i++)); do valid_pid "$pid" || break; sleep 0.1; done
     fi
     rm -f -- "$MONPID"
+}
+stop_bypass() {
+    local pid
+    pid="$(read_pid "$BYPASSPID")"
+    if valid_pid "$pid"; then
+        local cmd pgid
+        cmd="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)"
+        [[ "$cmd" == *hw:Loopback,1,0* && "$cmd" == *hw:Loopback,0,1* ]] || fail "Bridge PID $pid is not our bypass process"
+        pgid="$(ps -o pgid= -p "$pid" | tr -d ' ')"
+        [[ "$pgid" == "$pid" ]] || fail "Bridge PID $pid does not own its process group"
+        kill -TERM -- "-$pid" 2>/dev/null || true
+        for ((i=0;i<30;i++)); do valid_pid "$pid" || break; sleep 0.1; done
+    fi
+    rm -f -- "$BYPASSPID"
+}
+start_bypass() {
+    local pid
+    valid_pid "$(read_pid "$BYPASSPID")" && return 0
+    setsid bash -c 'set -o pipefail; arecord -q -D hw:Loopback,1,0 -r 96000 -f S32_LE -c 2 -t raw | aplay -q -D hw:Loopback,0,1 -r 96000 -f S32_LE -c 2 -t raw'         camilladsp_input >>"$ACTION_LOG" 2>&1 </dev/null 9>&- &
+    pid=$!
+    for ((i=0;i<10;i++)); do valid_pid "$pid" || return 1; sleep 0.1; done
+    printf '%s\n' "$pid" >"$BYPASSPID"
 }
 stop_camilla() {
     local pid comm
@@ -307,8 +332,26 @@ normalize_audio_volumes() {
     }
 }
 TOPOLOGY_SCRIPT="$HOME_DIR/.config/sway/scripts/network/camilladsp-server-sonobus.py"
+MEDIA_TOKEN=""
+begin_media_change() {
+    [[ -z "$MEDIA_TOKEN" ]] || return 0
+    MEDIA_TOKEN="$(python3 "$TOPOLOGY_SCRIPT" --pause-media)" || fail 'Could not pause media before audio change'
+    [[ "$MEDIA_TOKEN" =~ ^[0-9a-f]{32}$ ]] || fail 'Invalid media pause token'
+    export AUDIO_MEDIA_TRANSACTION=1
+}
+end_media_change() {
+    [[ -n "$MEDIA_TOKEN" ]] || return 0
+    local token="$MEDIA_TOKEN"
+    MEDIA_TOKEN=""
+    if [[ ! -e "$REMOTE_STATE/audio-stopped" ]]; then
+        python3 "$TOPOLOGY_SCRIPT" --resume-media "$token" >>"$ACTION_LOG" 2>&1 || echo 'Warning: media resume failed; check action log.' >&2
+    fi
+    unset AUDIO_MEDIA_TRANSACTION
+}
+
 [[ -f "$TOPOLOGY_SCRIPT" ]] || fail "Paired server script missing: $TOPOLOGY_SCRIPT"
 output_topology() { python3 "$TOPOLOGY_SCRIPT" --output-topology; }
+profile_path() { python3 "$TOPOLOGY_SCRIPT" --profile-path "$1"; }
 retry_selection() {
     printf '%s\n' "$1"
 }
@@ -407,27 +450,41 @@ done
 stop_monitor
 systemctl --user start pipewire.socket pipewire-pulse.socket wireplumber.service >>"$ACTION_LOG" 2>&1 || fail 'Could not start PipeWire after handoff'
 wait_for_pulse || fail 'PipeWire did not become ready after handoff'
-if ! ensure_camilla_sink; then echo "camilladsp desktop sink is unavailable. See: $ACTION_LOG"; exit 1; fi
-if [[ "$(pactl get-default-sink 2>/dev/null || true)" != camilladsp ]]; then
-    pactl set-default-sink camilladsp >>"$ACTION_LOG" 2>&1 || { echo 'Failed to select CamillaDSP desktop sink.'; exit 1; }
+if [[ "$DSP_PROFILE" != __no_filter__ ]]; then
+    if ! ensure_camilla_sink; then fail "CamillaDSP desktop sink is unavailable; see $ACTION_LOG"; fi
+    pactl set-default-sink camilladsp >>"$ACTION_LOG" 2>&1 || fail 'Failed to select CamillaDSP desktop sink'
+    move_application_inputs_to camilladsp
 fi
-move_application_inputs_to camilladsp
-if valid_pid "$(read_pid "$PIDFILE")" && [[ "$(cat "$ACTIVE" 2>/dev/null || true)" == "$DSP_PROFILE" ]]; then
+if [[ "$DSP_PROFILE" == __no_filter__ ]]; then
+    stop_camilla
+    stop_bypass
+    printf '%s\n' '__no_filter__' >"$ACTIVE"
+elif valid_pid "$(read_pid "$PIDFILE")" && [[ "$(cat "$ACTIVE" 2>/dev/null || true)" == "$DSP_PROFILE" ]]; then
     echo 'Keeping the running CamillaDSP engine; switching only the physical monitor.' >>"$ACTION_LOG"
 else
+    stop_bypass
     stop_camilla
-    if ! start_camilla "$PROFILES_DIR/$DSP_PROFILE"; then
-    if [[ -n "$CURRENT_DSP" && "$CURRENT_DSP" != "$DSP_PROFILE" && -f "$PROFILES_DIR/$CURRENT_DSP" ]]; then
-        start_camilla "$PROFILES_DIR/$CURRENT_DSP" || true
+    if ! start_camilla "$(profile_path "$DSP_PROFILE")"; then
+    fallback_profile="$(profile_path "$CURRENT_DSP" 2>/dev/null || true)"
+    if [[ -n "$CURRENT_DSP" && "$CURRENT_DSP" != "$DSP_PROFILE" && -f "$fallback_profile" ]]; then
+        start_camilla "$fallback_profile" || true
     fi
     echo "Failed to start CamillaDSP. See: $LOCAL_CAMILLA_LOG"
     exit 1
     fi
 fi
 wait_for_sink "$PHYSICAL_SINK" || { echo "Output disappeared before monitor start: $PHYSICAL_SINK"; exit 1; }
-if ! start_local_monitor "$PHYSICAL_SINK"; then
-    echo "Local playback monitor failed. See: $ACTION_LOG"
-    exit 1
+if [[ "$DSP_PROFILE" == __no_filter__ ]]; then
+    stop_monitor
+    # The user service otherwise reselects camilladsp after a delayed startup.
+    systemctl --user stop camilladsp-system-audio.service >>"$ACTION_LOG" 2>&1 || fail 'Could not stop DSP default-sink selector'
+    pactl set-default-sink "$PHYSICAL_SINK" >>"$ACTION_LOG" 2>&1 || fail 'Could not select direct physical sink'
+    move_application_inputs_to "$PHYSICAL_SINK"
+else
+    if ! start_local_monitor "$PHYSICAL_SINK"; then
+        echo "Local playback monitor failed. See: $ACTION_LOG"
+        exit 1
+    fi
 fi
 printf 'laptop_laptop\n' >"$REMOTE_STATE/mode"
 rm -f -- "$REMOTE_STATE/audio-stopped"
@@ -465,9 +522,15 @@ select_filter() {
         selected="${DSP_PROFILES[$index]}"
         break
     done
+    begin_media_change
     python3 "$TOPOLOGY_SCRIPT" --select-filter "$selected" || fail 'Filter reload failed'
     echo "Listening filter: $selected"
 }
+# Opening the selector is itself a pause, normalize, resume transaction.
+# Keep the graph untouched when audio has deliberately been stopped.
+if [[ ! -e "$REMOTE_STATE/audio-stopped" ]] && pulse_ready; then
+    python3 "$TOPOLOGY_SCRIPT" --normalize-menu-open >>"$ACTION_LOG" 2>&1 || fail 'Menu-open normalization failed'
+fi
 ARGS=(-t warning -y overlay -m "Choose card, then playback profile")
 
 ARGS+=(
@@ -509,7 +572,8 @@ if [[ "$SELECTED_CARD_VALUE" == audio-services ]]; then
         [[ "$service_choice" =~ ^[0-4]$ ]] && break
         echo 'Enter 0, 1, 2, 3 or 4.'
     done
-    if [[ "$service_choice" == 0 ]]; then
+    # The paired server owns pause persistence for Stop/Start and pause-normalize-resume for restarts.
+if [[ "$service_choice" == 0 ]]; then
         python3 "$TOPOLOGY_SCRIPT" --audio-toggle || fail 'Audio stop/start failed'
     else
         python3 "$TOPOLOGY_SCRIPT" --restart-service "$service_choice" || fail 'Service restart failed'
@@ -528,9 +592,13 @@ fi
 # Save the actual master before profile activation changes the live graph.
 current_master="$(pactl get-sink-volume @DEFAULT_SINK@ 2>/dev/null | grep -oE '[0-9]+%' | head -n1)"
 # A stopped or rebuilding audio graph can expose a fresh 100% default.
-# Keep the persisted master until a live CamillaDSP route is running.
+# Preserve the live master for either active path: CamillaDSP or No filter.
+# Never capture a newly recreated default sink while audio is stopped.
 if [[ ! -e "$REMOTE_STATE/audio-stopped" ]] &&
-   valid_pid "$(read_pid "$PIDFILE")" &&
+   { valid_pid "$(read_pid "$PIDFILE")" ||
+     { [[ "$(cat "$ACTIVE" 2>/dev/null || true)" == __no_filter__ ]] &&
+       { valid_pid "$(read_pid "$BYPASSPID")" ||
+         [[ "$(pactl get-default-sink 2>/dev/null || true)" != camilladsp ]]; }; }; } &&
    [[ "$current_master" =~ ^([0-9]|[1-9][0-9]|100)%$ ]]; then
     printf '%s\n' "$current_master" >"$STATE_DIR/master-volume"
 fi
@@ -593,6 +661,7 @@ restore_profile_on_cancel() {
 }
 # Activating a profile creates its live playback sinks. Restore on cancel.
 ORIGINAL_PROFILE="$ACTIVE_PROFILE"
+begin_media_change
 if [[ "$SELECTED_PROFILE" != "$ACTIVE_PROFILE" ]]; then
     python3 "$TOPOLOGY_SCRIPT" --output-profile "$SELECTED_CARD" "$SELECTED_PROFILE" >/dev/null || fail 'Could not activate playback profile'
 fi
@@ -672,17 +741,21 @@ PHYSICAL_SINK="$(jq -r '.sink' <<<"$ROUTE")"
 SELECTED_PORT="$(jq -r '.port // ""' <<<"$ROUTE")"
 CURRENT_DSP="$(cat "$ACTIVE" 2>/dev/null || true)"
 DSP_PROFILE="$CURRENT_DSP"
-if [[ -z "$DSP_PROFILE" || ! -f "$PROFILES_DIR/$DSP_PROFILE" ]]; then
+resolved_profile="$(profile_path "$DSP_PROFILE" 2>/dev/null || true)"
+if [[ -z "$DSP_PROFILE" || ( "$DSP_PROFILE" != __no_filter__ && ! -f "$resolved_profile" ) ]]; then
     DSP_LIST_JSON="$(python3 "$TOPOLOGY_SCRIPT" --dsp-profiles)" || fail 'Could not list listening filters'
     DSP_PROFILE="$(jq -r '.[0] // ""' <<<"$DSP_LIST_JSON")"
 fi
-[[ -n "$CAMILLA" && -n "$DSP_PROFILE" && -f "$PROFILES_DIR/$DSP_PROFILE" ]] || fail 'No valid listening filter exists'
-"$CAMILLA" --check "$PROFILES_DIR/$DSP_PROFILE" >>"$ACTION_LOG" 2>&1 || fail 'Listening filter is invalid'
+resolved_profile="$(profile_path "$DSP_PROFILE" 2>/dev/null || true)"
+if [[ "$DSP_PROFILE" != __no_filter__ ]]; then
+    [[ -n "$CAMILLA" && -n "$DSP_PROFILE" && -f "$resolved_profile" ]] || fail 'No valid listening filter exists'
+    "$CAMILLA" --check "$resolved_profile" >>"$ACTION_LOG" 2>&1 || fail 'Listening filter is invalid'
+fi
 commit_local_output
 save_selected_route
 normalize_audio_volumes || fail 'Normalization failed after output commit'
 echo; echo "Device: $SELECTED_CARD_LABEL"
 echo "Card profile: $SELECTED_PROFILE_LABEL"
 echo "Physical output: $(sink_display_label "$PHYSICAL_SINK")"
-echo "CamillaDSP: $DSP_PROFILE"
+echo "Listening profile: $DSP_PROFILE"
 pause_before_close
