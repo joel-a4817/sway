@@ -49,7 +49,7 @@ switch_process() {
     # The script must be Bash's script operand, not a path in unrelated arguments.
     arg="${args[1]:-}"
     [[ "$arg" == "$SCRIPT_PATH" ]] && return 0
-    [[ "$arg" == */audio-control.sh || "$arg" == audio-control.sh || "$arg" == */audio-switch.sh || "$arg" == audio-switch.sh ]] || return 1
+    [[ "$arg" == */audio-control.sh || "$arg" == audio-control.sh ]] || return 1
     [[ "$(readlink -f -- "$arg" 2>/dev/null)" == "$SCRIPT_PATH" ]]
 }
 process_start() {
@@ -117,7 +117,6 @@ cleanup() {
 }
 pause_before_close() {
     FINAL_PAUSE_REACHED=1
-    end_media_change
     flock -u 9 2>/dev/null || true
     exec 9>&-
     echo
@@ -140,7 +139,6 @@ handle_script_exit() {
         fi
         pause_before_close
     fi
-    end_media_change
     cleanup
     flock -u 9 2>/dev/null || true
     exec 9>&-
@@ -153,7 +151,6 @@ trap 'exit 143' TERM
 trap 'exit 129' HUP
 trap 'exit 131' QUIT
 
-end_media_change() { :; }
 TOPOLOGY_SCRIPT="$HOME_DIR/.config/sway/scripts/network/camilladsp-server-sonobus.py"
 [[ -f "$TOPOLOGY_SCRIPT" ]] || { echo "Missing paired server: $TOPOLOGY_SCRIPT" >&2; exit 1; }
 # Opening Audio Control itself runs the requested normalization transaction.
@@ -169,8 +166,8 @@ output_topology() { python3 "$TOPOLOGY_SCRIPT" --output-topology; }
 # normalization, and resume as one transaction after the final choice.
 TOPOLOGY_JSON="$(output_topology 2>/dev/null)" || TOPOLOGY_JSON='{"cards":[]}'
 mapfile -t CARDS < <(jq -r '.cards[] | [.name,.label] | @tsv' <<<"$TOPOLOGY_JSON")
-if ((${#CARDS[@]})); then printf '%s\n' "${CARDS[@]}" > "$STATE_DIR/audio-cards-last.txt"
-elif [[ -s "$STATE_DIR/audio-cards-last.txt" ]]; then mapfile -t CARDS < "$STATE_DIR/audio-cards-last.txt"; fi
+if ((${#CARDS[@]})); then printf '%s\n' "${CARDS[@]}" > "$STATE_DIR/audio-control-cards-last.txt"
+elif [[ -s "$STATE_DIR/audio-control-cards-last.txt" ]]; then mapfile -t CARDS < "$STATE_DIR/audio-control-cards-last.txt"; fi
 print_menu_item() {
     local prefix="[$1] " label="$2" columns width line first=1
     columns="$(tput cols 2>/dev/null || true)"
@@ -263,38 +260,47 @@ card_label="${CARDS[selected]#*$'\t'}"
 TOPOLOGY_JSON="$(output_topology)" || { echo "Start audio services before choosing a playback output." >&2; exit 1; }
 active="$(jq -r --arg n "$card" '.cards[]|select(.name==$n)|.activeProfile // empty' <<<"$TOPOLOGY_JSON")"
 mapfile -t profiles < <(jq -r --arg n "$card" '.cards[]|select(.name==$n)|.profiles[]|select(.available!="no" and .available!="false" and ((.name|ascii_downcase)!="off"))|.index' <<<"$TOPOLOGY_JSON")
-labels=("Keep current profile")
+last_profile="$(python3 "$TOPOLOGY_SCRIPT" --remembered-profile "$card" 2>/dev/null || true)"
+printf '%s\n' "${profiles[@]}" | grep -Fqx -- "$last_profile" || last_profile="$active"
+printf '%s\n' "${profiles[@]}" | grep -Fqx -- "$last_profile" || last_profile=''
+last_profile_label="$(jq -r --arg n "$card" --arg p "$last_profile" '.cards[]|select(.name==$n)|.profiles[]|select((.index|tostring)==$p)|.label' <<<"$TOPOLOGY_JSON")"
+labels=("Last known profile${last_profile_label:+ ($last_profile_label)}")
 for profile in "${profiles[@]}"; do
     labels+=("$(jq -r --arg n "$card" --arg p "$profile" '.cards[]|select(.name==$n)|.profiles[]|select((.index|tostring)==$p)|.label' <<<"$TOPOLOGY_JSON")")
 done
 choose_index "Card: $card_label | Playback profile" "${labels[@]}" || exit 0
 if ((number==0)); then
-    [[ -n "$active" ]] || { echo 'No current profile to keep.' >&2; exit 1; }
-    profile="$active"
+    [[ -n "$last_profile" ]] || { echo 'No last known available profile for this device.' >&2; exit 1; }
+    profile="$last_profile"
 else profile="${profiles[number-1]}"; fi
 mapfile -t routes < <(jq -r --arg n "$card" --arg p "$profile" '.cards[]|select(.name==$n)|.routes[]|select(.available!="no" and .available!="false" and ((.profiles|length)==0 or ([.profiles[]|tostring]|index($p))!=null))|.index' <<<"$TOPOLOGY_JSON")
 route=''
 if ((${#routes[@]})); then
-    labels=('Keep current route')
+    remembered_sink="$(python3 "$TOPOLOGY_SCRIPT" --remembered-sink "$card" "$profile" 2>/dev/null || true)"
+    last_route="$(python3 "$TOPOLOGY_SCRIPT" --remembered-port "$card" "$profile" "$remembered_sink" 2>/dev/null || true)"
+    printf '%s\n' "${routes[@]}" | grep -Fqx -- "$last_route" || last_route="$(jq -r --arg n "$card" '.cards[]|select(.name==$n)|.activeRoutes[0] // empty' <<<"$TOPOLOGY_JSON")"
+    printf '%s\n' "${routes[@]}" | grep -Fqx -- "$last_route" || last_route=''
+    last_route_label="$(jq -r --arg n "$card" --arg r "$last_route" '.cards[]|select(.name==$n)|.routes[]|select((.index|tostring)==$r)|.label' <<<"$TOPOLOGY_JSON")"
+    labels=("Last known route${last_route_label:+ ($last_route_label)}")
     for r in "${routes[@]}"; do
         labels+=("$(jq -r --arg n "$card" --arg r "$r" '.cards[]|select(.name==$n)|.routes[]|select((.index|tostring)==$r)|.label' <<<"$TOPOLOGY_JSON")")
     done
     choose_index 'Output route' "${labels[@]}" || exit 0
-    if ((number>0)); then route="${routes[number-1]}";
-    elif [[ "$profile" != "$active" ]]; then
-        echo 'Choose an output route for the new profile (0 cannot keep the old route).' >&2; exit 1
+    if ((number>0)); then route="${routes[number-1]}"; else
+        [[ -n "$last_route" ]] || { echo 'No last known available route for this profile.' >&2; exit 1; }
+        route="$last_route"
     fi
 fi
-# 0 means keep the actual current output, not cancel or auto-pick.
+# 0 selects the last known still-exposed sink; numbered items are live sinks.
 saved="$(jq -r '.saved.sink // empty' <<<"$TOPOLOGY_JSON")"
 sink=''
 if [[ "$profile" == "$active" ]]; then
     mapfile -t sinks < <(jq -r --arg n "$card" '.cards[]|select(.name==$n)|.sinks[].name' <<<"$TOPOLOGY_JSON")
-    labels=()
-    if [[ -n "$saved" ]] && printf '%s\n' "${sinks[@]}" | grep -Fqx -- "$saved"; then
-        current_label="$(jq -r --arg n "$card" --arg s "$saved" '.cards[]|select(.name==$n)|.sinks[]|select(.name==$s)|.label' <<<"$TOPOLOGY_JSON")"
-        labels+=("Keep current output ($current_label)")
-    else labels+=('Keep current output (unavailable; choose a sink)'); fi
+    last_sink="$(python3 "$TOPOLOGY_SCRIPT" --remembered-sink "$card" "$profile" 2>/dev/null || true)"
+    printf '%s\n' "${sinks[@]}" | grep -Fqx -- "$last_sink" || last_sink="$saved"
+    printf '%s\n' "${sinks[@]}" | grep -Fqx -- "$last_sink" || last_sink=''
+    last_sink_label="$(jq -r --arg n "$card" --arg s "$last_sink" '.cards[]|select(.name==$n)|.sinks[]|select(.name==$s)|.label' <<<"$TOPOLOGY_JSON")"
+    labels=("Last known sink${last_sink_label:+ ($last_sink_label)}")
     for x in "${sinks[@]}"; do
         labels+=("$(jq -r --arg n "$card" --arg s "$x" '.cards[]|select(.name==$n)|.sinks[]|select(.name==$s)|.label' <<<"$TOPOLOGY_JSON")")
     done
@@ -302,8 +308,8 @@ if [[ "$profile" == "$active" ]]; then
         while :; do
             choose_index 'Playback sink' "${labels[@]}" || exit 0
             if ((number>0)); then sink="${sinks[number-1]}"; break; fi
-            if [[ -n "$saved" && "${labels[0]}" == Keep\ current\ output* ]]; then sink="$saved"; break; fi
-            echo 'No current output to keep; choose a numbered sink.'
+            if [[ -n "$last_sink" ]]; then sink="$last_sink"; break; fi
+            echo 'No last known available sink; choose a numbered sink.'
         done
     fi
 fi
