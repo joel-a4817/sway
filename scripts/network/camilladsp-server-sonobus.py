@@ -371,6 +371,25 @@ def start_camilla(p):
         time.sleep(.05)
     ACTIVE.write_text(target.name+'\n')
     return process.pid
+def wait_for_camilla_config(expected,timeout=10):
+    """Wait for the tracked engine to report exactly the selected YAML."""
+    expected=Path(expected).resolve()
+    deadline=time.monotonic()+timeout
+    last_error='WebSocket not listening'
+    while time.monotonic()<deadline:
+        pid=rpid(CAMPID)
+        if not alive(pid,'camilladsp'):
+            raise RuntimeError('CamillaDSP exited before readiness: '+log_tail(STATE/'camilladsp.log')[-2000:])
+        try:
+            loaded=camilla_command('GetConfigFilePath')
+            if isinstance(loaded,str) and loaded and Path(loaded).resolve()==expected:
+                return
+            last_error=f'loaded {loaded!r}, expected {str(expected)!r}'
+        except (OSError,RuntimeError,ValueError) as error:
+            last_error=str(error)
+        time.sleep(.1)
+    raise RuntimeError('CamillaDSP selected profile not ready: '+last_error+'; '+log_tail(STATE/'camilladsp.log')[-2000:])
+
 def release_local_engine():
     global LOCAL_ENGINE_OWNED
     local_running=alive(rpid(CAMPID),'camilladsp') and alive(rpid(LOCALMONPID))
@@ -619,6 +638,7 @@ def apply_master_volume(value,normalize_sinks=True):
     if result.returncode:raise RuntimeError(f'Could not set {name} to {value:.2f}%: {result.stderr.strip()}')
     sync_mpv_master(value)
     if alive(rpid(CAMPID),'camilladsp'):
+        if selected_filter()!=NO_FILTER:wait_for_camilla_config(profile(selected_filter()))
         try:camilla_command({'SetVolume':0.0})
         except (OSError,ValueError) as error:raise RuntimeError(f'Could not set CamillaDSP Main to unity: {error}') from error
 
@@ -762,6 +782,7 @@ def normalize_audio_volumes():
         # Direct-ALSA MPV bypasses PipeWire; its gain is the same saved master.
         sync_mpv_master(max(0.0,min(100.0,value)))
         if alive(rpid(CAMPID),'camilladsp'):
+            if selected_filter()!=NO_FILTER:wait_for_camilla_config(profile(selected_filter()))
             camilla_command({'SetVolume':0.0})
         default=run([exe('pactl'),'get-default-sink'],False,5,media_env())
         if default.returncode or not default.stdout.strip():
@@ -2134,6 +2155,7 @@ def start_runtime(force=False):
     MASTER_RESTORING=True
     ensure()
     if STOPPED.exists() and not force:
+        MODE.write_text('laptop_laptop\n')
         run(['systemctl','--user','stop',SYSTEM_AUDIO_SERVICE],False,10)
         run(['systemctl','stop','shairport-sync.service','nqptp.service'],False,10)
         return
@@ -2154,6 +2176,9 @@ def start_runtime(force=False):
         except (ValueError,FileNotFoundError):pass
     if selected is None and saved!=NO_FILTER:
         selected=available[0]
+    # Set the startup mode before any bypass, engine or source decisions.
+    mode='laptop_laptop'
+    MODE.write_text(mode+'\n')
     # Reuse a verified surviving engine; never start a competing instance.
     if saved==NO_FILTER:
         stop_camilla(include_stale=True)
@@ -2161,7 +2186,8 @@ def start_runtime(force=False):
     elif not alive(rpid(CAMPID),'camilladsp'):
         stop_camilla(include_stale=True)
         start_camilla(selected)
-    mode=audio_mode()
+    if selected_filter()!=NO_FILTER:
+        wait_for_camilla_config(profile(selected_filter()))
     try:
         apply_mode(mode,restore_camilla=False,normalize=False)
     except RuntimeError as error:
@@ -2183,6 +2209,8 @@ def start_runtime(force=False):
     if MODES[audio_mode()][1]=='system' and QUEUE_FILE.is_file():
         try:ensure_mpv()
         except (OSError,RuntimeError):pass
+    if selected_filter()!=NO_FILTER:
+        wait_for_camilla_config(profile(selected_filter()))
     apply_master_volume(master_volume(),normalize_sinks=False)
     MASTER_RESTORING=False
 def stop_audio_services(mark_stopped=True,stop_pipewire=True):
@@ -2302,47 +2330,28 @@ def main():
     tracked=rpid(CAMPID)
     if tracked and reusable_camilla(tracked):
         stop_local_monitor();stop_camilla(include_stale=True)
-    # A running engine may have survived a previous server. Never restart it
-    # just because the monitor PID is absent or stale.
+    # A surviving engine may be reused only if it is the tracked engine and
+    # reports the selected YAML. Every active startup still reapplies local mode.
     running=other_camilla_processes()
-    tracked=rpid(CAMPID)
     if running:
-        verified=reusable_camilla(running[0]) if len(running)==1 else False
-        if verified and tracked!=running[0] and not alive(tracked,'camilladsp'):
+        if len(running)!=1:
+            raise RuntimeError('Multiple CamillaDSP engines found; refusing unsafe startup')
+        verified=reusable_camilla(running[0])
+        if not verified or selected_filter()==NO_FILTER:
+            raise RuntimeError('Unverified CamillaDSP engine is running; refusing unsafe startup')
+        if rpid(CAMPID)!=running[0]:
             CAMPID.write_text(str(running[0])+'\n')
-            ACTIVE.write_text(verified.name+'\n')
-            tracked=running[0]
-            print('Recovered existing CamillaDSP PID '+str(tracked),flush=True)
-        if verified and tracked in running:
-            try:recorded=ACTIVE.read_text().strip()
-            except OSError:recorded=''
-            if recorded!=verified.name:ACTIVE.write_text(verified.name+'\n')
-        LOCAL_ENGINE_OWNED=tracked in running and alive(rpid(LOCALMONPID))
-        if not LOCAL_ENGINE_OWNED and tracked in running and verified:
-            # A previous server died after starting CamillaDSP but before its
-            # monitor. Finish its route without starting another engine.
-            with audio_start_change():
-                start_runtime()
-                if not STOPPED.exists():normalize_with_media()
-            LOCAL_ENGINE_OWNED=False
-        elif not LOCAL_ENGINE_OWNED:
-            print('Existing CamillaDSP is not owned by this pair; leaving it untouched: '+str(running),flush=True)
-            LOCAL_ENGINE_OWNED=True
-            if not STOPPED.exists():
-                with audio_start_change():normalize_with_media()
-        elif not STOPPED.exists():
-            with audio_start_change():normalize_with_media()
-    else:
-        LOCAL_ENGINE_OWNED=False
-        ensure()
+        if selected_filter()!=verified.name:
+            raise RuntimeError('Surviving CamillaDSP config differs from selected profile; refusing unsafe startup')
+    LOCAL_ENGINE_OWNED=False
     watcher_stop=threading.Event()
     threading.Thread(target=watch_sonobus_workspace,args=(watcher_stop,),daemon=True).start()
-    if not running:
-        if STOPPED.exists():start_runtime()
-        else:
-            with audio_start_change():
-                start_runtime()
-                normalize_with_media()
+    if STOPPED.exists():
+        start_runtime()
+    else:
+        with audio_start_change():
+            start_runtime()
+            normalize_with_media()
     threading.Thread(target=watch_master_volume,args=(watcher_stop,),daemon=True).start()
     server=S(('0.0.0.0',PORT),H);SERVERPID.write_text(str(me)+'\n');STOP_CAP.write_text(str(me)+'\n')
     fcntl.flock(startup_lock,fcntl.LOCK_UN)
