@@ -162,39 +162,58 @@ if ! python3 "$TOPOLOGY_SCRIPT" --normalize-menu-open >>"$ACTION_LOG" 2>&1; then
     exit 1
 fi
 output_topology() { python3 "$TOPOLOGY_SCRIPT" --output-topology; }
+run_quiet_action() {
+    local output status
+    output="$("$@" 2>&1)"; status=$?
+    if (( status != 0 )); then
+        printf '%s\n' "$output" >&2
+        return "$status"
+    fi
+}
 # Selection does not pause or mutate. The server owns pause, routing,
 # normalization, and resume as one transaction after the final choice.
 TOPOLOGY_JSON="$(output_topology 2>/dev/null)" || TOPOLOGY_JSON='{"cards":[]}'
 mapfile -t CARDS < <(jq -r '.cards[] | [.name,.label] | @tsv' <<<"$TOPOLOGY_JSON")
 if ((${#CARDS[@]})); then printf '%s\n' "${CARDS[@]}" > "$STATE_DIR/audio-control-cards-last.txt"
 elif [[ -s "$STATE_DIR/audio-control-cards-last.txt" ]]; then mapfile -t CARDS < "$STATE_DIR/audio-control-cards-last.txt"; fi
-print_menu_item() {
-    local prefix="[$1] " label="$2" columns width line first=1
-    columns="$(tput cols 2>/dev/null || true)"
-    [[ "$columns" =~ ^[0-9]+$ ]] || columns="${COLUMNS:-80}"
-    [[ "$columns" =~ ^[0-9]+$ ]] || columns=80
+terminal_columns() {
+    local columns
+    columns="$(stty size </dev/tty 2>/dev/null | awk '{print $2}')"
+    [[ "$columns" =~ ^[0-9]+$ && "$columns" -ge 20 ]] || columns="$(tput cols 2>/dev/null || true)"
+    [[ "$columns" =~ ^[0-9]+$ && "$columns" -ge 20 ]] || columns="${COLUMNS:-80}"
+    [[ "$columns" =~ ^[0-9]+$ && "$columns" -ge 20 ]] || columns=80
+    printf '%s\n' "$columns"
+}
+wrap_line() {
+    local text="$1" columns
+    columns="$(terminal_columns)"
+    printf '%s\n' "$text" | expand -t 4 | fold -s -w "$columns"
+}
+wrap_prefixed_line() {
+    local prefix="$1" text="$2" columns width continuation line first=1
+    columns="$(terminal_columns)"
+    continuation="$(printf '%*s' "${#prefix}" '')"
     width=$((columns - ${#prefix}))
     ((width >= 12)) || width=12
     while IFS= read -r line || [[ -n "$line" ]]; do
-        if ((first)); then
-            printf '%s%s\n' "$prefix" "$line"
-            first=0
-        else
-            printf '%*s%s\n' "${#prefix}" '' "$line"
-        fi
-    done < <(printf '%s\n' "$label" | fold -s -w "$width")
+        if ((first)); then printf '%s%s\n' "$prefix" "$line"; first=0
+        else printf '%s%s\n' "$continuation" "$line"; fi
+    done < <(printf '%s\n' "$text" | expand -t 4 | fold -s -w "$width")
+}
+print_menu_item() {
+    wrap_prefixed_line "[$1] " "$2"
 }
 choose_index() {
     local title="$1" answer i=0; shift
     ((${#@})) || { echo "No choices for $title" >&2; return 1; }
-    echo; echo "$title"; echo
+    echo; wrap_line "$title"; echo
     for label in "$@"; do print_menu_item "$i" "$label"; i=$((i+1)); done
     while :; do
-        read -rp 'Select: ' answer || return 1
-        [[ "$answer" =~ ^[0-9]+$ && ${#answer} -le 9 ]] || { echo 'Enter a listed number.'; continue; }
+        read -r -p 'Select: ' answer || return 1
+        [[ "$answer" =~ ^[0-9]+$ && ${#answer} -le 9 ]] || { wrap_line 'Enter a listed number.'; continue; }
         number=$((10#$answer))
         ((number < i)) && return 0
-        echo 'Enter a listed number.'
+        wrap_line 'Enter a listed number.'
     done
 }
 ARGS=(-t warning -y overlay -m 'Choose card, then playback profile')
@@ -217,21 +236,26 @@ wait "$SWAYNAG_PID" 2>/dev/null || true
 selected="$(cat "$CARD_SELECTION_FILE")"
 case "$selected" in
  audio-services)
-    echo; echo 'Audio services'; echo
-    print_menu_item 0 'Audio stop / start (toggle)'
-    print_menu_item 1 'Restart CamillaDSP'
-    print_menu_item 2 'Restart SonoBus'
-    print_menu_item 3 'Restart AirPlay'
-    print_menu_item 4 'Restart VNC'
-    while :; do
-        read -rp 'Select service action [0-4]: ' number || exit 0
-        [[ "$number" =~ ^[0-4]$ ]] && break
-        echo 'Enter 0, 1, 2, 3 or 4.'
-    done
+    choose_index 'Audio services' \
+        'Audio stop / start (toggle)' \
+        'Restart CamillaDSP' \
+        'Restart SonoBus' \
+        'Restart AirPlay' \
+        'Restart VNC' || exit 0
     flock -u 9
-    if [[ "$number" == 0 ]]; then python3 "$TOPOLOGY_SCRIPT" --audio-toggle
-    else python3 "$TOPOLOGY_SCRIPT" --restart-service "$number"; fi
-    exit $? ;;
+    if [[ "$number" == 0 ]]; then
+        run_quiet_action python3 "$TOPOLOGY_SCRIPT" --audio-toggle || exit $?
+        wrap_line 'Audio stop/start toggled.'
+    else
+        run_quiet_action python3 "$TOPOLOGY_SCRIPT" --restart-service "$number" || exit $?
+        case "$number" in
+            1) echo 'CamillaDSP restarted.' ;;
+            2) echo 'SonoBus restarted.' ;;
+            3) echo 'AirPlay restarted.' ;;
+            4) echo 'VNC restarted.' ;;
+        esac
+    fi
+    exit 0 ;;
  select-filter)
     profiles="$(python3 "$TOPOLOGY_SCRIPT" --dsp-profiles)" || exit 1
     info="$(python3 "$TOPOLOGY_SCRIPT" --dsp-filter-info)" || exit 1
@@ -241,17 +265,26 @@ case "$selected" in
     for filter in "${filters[@]}"; do
         labels+=("$(jq -r --arg f "$filter" '.[$f].label // $f' <<<"$info")")
     done
-    echo; echo 'CamillaDSP listening filter'; echo
-    for i in "${!labels[@]}"; do print_menu_item "$((i+1))" "${labels[i]}"; done
-    while :; do
-        read -rp 'Select CamillaDSP filter: ' answer || exit 0
-        [[ "$answer" =~ ^[0-9]+$ && ${#answer} -le 9 ]] || { echo 'Enter a listed number.'; continue; }
-        ((10#$answer >= 1 && 10#$answer <= ${#filters[@]})) && break
-        echo 'Enter a listed number.'
-    done
+    current_filter="$(python3 "$TOPOLOGY_SCRIPT" --selected-filter 2>/dev/null || true)"
+    current_label="$(jq -r --arg f "$current_filter" '.[$f].label // $f' <<<"$info")"
+    if ! printf '%s\n' "${filters[@]}" | grep -Fqx -- "$current_filter"; then
+        echo 'The currently selected filter is not available.' >&2
+        exit 1
+    fi
+    filter_choices=("Currently selected filter ($current_label)" "${labels[@]}")
+    choose_index 'CamillaDSP listening filter' "${filter_choices[@]}" || exit 0
+    answer="$number"
+    if ((number == 0)); then
+        selected_filter="$current_filter"
+        selected_label="$current_label"
+    else
+        selected_filter="${filters[$((10#$answer-1))]}"
+        selected_label="${labels[$((10#$answer-1))]}"
+    fi
     flock -u 9
-    python3 "$TOPOLOGY_SCRIPT" --select-filter "${filters[$((10#$answer-1))]}"
-    exit $? ;;
+    run_quiet_action python3 "$TOPOLOGY_SCRIPT" --select-filter "$selected_filter" || exit $?
+    echo "Listening filter applied: $selected_label"
+    exit 0 ;;
 esac
 [[ "$selected" =~ ^[0-9]+$ ]] && ((selected < ${#CARDS[@]})) || { echo 'Invalid device selection' >&2; exit 1; }
 card="${CARDS[selected]%%$'\t'*}"
@@ -316,4 +349,7 @@ fi
 request="$(jq -nc --arg card "$card" --arg profile "$profile" --arg port "$route" --arg sink "$sink" '{card:$card,profile:$profile,port:$port,sink:$sink}')"
 # The running server serializes the entire pause -> output -> normalize -> resume.
 flock -u 9
-python3 "$TOPOLOGY_SCRIPT" --switch-output "$request"
+run_quiet_action python3 "$TOPOLOGY_SCRIPT" --switch-output "$request" || exit $?
+result_line="Playback output applied: $card_label"
+[[ -n "${last_sink_label:-}" && "$sink" == "${last_sink:-}" ]] && result_line+=" / $last_sink_label"
+wrap_line "$result_line"

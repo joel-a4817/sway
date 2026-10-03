@@ -2694,6 +2694,8 @@ def topology_cli():
             print(json.dumps([NO_FILTER]+[item.name for item in profiles()],ensure_ascii=False));return
         if len(sys.argv)==2 and sys.argv[1]=='--dsp-filter-info':
             print(json.dumps(listening_filters(),ensure_ascii=False));return
+        if len(sys.argv)==2 and sys.argv[1]=='--selected-filter':
+            print(selected_filter());return
         if len(sys.argv)==3 and sys.argv[1]=='--remember-output':
             route=json.loads(sys.argv[2]);
             if not isinstance(route,dict) or not all(isinstance(route.get(key),str) and route[key] for key in ('card','profile','sink')):raise ValueError('Invalid output route')
