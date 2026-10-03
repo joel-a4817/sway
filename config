@@ -54,7 +54,7 @@ for_window [app_id="$term" title="^$popup-f-hardware"] floating enable, resize s
 for_window [app_id="$term" title="^$popup-wifi-select"] floating enable, resize set 1000 1000, move position center
 for_window [app_id="$term" title="^$popup-wifi-toggle"] floating enable, resize set 1200 300, move position center
 for_window [app_id="$term" title="^$popup-wifi-status"] floating enable, resize set 1500 1000, move position center
-for_window [app_id="$term" title="^$popup-audio-switch"] floating enable, resize set 1050 750,  move position center
+for_window [app_id="$term" title="^$popup-audio-control"] floating enable, resize set 1050 750,  move position center
 
 for_window [app_id="yazi-nvim"] floating enable, move position center, resize set 1000 700, opacity 0.85, mark --add opacity-dimmed
 
@@ -71,7 +71,7 @@ for_window [title="Collabora Office*"] opacity 0.85, mark --add opacity-dimmed
 for_window [app_id="discord"] opacity 0.85, mark --add opacity-dimmed
 for_window [app_id="Antra"] opacity 0.85, mark --add opacity-dimmed
 
-bindsym $mod+F6 exec ~/.config/sway/scripts/windows/toggle-opacity.sh
+bindsym --no-repeat $mod+F6 exec ~/.config/sway/scripts/windows/toggle-opacity.sh
 
 ### Input configuration
    input type:touchpad {
@@ -169,7 +169,7 @@ bindsym --no-repeat $mod+Control+a fullscreen disable; exec $term -T "$popup-f-a
 bindsym --no-repeat $mod+F5 exec bash -c '~/.config/sway/scripts/screen-capture.sh'
 
 #audio device output switch
-bindsym --no-repeat $mod+F7 fullscreen disable; exec $term -T "$popup-audio-switch" -e bash -c '~/.config/sway/scripts/audio-switch.sh'
+bindsym --no-repeat $mod+F7 fullscreen disable; exec $term -T "$popup-audio-control" -e bash -c '~/.config/sway/scripts/audio-control.sh'
 
 #mount dev
 bindsym --no-repeat $mod+F8 fullscreen disable; exec $term -T "$popup-mount" -e bash -c '/home/joel/.config/sway/scripts/mount/mount-swaynag.sh'
@@ -217,7 +217,7 @@ bindsym --locked --no-repeat $mod+F4 exec bash -c '~/.config/sway/scripts/rotati
 
     # Reload the configuration file
 
-bindsym $mod+Shift+c exec ~/.config/sway/scripts/rotation/rotation-restore.sh
+bindsym --no-repeat --locked $mod+Shift+c exec ~/.config/sway/scripts/rotation/rotation-restore.sh
 
     # system off options
     bindsym --no-repeat $mod+F12 exec bash -c "~/.config/sway/scripts/device-off.sh"
@@ -261,16 +261,16 @@ bindsym $mod+Shift+c exec ~/.config/sway/scripts/rotation/rotation-restore.sh
     bindsym $mod+9 workspace number 9
     bindsym $mod+0 workspace number 10
     # Move focused container to workspace
-    bindsym $mod+Shift+1 move container to workspace number 1
-    bindsym $mod+Shift+2 move container to workspace number 2
-    bindsym $mod+Shift+3 move container to workspace number 3
-    bindsym $mod+Shift+4 move container to workspace number 4
-    bindsym $mod+Shift+5 move container to workspace number 5
-    bindsym $mod+Shift+6 move container to workspace number 6
-    bindsym $mod+Shift+7 move container to workspace number 7
-    bindsym $mod+Shift+8 move container to workspace number 8
-    bindsym $mod+Shift+9 move container to workspace number 9
-    bindsym $mod+Shift+0 move container to workspace number 10
+    bindsym --no-repeat $mod+Shift+1 move container to workspace number 1
+    bindsym --no-repeat $mod+Shift+2 move container to workspace number 2
+    bindsym --no-repeat $mod+Shift+3 move container to workspace number 3
+    bindsym --no-repeat $mod+Shift+4 move container to workspace number 4
+    bindsym --no-repeat $mod+Shift+5 move container to workspace number 5
+    bindsym --no-repeat $mod+Shift+6 move container to workspace number 6
+    bindsym --no-repeat $mod+Shift+7 move container to workspace number 7
+    bindsym --no-repeat $mod+Shift+8 move container to workspace number 8
+    bindsym --no-repeat $mod+Shift+9 move container to workspace number 9
+    bindsym --no-repeat $mod+Shift+0 move container to workspace number 10
     # Note: workspaces can have any name you want, not just numbers.
     # We just use 1-10 as the default.
 #
@@ -278,24 +278,24 @@ bindsym $mod+Shift+c exec ~/.config/sway/scripts/rotation/rotation-restore.sh
 #
     # $mod+b or $mod+v, for horizontal and vertical splits
     # respectively.
-    bindsym $mod+b splith
-    bindsym $mod+v splitv
+    bindsym --no-repeat $mod+b splith
+    bindsym --no-repeat $mod+v splitv
 
     # Switch the current container between different layout styles
-    bindsym $mod+s layout stacking
-    bindsym $mod+w layout tabbed
-    bindsym $mod+e layout toggle split
+    bindsym --no-repeat $mod+s layout stacking
+    bindsym --no-repeat $mod+w layout tabbed
+    bindsym --no-repeat $mod+e layout toggle split
 
     # Make the current focus fullscreen
-    bindsym $mod+f fullscreen toggle  
+    bindsym --no-repeat $mod+f fullscreen toggle  
 
     # Toggle the current focus between tiling and floating mode
     bindsym --no-repeat $mod+Shift+space exec ~/.config/sway/scripts/windows/smart-floating-toggle.sh
     # Swap focus between the tiling area and the floating area
-    bindsym $mod+space focus mode_toggle
+    bindsym --no-repeat $mod+space focus mode_toggle
 
     # Move focus to the parent container
-    bindsym $mod+a focus parent
+    bindsym --no-repeat $mod+a focus parent
 #
 # Scratchpad:
 #
@@ -305,7 +305,7 @@ bindsym $mod+Shift+c exec ~/.config/sway/scripts/rotation/rotation-restore.sh
 
     # Show the next scratchpad window or hide the focused scratchpad window.
     # If there are multiple scratchpad windows, this command cycles through them.
-    bindsym $mod+minus scratchpad show
+    bindsym --no-repeat $mod+minus scratchpad show
 #
 # Resizing containers:
 #
@@ -330,11 +330,11 @@ bindsym --no-repeat $mod+r mode "resize"
 #
 # Utilities:
 #
-    # Special keys to adjust volume via PulseAudio
-     bindsym --locked XF86AudioMute exec pactl set-sink-mute @DEFAULT_SINK@ toggle
-     bindsym --locked XF86AudioLowerVolume exec pactl set-sink-volume @DEFAULT_SINK@ -5%
-     bindsym --locked XF86AudioRaiseVolume exec pactl set-sink-volume @DEFAULT_SINK@ +5%
-     bindsym --locked XF86AudioMicMute exec pactl set-source-mute @DEFAULT_SOURCE@ toggle
+    # Special keys to adjust volume via WirePlumber
+    bindsym --locked --no-repeat XF86AudioMute exec sh -c 'wpctl set-mute @DEFAULT_SINK@ toggle || exit; if wpctl get-volume @DEFAULT_SINK@ | grep -q "\[MUTED\]"; then amixer -q -c sofhdadsp sset Master mute; else amixer -q -c sofhdadsp sset Master unmute; fi'
+    bindsym --locked XF86AudioLowerVolume exec wpctl set-volume @DEFAULT_SINK@ 5%-
+    bindsym --locked XF86AudioRaiseVolume exec wpctl set-volume @DEFAULT_SINK@ 5%+
+    bindsym --locked --no-repeat XF86AudioMicMute exec sh -c 'wpctl set-mute @DEFAULT_SOURCE@ toggle || exit; if wpctl get-volume @DEFAULT_SOURCE@ | grep -q "\[MUTED\]"; then amixer -q -c sofhdadsp sset Capture nocap; else amixer -q -c sofhdadsp sset Capture cap; fi'
     # Special keys to adjust brightness via brightnessctl
      bindsym --locked XF86MonBrightnessDown exec brightnessctl set 5%-
      bindsym --locked XF86MonBrightnessUp exec brightnessctl set 5%+
