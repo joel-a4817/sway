@@ -261,12 +261,24 @@ case "$selected" in
     info="$(python3 "$TOPOLOGY_SCRIPT" --dsp-filter-info)" || exit 1
     mapfile -t filters < <(jq -r '.[] | select((ascii_downcase|contains("cmf"))|not)' <<<"$profiles")
     ((${#filters[@]})) || { echo 'No listening filters found.' >&2; exit 1; }
+    filter_device_label() {
+        local filter="$1" room_label="$2" key
+        key="${filter,,}"
+        case "$key" in
+            *cloud3*) printf 'HyperX Cloud III | %s\n' "$room_label" ;;
+            *earpods*) printf 'Apple EarPods | %s\n' "$room_label" ;;
+            *filterless*) printf '%s\n' "$room_label" ;;
+            *) printf '%s\n' "$room_label" ;;
+        esac
+    }
     labels=()
     for filter in "${filters[@]}"; do
-        labels+=("$(jq -r --arg f "$filter" '.[$f].label // $f' <<<"$info")")
+        room_label="$(jq -r --arg f "$filter" '.[$f].label // $f' <<<"$info")"
+        labels+=("$(filter_device_label "$filter" "$room_label")")
     done
     current_filter="$(python3 "$TOPOLOGY_SCRIPT" --selected-filter 2>/dev/null || true)"
-    current_label="$(jq -r --arg f "$current_filter" '.[$f].label // $f' <<<"$info")"
+    current_room_label="$(jq -r --arg f "$current_filter" '.[$f].label // $f' <<<"$info")"
+    current_label="$(filter_device_label "$current_filter" "$current_room_label")"
     if ! printf '%s\n' "${filters[@]}" | grep -Fqx -- "$current_filter"; then
         echo 'The currently selected filter is not available.' >&2
         exit 1
@@ -283,7 +295,7 @@ case "$selected" in
     fi
     flock -u 9
     run_quiet_action python3 "$TOPOLOGY_SCRIPT" --select-filter "$selected_filter" || exit $?
-    echo "Listening filter applied: $selected_label"
+    wrap_line "Listening filter applied: $selected_label"
     exit 0 ;;
 esac
 [[ "$selected" =~ ^[0-9]+$ ]] && ((selected < ${#CARDS[@]})) || { echo 'Invalid device selection' >&2; exit 1; }
