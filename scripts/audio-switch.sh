@@ -476,10 +476,11 @@ fi
 wait_for_sink "$PHYSICAL_SINK" || { echo "Output disappeared before monitor start: $PHYSICAL_SINK"; exit 1; }
 if [[ "$DSP_PROFILE" == __no_filter__ ]]; then
     stop_monitor
-    # The user service otherwise reselects camilladsp after a delayed startup.
     systemctl --user stop camilladsp-system-audio.service >>"$ACTION_LOG" 2>&1 || fail 'Could not stop DSP default-sink selector'
-    pactl set-default-sink "$PHYSICAL_SINK" >>"$ACTION_LOG" 2>&1 || fail 'Could not select direct physical sink'
+    pactl set-default-sink "$PHYSICAL_SINK" >>"$ACTION_LOG" 2>&1 || fail 'Could not select physical sink'
     move_application_inputs_to "$PHYSICAL_SINK"
+    start_bypass || fail 'No-filter bridge did not start'
+    start_local_monitor "$PHYSICAL_SINK" || fail 'No-filter playback monitor did not start'
 else
     if ! start_local_monitor "$PHYSICAL_SINK"; then
         echo "Local playback monitor failed. See: $ACTION_LOG"

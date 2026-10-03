@@ -442,20 +442,28 @@ def restart_airplay():
 def switch_profile(name):
     with LOCK:
         if name==NO_FILTER:
-            if not STOPPED.exists():
-                stop_local_monitor()
-                stop_camilla(include_stale=True)
+            if STOPPED.exists():
+                ACTIVE.write_text(NO_FILTER+'\n')
+                return {'profile':NO_FILTER,'pid':None,'mode':mode_state()}
+            local=MODES[audio_mode()][2]
+            route=choose_output_route(saved_output_route()) if local else None
+            stop_local_monitor()
+            stop_camilla(include_stale=True)
+            try:
+                start_bypass()
                 if audio_mode()=='laptop_laptop':
-                    if run(['systemctl','--user','is-active','--quiet',SYSTEM_AUDIO_SERVICE],False,5).returncode==0:
-                        user_service('stop',SYSTEM_AUDIO_SERVICE)
-                    stop_bypass()
-                    direct_no_filter(choose_output_route(saved_output_route()))
-                else:
-                    start_bypass()
-                    if MODES[audio_mode()][2] and saved_output_route().get('sink'):
-                        start_local_monitor()
-            ACTIVE.write_text(NO_FILTER+'\n')
-            if not STOPPED.exists():normalize_with_media()
+                    user_service('stop',SYSTEM_AUDIO_SERVICE)
+                    direct_no_filter(route)
+                elif MODES[audio_mode()][1]=='system':
+                    restore_dsp_desktop_sink()
+                if local:start_local_monitor(route,resolved=True)
+                ACTIVE.write_text(NO_FILTER+'\n')
+                normalize_with_media()
+            except Exception:
+                # Do not report No filter if its bridge/monitor never came up.
+                stop_local_monitor()
+                stop_bypass()
+                raise
             return {'profile':NO_FILTER,'pid':None,'mode':mode_state()}
         target=profile(name)
         validate_camilla_profile(target)
@@ -464,6 +472,7 @@ def switch_profile(name):
         if alive(rpid(BYPASSPID)):
             stop_local_monitor();stop_bypass()
         if was_bypass and not STOPPED.exists():
+            stop_local_monitor()
             started=start_camilla(target)
             if MODES[audio_mode()][1]=='system':restore_dsp_desktop_sink()
             if MODES[audio_mode()][2]:restore_selected_local_output()
@@ -604,7 +613,7 @@ def camilla_command(command):
 
 def sync_mpv_master(value):
     if not (alive(rpid(MPVPID),'mpv') and MPVSOCK.exists()):return
-    try:mpv_direct(['set_property','volume',float(value)])
+    try:mpv_direct(['set_property','volume',100.0 if selected_filter()==NO_FILTER and not STOPPED.exists() else float(value)])
     except (OSError,RuntimeError,ValueError) as error:
         raise RuntimeError(f'Could not sync MPV to saved master: {error}') from error
 
@@ -937,7 +946,7 @@ def stop_mpv():
 def ensure_mpv():
     if alive(rpid(MPVPID),'mpv') and MPVSOCK.exists():return
     stop_mpv();log=MPVLOG.open('ab',buffering=0)
-    cmd=[exe('mpv'),'--idle=yes','--no-video','--no-terminal','--keep-open=no','--ao=alsa','--audio-device=alsa/camilladsp_input','--audio-samplerate=96000','--audio-channels=stereo','--audio-format=s32',f'--input-ipc-server={MPVSOCK}',f'--volume={master_volume():.2f}','--volume-max=100']
+    cmd=[exe('mpv'),'--idle=yes','--no-video','--no-terminal','--keep-open=no','--ao=alsa','--audio-device=alsa/camilladsp_input','--audio-samplerate=96000','--audio-channels=stereo','--audio-format=s32',f'--input-ipc-server={MPVSOCK}',f'--volume={(100.0 if selected_filter()==NO_FILTER and not STOPPED.exists() else master_volume()):.2f}','--volume-max=100']
     try:q=subprocess.Popen(cmd,stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
     finally:log.close()
     MPVPID.write_text(f'{q.pid}\n');deadline=time.monotonic()+5
@@ -1757,9 +1766,7 @@ def apply_mode(name,password=None,restore_camilla=True,output=None,normalize=Tru
     direct=(selected_filter()==NO_FILTER and source=='system' and not sono and local)
     if selected_filter()==NO_FILTER:
         if alive(rpid(CAMPID),'camilladsp'):stop_camilla(include_stale=True)
-        if direct:
-            stop_local_monitor();stop_bypass()
-        else:start_bypass()
+        start_bypass()
     elif restore_camilla and not alive(rpid(CAMPID),'camilladsp'):
         try:saved=ACTIVE.read_text().strip()
         except OSError:saved=''
@@ -1773,14 +1780,10 @@ def apply_mode(name,password=None,restore_camilla=True,output=None,normalize=Tru
         user_service('stop',SYSTEM_AUDIO_SERVICE)
     if local:
         selected=output if output_resolved else choose_output_route(output)
-        if direct:
-            direct_no_filter(selected)
-            remember_output(selected)
-            _write_json(LOCALSINK,selected)
+        if direct:direct_no_filter(selected)
         current=saved_output_route()
         wanted={key:selected[key] for key in ('card','profile','sink','port')}
-        if not direct:
-            start_local_monitor(selected,resolved=True)
+        start_local_monitor(selected,resolved=True)
     elif alive(rpid(LOCALMONPID)):stop_local_monitor()
     if sono:
         if not sonobus_matches(policy):restart_sonobus(password,policy,normalize=False)
@@ -2182,7 +2185,7 @@ def start_runtime(force=False):
     # Reuse a verified surviving engine; never start a competing instance.
     if saved==NO_FILTER:
         stop_camilla(include_stale=True)
-        if MODES[audio_mode()][1]!='system' or MODES[audio_mode()][3]:start_bypass()
+        start_bypass()
     elif not alive(rpid(CAMPID),'camilladsp'):
         stop_camilla(include_stale=True)
         start_camilla(selected)
