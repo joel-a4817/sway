@@ -49,7 +49,7 @@ switch_process() {
     # The script must be Bash's script operand, not a path in unrelated arguments.
     arg="${args[1]:-}"
     [[ "$arg" == "$SCRIPT_PATH" ]] && return 0
-    [[ "$arg" == */audio-switch.sh || "$arg" == audio-switch.sh ]] || return 1
+    [[ "$arg" == */audio-control.sh || "$arg" == audio-control.sh || "$arg" == */audio-switch.sh || "$arg" == audio-switch.sh ]] || return 1
     [[ "$(readlink -f -- "$arg" 2>/dev/null)" == "$SCRIPT_PATH" ]]
 }
 process_start() {
@@ -133,9 +133,11 @@ handle_script_exit() {
     (( EXIT_HANDLER_RUNNING )) && return
     EXIT_HANDLER_RUNNING=1
     trap - EXIT INT TERM HUP QUIT
-    if (( status != 0 && ! FINAL_PAUSE_REACHED && ! ${REPLACED:-0} )); then
-        echo; echo "Audio script exited unexpectedly."; echo "Exit status: $status"
-        [[ -s "$ACTION_LOG" ]] && { echo; echo "Action log:"; echo "$ACTION_LOG"; echo; tail -n 45 "$ACTION_LOG"; }
+    if (( ! FINAL_PAUSE_REACHED && ! ${REPLACED:-0} )); then
+        if (( status != 0 )); then
+            echo; echo "Audio script exited unexpectedly."; echo "Exit status: $status"
+            [[ -s "$ACTION_LOG" ]] && { echo; echo "Action log:"; echo "$ACTION_LOG"; echo; tail -n 45 "$ACTION_LOG"; }
+        fi
         pause_before_close
     fi
     end_media_change
@@ -154,6 +156,14 @@ trap 'exit 131' QUIT
 end_media_change() { :; }
 TOPOLOGY_SCRIPT="$HOME_DIR/.config/sway/scripts/network/camilladsp-server-sonobus.py"
 [[ -f "$TOPOLOGY_SCRIPT" ]] || { echo "Missing paired server: $TOPOLOGY_SCRIPT" >&2; exit 1; }
+# Opening Audio Control itself runs the requested normalization transaction.
+# The server pauses only currently-playing media, restores the saved master,
+# then resumes only that snapshot before the menu appears.
+if ! python3 "$TOPOLOGY_SCRIPT" --normalize-menu-open >>"$ACTION_LOG" 2>&1; then
+    echo 'Audio normalization failed while opening Audio Control.' >&2
+    tail -n 25 "$ACTION_LOG" >&2
+    exit 1
+fi
 output_topology() { python3 "$TOPOLOGY_SCRIPT" --output-topology; }
 # Selection does not pause or mutate. The server owns pause, routing,
 # normalization, and resume as one transaction after the final choice.
@@ -270,7 +280,10 @@ if ((${#routes[@]})); then
         labels+=("$(jq -r --arg n "$card" --arg r "$r" '.cards[]|select(.name==$n)|.routes[]|select((.index|tostring)==$r)|.label' <<<"$TOPOLOGY_JSON")")
     done
     choose_index 'Output route' "${labels[@]}" || exit 0
-    if ((number>0)); then route="${routes[number-1]}"; fi
+    if ((number>0)); then route="${routes[number-1]}";
+    elif [[ "$profile" != "$active" ]]; then
+        echo 'Choose an output route for the new profile (0 cannot keep the old route).' >&2; exit 1
+    fi
 fi
 # 0 means keep the actual current output, not cancel or auto-pick.
 saved="$(jq -r '.saved.sink // empty' <<<"$TOPOLOGY_JSON")"
@@ -281,7 +294,7 @@ if [[ "$profile" == "$active" ]]; then
     if [[ -n "$saved" ]] && printf '%s\n' "${sinks[@]}" | grep -Fqx -- "$saved"; then
         current_label="$(jq -r --arg n "$card" --arg s "$saved" '.cards[]|select(.name==$n)|.sinks[]|select(.name==$s)|.label' <<<"$TOPOLOGY_JSON")"
         labels+=("Keep current output ($current_label)")
-    else labels+=('No current output to keep (choose a numbered sink)'); fi
+    else labels+=('Keep current output (unavailable; choose a sink)'); fi
     for x in "${sinks[@]}"; do
         labels+=("$(jq -r --arg n "$card" --arg s "$x" '.cards[]|select(.name==$n)|.sinks[]|select(.name==$s)|.label' <<<"$TOPOLOGY_JSON")")
     done

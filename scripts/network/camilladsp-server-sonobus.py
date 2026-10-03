@@ -525,19 +525,24 @@ def media_change(resume=True):
     if getattr(MEDIA_TRANSACTION,'active',False):
         yield
         return
-    already_stopped=PAUSED_MEDIA.exists()
+    # A stale stop snapshot must never suppress Pause while audio is running.
+    already_stopped=STOPPED.exists()
     snapshot={'mpv':None,'mpris':[],'external':None} if already_stopped else pause_for_normalization()
     MEDIA_TRANSACTION.active=True
     completed=False
     try:
         yield
+        # The transaction owns its final gain pass. Nothing can resume until
+        # every route/service operation and master restoration has completed.
+        if not STOPPED.exists():normalize_audio_volumes()
         completed=True
     finally:
         MEDIA_TRANSACTION.active=False
-        if resume:
-            if not already_stopped and completed:
-                # Resume only after the command and normalization succeed.
-                resume_after_normalization(snapshot)
+        if resume and completed and not already_stopped:
+            # Last step, after the action and its normalization succeeded.
+            # A failed action keeps its paused playback rather than resuming
+            # onto a potentially incomplete output graph.
+            resume_after_normalization(snapshot)
 
 def media_transaction(function):
     @wraps(function)
@@ -791,7 +796,8 @@ def pause_for_normalization():
         try:
             if mpv_direct(['get_property','pause']) is False:
                 mpv_direct(['set_property','pause',True])
-                snapshot['mpv']=rpid(MPVPID)
+                if mpv_direct(['get_property','pause']) is True:
+                    snapshot['mpv']=rpid(MPVPID)
         except (OSError,ValueError,RuntimeError):pass
     external=Path('/tmp/mpvsocket')
     external_owner=None
@@ -814,11 +820,16 @@ def pause_for_normalization():
     except (OSError,RuntimeError,subprocess.TimeoutExpired):players=[]
     for player in players:
         try:
-            if snapshot['mpv'] and 'mpv' in player.lower():continue
-            if mpris_status(player)=='Playing':
-                result=run([exe('playerctl'),'--player',player,'pause'],False,5,media_env())
-                if result.returncode==0:snapshot['mpris'].append(player)
-        except (OSError,RuntimeError,subprocess.TimeoutExpired):pass
+            if mpris_status(player)!='Playing':continue
+            result=run([exe('playerctl'),'--player',player,'pause'],False,5,media_env())
+            if result.returncode==0:
+                # MPRIS Pause is a request. PlaybackStatus can lag the reply;
+                # never reject a route change because an immediate read still
+                # says Playing. Resume checks Paused at the very end.
+                snapshot['mpris'].append(player)
+        except (OSError,RuntimeError,subprocess.TimeoutExpired):
+            # An unsupported or vanished player must not abort a working route.
+            continue
     return snapshot
 def resume_after_normalization(snapshot):
     # Resume only players paused by this normalization transaction.
@@ -880,19 +891,31 @@ def resume_after_audio_start(snapshot):
 
 @contextmanager
 def audio_start_change():
+    # Start Audio is intentionally pause-only: establish services and routes,
+    # normalize after they are ready, then leave all playback paused.
     pause_for_audio_stop()
+    MEDIA_TRANSACTION.starting=True
     try:
         yield
-    except Exception:
-        # Preserve the original snapshot for a later successful start.
-        raise
-    else:
         if not STOPPED.exists():
-            resume_after_audio_start({'mpv':None,'mpris':[],'external':None})
+            normalize_audio_volumes()
+            PAUSED_MEDIA.unlink(missing_ok=True)
+    except Exception:
+        # Preserve the snapshot for a later successful start attempt.
+        raise
+    finally:
+        MEDIA_TRANSACTION.starting=False
 
 def normalize_with_media():
-    # Gain-only operation. The caller owns pause/resume across the whole change.
-    with LOCK:return normalize_audio_volumes()
+    # An existing transaction keeps its one snapshot. Standalone normalize
+    # owns pause -> gains -> saved master -> resume in the same server process.
+    with LOCK:
+        if getattr(MEDIA_TRANSACTION,'active',False) or getattr(MEDIA_TRANSACTION,'starting',False) or PAUSED_MEDIA.exists():
+            # The owning output/filter/start transaction runs the final pass.
+            return {'deferred':'normalization belongs to active transaction'}
+        with media_change():
+            # media_change runs normalization before its final resume.
+            return {'normalized':True}
 
 def normalize_audio_volumes():
     # Normalize live gain stages to 0 dB, then restore the saved master.
@@ -1178,7 +1201,13 @@ def player_state():
 def mpris_players():
     r=run([exe('playerctl'),'--list-all'],False,5,media_env())
     # PC Music belongs to its own controls, even if mpv is exposed over MPRIS.
-    return [p for x in r.stdout.splitlines() if (p:=x.strip()) and p!='playerctld' and p.split('.',1)[0].casefold()!='mpv']
+    if r.returncode != 0:
+        # No MPRIS players (or a transient D-Bus error) is not an audio
+        # routing failure. Players controlled by MPV IPC were handled above.
+        return []
+    # Include external MPV MPRIS instances. The server-owned MPV is already
+    # paused above, so its MPRIS status will no longer be Playing.
+    return [p for x in r.stdout.splitlines() if (p:=x.strip()) and p!='playerctld']
 def mpris_status(p):
     r=run([exe('playerctl'),'--player',p,'status'],False,5,media_env());return r.stdout.strip() if r.returncode==0 else ''
 def active_mpris(with_status=False):
@@ -1661,14 +1690,16 @@ def _device_options(item):
     profiles=[{'index':int(row['index']),'name':str(row.get('name') or ''),
                'label':str(row.get('description') or row.get('name') or ''),
                'available':str(row.get('available','unknown'))}
-              for row in rows('EnumProfile') if isinstance(row,dict) and isinstance(row.get('index'),int)]
+              for row in rows('EnumProfile') if isinstance(row,dict) and isinstance(row.get('index'),int)
+              and str(row.get('name') or '').strip().lower()!='off']
     routes=[{'index':int(row['index']),'name':str(row.get('name') or ''),
              'label':str(row.get('description') or row.get('name') or ''),
              'available':str(row.get('available','unknown')),
              'profiles':row.get('profiles') if isinstance(row.get('profiles'),list) else [],
              'devices':row.get('devices') if isinstance(row.get('devices'),list) else []}
             for row in rows('EnumRoute') if isinstance(row,dict)
-            and isinstance(row.get('index'),int) and str(row.get('direction')).lower()=='output']
+            and isinstance(row.get('index'),int) and str(row.get('direction')).lower()=='output'
+            and str(row.get('name') or '').strip().lower() not in ('off','[out] off')]
     current=next((row for row in rows('Profile') if isinstance(row,dict)),{})
     active_routes=[int(row['index']) for row in rows('Route')
                    if isinstance(row,dict) and isinstance(row.get('index'),int)
@@ -1730,7 +1761,7 @@ def _profile_choice(card,value):
     try:index=int(value)
     except (TypeError,ValueError):raise ValueError('Select a valid device profile')
     row=next((p for p in card['profiles'] if p['index']==index and p['available']!='no'),None)
-    if row is None:raise ValueError('Profile is unavailable for this device')
+    if row is None or row['name'].strip().lower()=='off':raise ValueError('Playback profile is unavailable for this device')
     return row
 
 def _route_choice(card,value,profile_index=None):
@@ -1861,7 +1892,7 @@ def activate_output(request,mode='laptop_laptop',password=None):
                         try:default=pw_default()
                         except RuntimeError:default=''
                         chosen=next((row for row in candidates if row['name']==default),None)
-                    if chosen is None and candidates:
+                    if chosen is None and candidates and not request.get('sink'):
                         nodes={pw_props(node).get('node.name'):pw_props(node)
                                for node in pw_objects('Node',pw_graph())}
                         def rank(row):
@@ -2516,7 +2547,6 @@ def toggle_audio_services():
         if STOPPED.exists():
             with audio_start_change():
                 start_runtime(force=True)
-                normalize_with_media()
                 STOPPED.unlink(missing_ok=True)
         else:
             stop_audio_services()
@@ -2614,7 +2644,6 @@ def main():
     else:
         with media_change():
             start_runtime()
-            normalize_with_media()
     threading.Thread(target=watch_master_volume,args=(watcher_stop,),daemon=True).start()
     server=S(('0.0.0.0',PORT),H);SERVERPID.write_text(str(me)+'\n');STOP_CAP.write_text(str(me)+'\n')
     fcntl.flock(startup_lock,fcntl.LOCK_UN)
@@ -2697,17 +2726,13 @@ def topology_cli():
             path=SWITCH_STATE/('media-pause-'+token+'.json')
             snapshot=json.loads(path.read_text())
             path.unlink()
+            if not STOPPED.exists():normalize_audio_volumes()
             resume_after_normalization(snapshot)
             print(json.dumps({'resumed':True}));return
         if len(sys.argv)==2 and sys.argv[1]=='--normalize-menu-open':
             if STOPPED.exists():
                 print(json.dumps({'skipped':'audio stopped'}));return
-            snapshot=pause_for_normalization()
-            try:result=normalize_with_media()
-            finally:
-                if PAUSED_MEDIA.exists():resume_after_audio_start(snapshot)
-                else:resume_after_normalization(snapshot)
-            print(json.dumps(result));return
+            print(json.dumps(normalize_with_media()));return
         if len(sys.argv)==2 and sys.argv[1]=='--normalize-audio':
             print(json.dumps(normalize_with_media()));return
         if len(sys.argv)==3 and sys.argv[1]=='--profile-path':
