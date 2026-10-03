@@ -56,20 +56,20 @@ for_window [app_id="$term" title="^$popup-wifi-toggle"] floating enable, resize 
 for_window [app_id="$term" title="^$popup-wifi-status"] floating enable, resize set 1500 1000, move position center
 for_window [app_id="$term" title="^$popup-audio-switch"] floating enable, resize set 1050 750,  move position center
 
-for_window [app_id="yazi-nvim"] floating enable, move position center, resize set 1000 700, opacity 0.85
+for_window [app_id="yazi-nvim"] floating enable, move position center, resize set 1000 700, opacity 0.85, mark --add opacity-dimmed
 
 for_window [app_id="PrismLauncher"] floating enable, move position center
-for_window [app_id="solaar"] opacity 0.85
-for_window [app_id="ripdrag"] opacity 0.85
-for_window [app_id="glide"] opacity 0.85
-for_window [app_id="anki"] opacity 0.85
-for_window [app_id="signal"] opacity 0.85
-for_window [app_id="$term"] opacity 0.85
-for_window [class="coda-qt"] opacity 0.85
-for_window [title="^Collabora Office"] opacity 0.85
-for_window [title="Collabora Office*"] opacity 0.85
-for_window [app_id="discord"] opacity 0.85
-for_window [app_id="Antra"] opacity 0.85
+for_window [app_id="solaar"] opacity 0.85, mark --add opacity-dimmed
+for_window [app_id="ripdrag"] opacity 0.85, mark --add opacity-dimmed
+for_window [app_id="glide"] opacity 0.85, mark --add opacity-dimmed
+for_window [app_id="anki"] opacity 0.85, mark --add opacity-dimmed
+for_window [app_id="signal"] opacity 0.85, mark --add opacity-dimmed
+for_window [app_id="$term"] opacity 0.85, mark --add opacity-dimmed
+for_window [class="coda-qt"] opacity 0.85, mark --add opacity-dimmed
+for_window [title="^Collabora Office"] opacity 0.85, mark --add opacity-dimmed
+for_window [title="Collabora Office*"] opacity 0.85, mark --add opacity-dimmed
+for_window [app_id="discord"] opacity 0.85, mark --add opacity-dimmed
+for_window [app_id="Antra"] opacity 0.85, mark --add opacity-dimmed
 
 bindsym $mod+F6 exec ~/.config/sway/scripts/windows/toggle-opacity.sh
 
