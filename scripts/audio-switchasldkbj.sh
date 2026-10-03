@@ -39,7 +39,7 @@ menu() {
 TOPOLOGY="$(python3 "$SERVER" --output-topology)"
 mapfile -t CARDS < <(jq -r '.cards[].name' <<<"$TOPOLOGY")
 mapfile -t LABELS < <(jq -r '.cards[].label' <<<"$TOPOLOGY")
-ARGS=(-t warning -y overlay -m 'Choose ALSA playback device')
+ARGS=(-t warning -y overlay -m 'Choose card, then playback profile')
 ARGS+=(-z 'Audio services' "printf '%s' services > $(printf '%q' "$SELECTION")")
 ARGS+=(-z 'CamillaDSP filters' "printf '%s' filters > $(printf '%q' "$SELECTION")")
 for i in "${!CARDS[@]}"; do
@@ -90,13 +90,17 @@ filters)
     [[ "$CHOICE" =~ ^[0-9]+$ ]] && (( CHOICE < ${#CARDS[@]} )) || { echo 'Invalid card selection.' >&2; exit 1; }
     CARD="${CARDS[CHOICE]}"
     echo; echo "Card: ${LABELS[CHOICE]}"
+    # ALSA has one hardware profile per card, unlike PipeWire's selectable profiles.
+    MENU=('ALSA hardware PCM')
+    menu 'Select card playback profile' || { pause_close; exit 0; }
     mapfile -t SINKS < <(jq -r --arg card "$CARD" '.cards[] | select(.name==$card) | .sinks[] | select(.cardName==$card) | .name' <<<"$TOPOLOGY")
     mapfile -t SINK_LABELS < <(jq -r --arg card "$CARD" '.cards[] | select(.name==$card) | .sinks[] | select(.cardName==$card) | .label' <<<"$TOPOLOGY")
     ((${#SINKS[@]})) || { echo 'No playback PCM on selected card.' >&2; exit 1; }
     MENU=("${SINK_LABELS[@]}")
-    menu 'Select ALSA output / UCM route' || { pause_close; exit 0; }
+    menu 'Select playback sink' || { pause_close; exit 0; }
     SINK="${SINKS[PICK]}"
-    REQUEST="$(jq -cn --arg card "$CARD" --arg name "$SINK" '{card:$card,name:$name}')"
+    echo 'Output port: ALSA PCM has no separate PipeWire port.'
+    REQUEST="$(jq -cn --arg card "$CARD" --arg sink "$SINK" '{card:$card,profile:"ALSA",sink:$sink,port:""}')"
     python3 "$SERVER" --apply-laptop-output "$REQUEST"
     ;;
 esac
