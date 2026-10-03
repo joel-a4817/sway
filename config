@@ -122,9 +122,10 @@ bindsym --no-repeat $mod+shift+r fullscreen disable; exec bash -c 'mpv /home/joe
 bindsym --no-repeat $mod+shift+m fullscreen disable; exec bash -c 'mpv /home/joel/Downloads/Music/favourites.m3u'
 bindsym --no-repeat $mod+shift+a fullscreen disable; exec $term -T "$popup-server-ipad" -e bash -c 'trap "" INT; (trap - INT; /home/joel/.config/sway/scripts/network/start-ipad-webremote.sh); echo; read -n 1 -rsp "Press any key to close..."'
 bindsym --no-repeat $mod+shift+b fullscreen disable; exec $term -T "$popup-server-linux" -e bash -c 'trap "" INT; (trap - INT; python3 /home/joel/.config/sway/scripts/network/camilladsp-server-sonobus.py); read -n 1 -rsp "Press any key to close..."'
-bindsym --no-repeat $mod+shift+d fullscreen disable; exec python3 "/home/joel/.config/sway/scripts/network/camilladsp-server-sonobus.py" --toggle-away-display
+bindsym --locked --no-repeat $mod+shift+d fullscreen disable; exec python3 "/home/joel/.config/sway/scripts/network/camilladsp-server-sonobus.py" --toggle-away-display
 bindsym --no-repeat $mod+shift+f fullscreen disable; exec $term -T "$popup-update-a_profiles" -e bash -c 'python3 /home/joel/.config/sway/scripts/updaters/rebuild-camilla.py; echo; read -n 1 -rsp "Press any key to close..."'
-bindsym --no-repeat $mod+shift+w fullscreen disable; exec $term -T "$popup-update-a_profiles" -e bash -c '/home/joel/.config/sway/scripts/network/airplay-hotspot-toggle.sh; echo; read -n 1 -rsp "Press any key to close..."'
+bindsym --no-repeat $mod+shift+g fullscreen disable; exec systemctl suspend
+bindsym --no-repeat $mod+shift+i fullscreen disable; exec $term -T "$popup-update-a_profiles" -e bash -c '/home/joel/.config/sway/scripts/network/airplay-hotspot-toggle.sh; echo; read -n 1 -rsp "Press any key to close..."'
 
 #keybinds app
 bindsym --no-repeat $mod+F2 fullscreen disable; exec $term -T "$popup-tuis" -e clipse
@@ -156,20 +157,19 @@ bindsym --no-repeat $mod+F11 fullscreen disable; exec $term -T "$popup-wifi-togg
 bindsym --no-repeat $mod+F9 fullscreen disable; exec $term -T "$popup-wifi-status" -e bash -c 'nmcli dev status; echo; nmcli dev wifi list; echo; read -n 1 -rsp "Press any key to close..."'
 
 #fastfetch
-bindsym --locked --no-repeat $mod+Control+w fullscreen disable; exec $term -T "$popup-f-wifi" -e bash -c '~/.config/sway/scripts/fastfetch/f-wifi.sh; read -n 1 -rsp "Press any key to close..."'
-bindsym --locked --no-repeat $mod+Control+m fullscreen disable; exec $term -T "$popup-f-main" -e bash -c '~/.config/sway/scripts/fastfetch/f-main.sh; echo; read -n 1 -rsp "Press any key to close..."'
-bindsym --locked --no-repeat $mod+Control+i fullscreen disable; exec $term -T "$popup-f-info" -e bash -c '~/.config/sway/scripts/fastfetch/f-info.sh; echo; read -n 1 -rsp "Press any key to close..."'
-bindsym --locked --no-repeat $mod+Control+s fullscreen disable; exec $term -T "$popup-f-system" -e bash -c '~/.config/sway/scripts/fastfetch/f-system.sh; echo; read -n 1 -rsp "Press any key to close..."'
-bindsym --locked --no-repeat $mod+Control+d fullscreen disable; exec $term -T "$popup-f-devices" -e bash -c '~/.config/sway/scripts/fastfetch/f-devices.sh; echo; read -n 1 -rsp "Press any key to close..."'
-bindsym --locked --no-repeat $mod+Control+h fullscreen disable; exec $term -T "$popup-f-hardware" -e bash -c '~/.config/sway/scripts/fastfetch/f-hardware.sh; echo; read -n 1 -rsp "Press any key to close..."'
-bindsym --locked --no-repeat $mod+Control+a fullscreen disable; exec $term -T "$popup-f-aesthetics" -e bash -c '~/.config/sway/scripts/fastfetch/f-aesthetics.sh; echo; read -n 1 -rsp "Press any key to close..."'
+bindsym --no-repeat $mod+Control+w fullscreen disable; exec $term -T "$popup-f-wifi" -e bash -c '~/.config/sway/scripts/fastfetch/f-wifi.sh; read -n 1 -rsp "Press any key to close..."'
+bindsym --no-repeat $mod+Control+m fullscreen disable; exec $term -T "$popup-f-main" -e bash -c '~/.config/sway/scripts/fastfetch/f-main.sh; echo; read -n 1 -rsp "Press any key to close..."'
+bindsym --no-repeat $mod+Control+i fullscreen disable; exec $term -T "$popup-f-info" -e bash -c '~/.config/sway/scripts/fastfetch/f-info.sh; echo; read -n 1 -rsp "Press any key to close..."'
+bindsym --no-repeat $mod+Control+s fullscreen disable; exec $term -T "$popup-f-system" -e bash -c '~/.config/sway/scripts/fastfetch/f-system.sh; echo; read -n 1 -rsp "Press any key to close..."'
+bindsym --no-repeat $mod+Control+d fullscreen disable; exec $term -T "$popup-f-devices" -e bash -c '~/.config/sway/scripts/fastfetch/f-devices.sh; echo; read -n 1 -rsp "Press any key to close..."'
+bindsym --no-repeat $mod+Control+h fullscreen disable; exec $term -T "$popup-f-hardware" -e bash -c '~/.config/sway/scripts/fastfetch/f-hardware.sh; echo; read -n 1 -rsp "Press any key to close..."'
+bindsym --no-repeat $mod+Control+a fullscreen disable; exec $term -T "$popup-f-aesthetics" -e bash -c '~/.config/sway/scripts/fastfetch/f-aesthetics.sh; echo; read -n 1 -rsp "Press any key to close..."'
 
-#screen-record
+#screen-record, screenshot
 bindsym --no-repeat $mod+F5 exec bash -c '~/.config/sway/scripts/screen-capture.sh'
-#screenshot
 
 #audio device output switch
-bindsym --locked --no-repeat $mod+F7 fullscreen disable; exec $term -T "$popup-audio-switch" -e bash -c '~/.config/sway/scripts/audio-switch.sh'
+bindsym --no-repeat $mod+F7 fullscreen disable; exec $term -T "$popup-audio-switch" -e bash -c '~/.config/sway/scripts/audio-switch.sh'
 
 #mount dev
 bindsym --no-repeat $mod+F8 fullscreen disable; exec $term -T "$popup-mount" -e bash -c '/home/joel/.config/sway/scripts/mount/mount-swaynag.sh'
@@ -196,8 +196,8 @@ client.unfocused         $bg      $bg         $fg    $bg        $bg
 client.urgent            #BF616A  #BF616A     $fg    #BF616A    #BF616A
 client.background        $bg
 
-bindsym --no-repeat $mod+F3 exec bash -c '~/.config/sway/scripts/rotation/toggle-rotate.sh; ~/.config/sway/scripts/rotation/rotation-restore.sh'
-bindsym --no-repeat $mod+F4 exec bash -c '~/.config/sway/scripts/rotation/toggle-rotate-no-transform.sh; ~/.config/sway/scripts/rotation/rotation-restore.sh'
+bindsym --locked --no-repeat $mod+F3 exec bash -c '~/.config/sway/scripts/rotation/toggle-rotate.sh; ~/.config/sway/scripts/rotation/rotation-restore.sh'
+bindsym --locked --no-repeat $mod+F4 exec bash -c '~/.config/sway/scripts/rotation/toggle-rotate-no-transform.sh; ~/.config/sway/scripts/rotation/rotation-restore.sh'
 
 ### Key bindings
 #
@@ -220,7 +220,7 @@ bindsym --no-repeat $mod+F4 exec bash -c '~/.config/sway/scripts/rotation/toggle
 bindsym $mod+Shift+c exec ~/.config/sway/scripts/rotation/rotation-restore.sh
 
     # system off options
-    bindsym --no-repeat --locked $mod+F12 exec bash -c "~/.config/sway/scripts/device-off.sh"
+    bindsym --no-repeat $mod+F12 exec bash -c "~/.config/sway/scripts/device-off.sh"
 
 #
 # Moving around:
