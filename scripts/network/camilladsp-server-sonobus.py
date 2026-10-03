@@ -7,7 +7,7 @@ from collections import OrderedDict
 from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor
 
-HOME=Path.home(); PROFILES=HOME/'Documents/prefs/audio-filters'; MUSIC=HOME/'Downloads/Music'
+HOME=Path.home(); PROFILES=HOME/'Documents/prefs/audio/camilladsp'; MUSIC=HOME/'Downloads/Music'
 STATE=HOME/'.local/state/sway/camilladsp-webremote'; SWITCH_STATE=HOME/'.local/state/sway/audio-switch'; PORT=8766
 CAMILLA=Path('/run/current-system/sw/bin/camilladsp'); SONOBUS=Path('/run/current-system/sw/bin/sonobus')
 SONOSET=HOME/'.config/sonobus/SonoBus.settings'; EXTS={'.m4a','.aac','.mp3','.flac','.wav','.ogg','.opus'}
@@ -17,7 +17,7 @@ MASTER_VOLUME=SWITCH_STATE/'master-volume'; CAM_WS_PORT=8767
 QUEUE_FILE=STATE/'mpv-queue.json'; QUEUE_SOURCE=STATE/'mpv-queue-source.json'; RESTORE_LIST=STATE/'mpv-restore.m3u'; PLAYLIST_COVERS=STATE/'playlist-last-played.json'
 QUEUE_SAVE_LOCK=threading.RLock(); LAST_QUEUE_WRITE=0.0; LAST_QUEUE_DATA=None; LAST_QUEUE_RAW=None
 LOCK=threading.RLock(); PLAYERLOCK=threading.RLock(); MPRISLOCK=threading.RLock(); LAST_MPRIS=None
-SYSTEM_AUDIO_SERVICE=''
+SYSTEM_AUDIO_SERVICE='camilladsp-system-audio.service'
 STOPPED=STATE/'audio-stopped'
 STOP_ACK=STATE/'audio-stop-complete'
 STOP_CAP=STATE/'audio-stop-capable.pid'
@@ -27,9 +27,6 @@ TAGLOCK=threading.RLock(); TAGCACHE=OrderedDict(); TAGCACHE_LIMIT=8192
 COVERLOCK=threading.RLock(); COVERCACHE=OrderedDict(); COVERCACHE_LIMIT=256
 CAMILLA_PROCESS=None
 LOCAL_ENGINE_OWNED=False
-DIRECT=STATE/'direct-bridge.pid'
-MUTE=SWITCH_STATE/'master-muted'
-MIC_MUTE=SWITCH_STATE/'mic-muted'
 SONOBUS_PROCESS=None
 MASTER_WRITE_UNTIL=0.0
 MASTER_RESTORING=True
@@ -116,76 +113,70 @@ def airplay(start):
     if r.returncode:raise RuntimeError(r.stderr.strip() or 'Could not change AirPlay services')
 def apply_source_services(source):
     if source=='airplay':
-        if alive(rpid(MPVPID),'mpv'):stop_mpv()
+        if run(['systemctl','--user','is-active','--quiet',SYSTEM_AUDIO_SERVICE],False,5).returncode==0:
+            user_service('stop',SYSTEM_AUDIO_SERVICE)
+        if MODES[audio_mode()][1]!='airplay' and alive(rpid(MPVPID),'mpv'):stop_mpv()
         for service in ('nqptp.service','shairport-sync.service'):
             if run(['systemctl','is-active','--quiet',service],False,5).returncode:
                 r=run(['systemctl','start',service],False,30)
                 if r.returncode:raise RuntimeError(r.stderr.strip() or f'Could not start {service}')
     elif source=='system':
-        if any(run(['systemctl','is-active','--quiet',service],False,5).returncode==0 for service in ('nqptp.service','shairport-sync.service')):airplay(False)
-    else:raise ValueError('Invalid source')
+        if any(run(['systemctl','is-active','--quiet',service],False,5).returncode==0
+               for service in ('nqptp.service','shairport-sync.service')):airplay(False)
+        if run(['systemctl','--user','is-active','--quiet',SYSTEM_AUDIO_SERVICE],False,5).returncode:
+            user_service('start',SYSTEM_AUDIO_SERVICE)
+    else:raise ValueError('Invalid audio source')
 def restart_vnc():user_service('restart','camilladsp-wayvnc.service');return {'restarted':True}
 
 
 def profiles():
     def load():
-        root=PROFILES.resolve()
-        found=[]
-        for directory in sorted(root.iterdir(),key=lambda p:p.name.casefold()) if root.is_dir() else []:
-            if not directory.is_dir() or directory.is_symlink() or not (directory/'BRIR_True_Stereo.wav').is_file():continue
-            found.extend(p for pattern in ('*.yml','*.yaml') for p in directory.glob(pattern)
-                         if p.is_file() and not p.is_symlink() and p.resolve().parent==directory.resolve())
-        found.extend(p for pattern in ('00-filterless.yml','00-filterless.yaml') for p in root.glob(pattern) if p.is_file() and not p.is_symlink())
-        return [root/'00-direct.yml']+sorted(found,key=lambda p:(0 if p.name.startswith('00-filterless') or '-cloud3-' in p.name else 1 if '-cmf-' in p.name else 2,p.parent.name.casefold(),p.name.casefold()))
+        return sorted(
+            [p for pattern in ('*.yml','*.yaml') for p in PROFILES.glob(pattern) if p.is_file()],
+            key=lambda item:item.name.lower(),
+        )
     return cached('profiles',5.0,load)
-
-def profile_id(path):
-    return path.relative_to(PROFILES.resolve()).as_posix()
-BRIR_DIR=HOME/'Documents/prefs/audio-filters'
+BRIR_DIR=HOME/'Documents/prefs/audio/BRIRs'
 def _filter_key(value):
     return re.sub(r'[^a-z0-9]+','',value.casefold())
 def listening_filters():
+    """Resolve display-only labels from BRIR directories; retain YAML IDs."""
+    folders={}
+    if BRIR_DIR.is_dir():
+        for folder in BRIR_DIR.iterdir():
+            if not folder.is_dir():continue
+            match=re.match(r'^\((\d+)ms\)\s*(.*)$',folder.name,re.I)
+            if match:folders.setdefault(match.group(1),[]).append((folder.name,_filter_key(match.group(2))))
     result={}
     for item in profiles():
-        key=profile_id(item)
-        if key=='00-direct.yml':result[key]={'group':'Other','label':'Filterless (no CamillaDSP)'};continue
-        if item.stem=='00-filterless':result[key]={'group':'Other','label':'Filterless (CamillaDSP)'};continue
-        group='Other' if '-cloud3-' in item.name else 'CMF' if '-cmf-' in item.name else 'EarPods' if '-earpods-' in item.name else 'Other'
-        label=('Cloud III · ' if '-cloud3-' in item.name else '')+item.parent.name
-        result[key]={'group':group,'label':label}
+        stem=item.stem
+        if stem.casefold()=='00-filterless':
+            result[item.name]={'group':'Other','label':'Filterless'}
+            continue
+        match=re.match(r'^\d+-(.+?)-(\d+)ms-(.+)$',stem,re.I)
+        if not match:
+            result[item.name]={'group':'Other','label':stem}
+            continue
+        device,delay,slug=match.groups()
+        # The device label comes from the filename prefix, not a fixed device list.
+        group=device.replace('-',' ').strip().title()
+        candidates=folders.get(delay,[])
+        suffix=_filter_key(slug)
+        matches=[name for name,key in candidates if key==suffix]
+        if not matches and delay=='0000':
+            matches=[name for name,key in candidates if key.endswith(suffix)]
+        label=matches[0] if len(matches)==1 else stem
+        result[item.name]={'group':group,'label':label}
     return result
 def profile(name):
-    if not isinstance(name,str) or not name or '\x00' in name:raise ValueError('Invalid profile ID')
-    root=PROFILES.resolve()
-    if name=='00-direct.yml':return root/name
-    path=Path(name)
-    if path.is_absolute() or any(part in ('','.', '..') for part in path.parts) or path.suffix.lower() not in ('.yml','.yaml'):
-        raise ValueError('Invalid profile ID')
-    candidate=(root/path).resolve()
-    if candidate.parent==root:
-        if candidate.name not in ('00-filterless.yml','00-filterless.yaml'):raise ValueError('Only filterless belongs at the root')
-    elif candidate.parent.parent==root:
-        if not (candidate.parent/'BRIR_True_Stereo.wav').is_file():raise ValueError('Profile folder has no BRIR')
-    else:raise ValueError('Profile must be inside one BRIR folder')
-    if not candidate.is_file() or (root/path).is_symlink():raise FileNotFoundError(name)
-    return candidate
-def resolve_saved_profile(value):
-    try:return profile(value)
-    except (ValueError,FileNotFoundError):
-        if not isinstance(value,str) or '/' in value or value=='00-direct.yml':raise
-        matches=[p for p in profiles() if p.name==value and p.is_file()]
-        if len(matches)==1:
-            resolved=matches[0]
-            ACTIVE.write_text(profile_id(resolved)+'\n')
-            return resolved
-        raise
-
+    if not isinstance(name,str) or Path(name).name!=name:raise ValueError('Invalid profile')
+    p=(PROFILES/name).resolve()
+    if p.parent!=PROFILES.resolve() or p.suffix.lower() not in {'.yml','.yaml'} or not p.is_file():raise FileNotFoundError(name)
+    return p
 def active():
-    if STOPPED.exists():return ''
-    try:
-        value=ACTIVE.read_text().strip()
-        return profile_id(resolve_saved_profile(value)) if value else ''
-    except (OSError,ValueError,FileNotFoundError):return ''
+    if STOPPED.exists() and not alive(rpid(CAMPID),'camilladsp'):return ''
+    try:return ACTIVE.read_text().strip()
+    except OSError:return ''
 def stop_camilla(include_stale=False):
     global CAMILLA_PROCESS
     process=CAMILLA_PROCESS
@@ -255,13 +246,13 @@ def reusable_camilla(pid):
         current=camilla_command('GetConfigFilePath')
         if not isinstance(current,str):return False
         selected=Path(current).resolve()
-        if not selected.is_file() or selected not in profiles():return False
+        if selected.parent!=PROFILES.resolve() or not selected.is_file():return False
         return selected
     except (OSError,ValueError,RuntimeError,socket.timeout):return False
 
 def start_camilla(p):
     global CAMILLA_PROCESS
-    target=profile(profile_id(p) if isinstance(p,Path) else str(p))
+    target=profile(p.name if isinstance(p,Path) else str(p))
     validate_camilla_profile(target)
     competing=other_camilla_processes()
     if competing:
@@ -292,7 +283,7 @@ def start_camilla(p):
                 (f': {tail}' if tail else '')
             )
         time.sleep(.05)
-    ACTIVE.write_text(profile_id(target)+'\n')
+    ACTIVE.write_text(target.name+'\n')
     return process.pid
 def release_local_engine():
     global LOCAL_ENGINE_OWNED
@@ -306,60 +297,90 @@ def release_local_engine():
     stop_camilla(include_stale=True)
     LOCAL_ENGINE_OWNED=False
 
-def stop_direct_bridge():
-    killpidfile(DIRECT)
-
-def start_direct_bridge():
-    if alive(rpid(DIRECT)):return
-    command='set -o pipefail; "$1" -q -D hw:Loopback,1,0 -r 96000 -f S32_LE -c 2 -t raw | "$2" -q -D hw:Loopback,0,1 -r 96000 -f S32_LE -c 2 -t raw'
-    with (STATE/'direct-bridge.log').open('ab',buffering=0) as log:
-        proc=subprocess.Popen([exe('bash'),'-c',command,'bridge',exe('arecord'),exe('aplay')],stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
-    DIRECT.write_text(str(proc.pid)+'\n')
-    time.sleep(.5)
-    if proc.poll() is not None:
-        DIRECT.unlink(missing_ok=True)
-        raise RuntimeError('Direct ALSA bridge failed: '+log_tail(STATE/'direct-bridge.log')[-1200:])
-
 def switch_profile(name):
     with LOCK:
         target=profile(name)
-        old=active()
-        if profile_id(target)==old:return {'profile':old,'mode':mode_state()}
-        if target.name=='00-direct.yml':
-            if not STOPPED.exists():
-                stop_camilla(include_stale=True);start_direct_bridge()
-        else:
-            validate_camilla_profile(target)
-            stop_direct_bridge()
-            if alive(rpid(CAMPID),'camilladsp'):
-                previous=camilla_command('GetConfigFilePath')
-                try:
-                    camilla_command({'SetConfigFilePath':str(target)});camilla_command('Reload')
-                except Exception:
-                    camilla_command({'SetConfigFilePath':previous});camilla_command('Reload');raise
-            elif not STOPPED.exists():start_camilla(target)
-        ACTIVE.write_text(profile_id(target)+'\n')
-        if not STOPPED.exists():
-            if audio_mode()!='laptop_laptop':apply_mode('laptop_laptop')
-            else:normalize_with_media()
-        return {'profile':profile_id(target),'mode':mode_state()}
+        validate_camilla_profile(target)
+        pid=rpid(CAMPID)
+        if not alive(pid,'camilladsp'):
+            # Selecting a filter while stopped must not start or reroute audio.
+            ACTIVE.write_text(target.name+'\n')
+            invalidate_cache('profiles')
+            return {'profile':target.name,'pid':None}
+        old_path=camilla_command('GetConfigFilePath')
+        if not isinstance(old_path,str) or not old_path:
+            raise RuntimeError('CamillaDSP did not report its active config path')
+        if Path(old_path).resolve()!=target.resolve():
+            camilla_command({'SetConfigFilePath':str(target)})
+            try:
+                camilla_command('Reload')
+                if Path(camilla_command('GetConfigFilePath')).resolve()!=target.resolve():
+                    raise RuntimeError('CamillaDSP did not confirm the selected config')
+                if not alive(pid,'camilladsp'):
+                    raise RuntimeError('CamillaDSP exited during config reload')
+            except Exception:
+                if alive(pid,'camilladsp'):
+                    try:
+                        camilla_command({'SetConfigFilePath':old_path})
+                        camilla_command('Reload')
+                    except Exception:pass
+                raise
+        ACTIVE.write_text(target.name+'\n')
+        invalidate_cache('profiles')
+        normalize_with_media()
+        return {'profile':target.name,'pid':pid,'mode':mode_state()}
 def restart_camilla():
     with LOCK:
+        if STOPPED.exists():raise RuntimeError('Audio is stopped; start audio before restarting CamillaDSP')
         name=active()
-        if name=='00-direct.yml':
-            if STOPPED.exists():raise RuntimeError('Audio is stopped')
-            stop_direct_bridge();start_direct_bridge();return {'profile':name,'restarted':True}
         if not name:raise RuntimeError('No active profile')
-        stop_camilla(include_stale=True);pid=start_camilla(profile(name))
-        return {'profile':profile_id(profile(name)),'pid':pid,'restarted':True}
+        target=profile(name)
+        route=saved_output_route()
+        local=alive(rpid(LOCALMONPID))
+        stop_local_monitor()
+        stop_camilla(include_stale=True)
+        pid=start_camilla(target)
+        if local:
+            if not route.get('sink'):raise RuntimeError('Previous physical output was not saved')
+            start_local_monitor(route)
+        normalize_with_media()
+        return {'profile':name,'pid':pid,'restarted':True}
 
 def alsa100():
-    # Normalize all cards in normalize_audio_volumes, not on every SonoBus restart.
-    return None
+    r=run(['amixer','-c','Loopback','sset','PCM','0dB'],False)
+    if r.returncode:raise RuntimeError(r.stderr.strip() or r.stdout.strip() or 'Could not set Loopback PCM')
 
 # This file is shared with audio-switch.sh. It is the only saved master.
 def master_volume():
-    return read_saved_master()
+    # A recreated sink starts at 100%. Until route restoration completes,
+    # only the persisted master is authoritative.
+    if MASTER_RESTORING or STOPPED.exists():
+        try:return max(0.0,min(100.0,float(MASTER_VOLUME.read_text().strip().rstrip('%'))))
+        except (OSError,ValueError):return 50.0
+    # The Sway volume keys and both web sliders share the DEFAULT PipeWire sink.
+    # Read the live value so external pactl key presses appear in both sliders.
+    try:
+        result=run([exe('pactl'),'get-sink-volume','@DEFAULT_SINK@'],False,5,media_env())
+        match=re.search(r'(\d+(?:\.\d+)?)%',result.stdout)
+        if result.returncode==0 and match:
+            value=max(0.0,min(100.0,float(match.group(1))))
+            MASTER_VOLUME.parent.mkdir(parents=True,exist_ok=True)
+            with LOCK:
+                try:saved=float(MASTER_VOLUME.read_text().strip().rstrip('%'))
+                except (OSError,ValueError):saved=None
+                # Recheck under the lock: a poll may have read 100% just
+                # before stop/restart acquired it.
+                if MASTER_RESTORING or STOPPED.exists():
+                    return max(0.0,min(100.0,saved)) if saved is not None else 50.0
+                if time.monotonic()<MASTER_WRITE_UNTIL:
+                    return max(0.0,min(100.0,saved)) if saved is not None else value
+                if saved is None or abs(saved-value)>=.5:
+                    atomic(MASTER_VOLUME,f'{value:.2f}%\n')
+                    sync_mpv_master(value)
+            return value
+    except (OSError,FileNotFoundError,subprocess.TimeoutExpired):pass
+    try:return max(0.0,min(100.0,float(MASTER_VOLUME.read_text().strip().rstrip('%'))))
+    except (OSError,ValueError):return 50.0
 
 
 def _ws_read(sock, size):
@@ -409,10 +430,13 @@ def camilla_command(command):
     return item.get('value')
 
 def sync_mpv_master(value):
-    if alive(rpid(MPVPID),'mpv') and MPVSOCK.exists():mpv_direct(['set_property','volume',100])
+    if not (alive(rpid(MPVPID),'mpv') and MPVSOCK.exists()):return
+    try:mpv_direct(['set_property','volume',float(value)])
+    except (OSError,RuntimeError,ValueError) as error:
+        raise RuntimeError(f'Could not sync MPV to saved master: {error}') from error
 
 def watch_master_volume(stop):
-    # Sway and web sliders share the ALSA softvol master.
+    # Sway volume keys use pactl directly, even when the web page is closed.
     while not stop.wait(.6):
         # The terminal switch holds this marker while a profile can recreate
         # the default sink at 100%. Do not overwrite the pre-switch master.
@@ -424,20 +448,25 @@ def watch_master_volume(stop):
         try:master_volume()
         except (OSError,RuntimeError,ValueError,subprocess.TimeoutExpired):pass
 
-def ensure_softvol():
-    if run([exe('amixer'),'-c','Loopback','sget','Studio Master'],False,5).returncode==0:return
-    r=run([exe('aplay'),'-q','-D','default','-f','S32_LE','-r','96000','-c','2','-d','1','/dev/zero'],False,5)
-    if r.returncode or run([exe('amixer'),'-c','Loopback','sget','Studio Master'],False,5).returncode:
-        raise RuntimeError('Could not create ALSA Studio Master: '+r.stderr.strip())
-
 def apply_master_volume(value,normalize_sinks=True):
-    value=max(0.,min(100.,float(value)))
-    ensure_softvol()
-    r=run([exe('amixer'),'-c','Loopback','sset','Studio Master',('0%' if MUTE.exists() else f'{value:.0f}%')],False,8)
-    if r.returncode:raise RuntimeError(r.stderr.strip() or 'ALSA Studio Master unavailable; open the default PCM once to create it')
-    # MPV plays into the same softvol PCM. Never attenuate it a second time.
-    if alive(rpid(MPVPID),'mpv') and MPVSOCK.exists():mpv_direct(['set_property','volume',100])
-    if alive(rpid(CAMPID),'camilladsp'):camilla_command({'SetVolume':0.0})
+    # Normalize other sinks on route changes, not on each slider update.
+    # CamillaDSP Main remains at unity.
+    default=run([exe('pactl'),'get-default-sink'],False,5,media_env())
+    if default.returncode:raise RuntimeError(default.stderr.strip() or 'No default audio sink')
+    name=default.stdout.strip()
+    if not name:raise RuntimeError('No default audio sink')
+    if normalize_sinks:
+        for sink in _pactl_json('sinks'):
+            target=str(sink.get('name') or '') if isinstance(sink,dict) else ''
+            if not target or target==name:continue
+            result=run([exe('pactl'),'set-sink-volume',target,'100%'],False,8,media_env())
+            if result.returncode:raise RuntimeError(f'Could not set {target} to 100%: {result.stderr.strip()}')
+    result=run([exe('pactl'),'set-sink-volume',name,f'{value:.2f}%'],False,8,media_env())
+    if result.returncode:raise RuntimeError(f'Could not set {name} to {value:.2f}%: {result.stderr.strip()}')
+    sync_mpv_master(value)
+    if alive(rpid(CAMPID),'camilladsp'):
+        try:camilla_command({'SetVolume':0.0})
+        except (OSError,ValueError) as error:raise RuntimeError(f'Could not set CamillaDSP Main to unity: {error}') from error
 
 def pause_for_normalization():
     snapshot={'mpv':None,'mpris':[],'external':None}
@@ -493,56 +522,75 @@ def resume_after_normalization(snapshot):
 def normalize_with_media():
     with LOCK:
         snapshot=pause_for_normalization()
-        try:return normalize_audio_volumes()
-        finally:resume_after_normalization(snapshot)
+        result=normalize_audio_volumes()
+        resume_after_normalization(snapshot)
+        return result
 def normalize_audio_volumes():
-    # All discoverable ALSA playback/capture gain controls, then saved softvol master.
-    saved=read_saved_master()
-    errors=[];updated=[]
-    cards=Path('/proc/asound/cards').read_text()
+    # Normalize live gain stages to 0 dB, then restore the saved master.
+    # Media pausing is handled by normalize_with_media, not this gain routine.
+    errors=[]
+    try:cards=Path('/proc/asound/cards').read_text()
+    except OSError as error:raise RuntimeError('Could not enumerate ALSA cards: '+str(error)) from error
     for card in re.findall(r'^\s*(\d+)\s+\[',cards,re.M):
-        result=run([exe('amixer'),'-c',card,'scontrols'],False,8)
-        if result.returncode:errors.append(f'card {card}: {result.stderr.strip()}');continue
-        for name,index in re.findall(r"^Simple mixer control '([^']+)',(\d+)$",result.stdout,re.M):
-            if name=='Studio Master':continue
+        listing=run([exe('amixer'),'-c',card,'scontrols'],False,8)
+        if listing.returncode:
+            errors.append(f'ALSA card {card}: {listing.stderr.strip() or "could not list controls"}')
+            continue
+        for name,index in re.findall(r"^Simple mixer control '([^']+)',(\d+)$",listing.stdout,re.M):
             control=f'{name},{index}'
             info=run([exe('amixer'),'-c',card,'sget',control],False,8)
-            if info.returncode:errors.append(f'{card} {control}: {info.stderr.strip()}');continue
-            capabilities=re.search(r'^\s*Capabilities:\s*(.*)$',info.stdout,re.M)
-            caps=set(capabilities.group(1).split()) if capabilities else set()
-            directions=[]
-            if 'pvolume' in caps:directions.append('playback')
-            if 'cvolume' in caps:directions.append('capture')
-            if 'volume' in caps and not directions:directions.append('')
-            if not directions:continue
-            # A control without dB scale cannot be truthfully set to 0 dB.
-            if not re.search(r'\[-?\d+(?:\.\d+)?dB\]',info.stdout):continue
-            for direction in directions:
-                args=[exe('amixer'),'-c',card,'sset',control]
-                if direction:args.append(direction)
-                args.append('0dB')
-                result=run(args,False,8)
-                if result.returncode:errors.append(f'{card} {control} {direction}: {result.stderr.strip()}')
-                else:updated.append(f'{card} {control} {direction}'.strip())
-    apply_master_volume(saved)
-    if errors:raise RuntimeError('ALSA normalization incomplete: '+'; '.join(errors[:8]))
-    return {'masterVolume':saved,'normalizedControls':updated}
-
-def read_saved_master():
+            if info.returncode:
+                errors.append(f'ALSA card {card} {control}: {info.stderr.strip() or "could not inspect control"}')
+                continue
+            if not re.search(r'[-+]?\d+(?:\.\d+)?dB',info.stdout):continue
+            for direction in ('playback','capture'):
+                if not re.search(rf'^{direction} channels:',info.stdout,re.I|re.M):continue
+                result=run([exe('amixer'),'-c',card,'sset',control,direction,'0dB'],False,8)
+                if result.returncode:
+                    errors.append(f'ALSA card {card} {control} {direction}: {result.stderr.strip() or "0dB unavailable"}')
     try:
-        value=float(MASTER_VOLUME.read_text().strip().rstrip('%'))
-        if math.isfinite(value) and 0<=value<=100:return value
-    except (OSError,ValueError):pass
-    return 50.0
+        # During route changes the default sink may have just been recreated;
+        # restore the persisted master, not that sink's fresh 100% default.
+        try:value=float(MASTER_VOLUME.read_text().strip().rstrip('%'))
+        except (OSError,ValueError):value=master_volume()
+        # A route/profile switch may recreate sinks. Enumerate live objects now,
+        # not at startup. PipeWire stream gains are distinct from device gains.
+        for kind,command,key in (('sinks','set-sink-volume','name'),
+                                 ('sources','set-source-volume','name'),
+                                 ('sink-inputs','set-sink-input-volume','index'),
+                                 ('source-outputs','set-source-output-volume','index')):
+            for item in _pactl_json(kind):
+                if not isinstance(item,dict):continue
+                target=item.get(key)
+                if target is None or target=='':continue
+                result=run([exe('pactl'),command,str(target),'0dB'],False,8,media_env())
+                if result.returncode:
+                    errors.append(f'{kind} {target}: {result.stderr.strip() or "0dB unavailable"}')
+        # Direct-ALSA MPV bypasses PipeWire; its gain is the same saved master.
+        sync_mpv_master(max(0.0,min(100.0,value)))
+        if alive(rpid(CAMPID),'camilladsp'):
+            camilla_command({'SetVolume':0.0})
+        default=run([exe('pactl'),'get-default-sink'],False,5,media_env())
+        if default.returncode or not default.stdout.strip():
+            raise RuntimeError(default.stderr.strip() or 'No default audio sink')
+        result=run([exe('pactl'),'set-sink-volume',default.stdout.strip(),f'{max(0.0,min(100.0,value)):.2f}%'],False,8,media_env())
+        if result.returncode:raise RuntimeError(result.stderr.strip() or 'Could not restore saved master')
+    except (RuntimeError,OSError,ValueError,subprocess.TimeoutExpired) as error:errors.append(str(error))
+    if errors:
+        raise RuntimeError('Audio normalization incomplete: '+'; '.join(errors[:4])+
+                           (f'; {len(errors)-4} more' if len(errors)>4 else ''))
+    return {'masterVolume':master_volume()}
 
 def set_master_volume(value):
     global MASTER_WRITE_UNTIL
-    value=float(value)
-    if not math.isfinite(value) or not 0<=value<=100:raise ValueError('Volume must be 0..100')
+    try:value=float(value)
+    except (TypeError,ValueError):raise ValueError('Invalid master volume')
+    if not math.isfinite(value) or not 0<=value<=100:raise ValueError('Master volume must be between 0 and 100')
     with LOCK:
-        MASTER_WRITE_UNTIL=time.monotonic()+2
+        MASTER_WRITE_UNTIL=time.monotonic()+2.0
+        apply_master_volume(value,normalize_sinks=False)
+        MASTER_VOLUME.parent.mkdir(parents=True,exist_ok=True)
         atomic(MASTER_VOLUME,f'{value:.2f}%\n')
-        apply_master_volume(value)
     return {'volume':value}
 def sonopids():
     out=set()
@@ -675,7 +723,7 @@ def stop_mpv():
 def ensure_mpv():
     if alive(rpid(MPVPID),'mpv') and MPVSOCK.exists():return
     stop_mpv();log=MPVLOG.open('ab',buffering=0)
-    cmd=[exe('mpv'),'--idle=yes','--no-video','--no-terminal','--keep-open=no','--ao=alsa','--audio-device=alsa/default','--audio-samplerate=96000','--audio-channels=stereo','--audio-format=s32',f'--input-ipc-server={MPVSOCK}','--volume=100','--volume-max=100']
+    cmd=[exe('mpv'),'--idle=yes','--no-video','--no-terminal','--keep-open=no','--ao=alsa','--audio-device=alsa/camilladsp_input','--audio-samplerate=96000','--audio-channels=stereo','--audio-format=s32',f'--input-ipc-server={MPVSOCK}',f'--volume={master_volume():.2f}','--volume-max=100']
     try:q=subprocess.Popen(cmd,stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
     finally:log.close()
     MPVPID.write_text(f'{q.pid}\n');deadline=time.monotonic()+5
@@ -1083,11 +1131,11 @@ def save_group(data):
     state=groups_state();state['profiles'][key]={'group':group,'username':user,'server':server,'passwordRequired':bool(data.get('passwordRequired'))};state['active']=key;_write_json(GROUPS,state);return state
 def audio_mode():
     try:value=MODE.read_text().strip()
-    except OSError:value='laptop_laptop'
+    except OSError:value='ipad_external'
     if value=='airplay':value='ipad_external'
     if value=='system':value='laptop_external'
     if value=='external_roundtrip':value='laptop_external'
-    return value if value in MODES else 'laptop_laptop'
+    return value if value in MODES else 'ipad_external'
 def configure_sonobus(policy=None):
     if not SONOSET.is_file():raise FileNotFoundError(SONOSET)
     policy=dict(policy or MODE_POLICIES[audio_mode()])
@@ -1195,93 +1243,214 @@ def stop_local_monitor():
             try:os.killpg(pid,signal.SIGKILL)
             except OSError:pass
     LOCALMONPID.unlink(missing_ok=True)
+def _pactl_json(kind):
+    result=run([exe('pactl'),'--format=json','list',kind],False,8,media_env())
+    if result.returncode:raise RuntimeError(result.stderr.strip() or f'Could not list audio {kind}')
+    try:data=json.loads(result.stdout or '[]')
+    except json.JSONDecodeError as error:raise RuntimeError(f'Invalid pactl {kind} response: {error}')
+    if not isinstance(data,list):raise RuntimeError(f'Invalid pactl {kind} response: expected list')
+    return data
+def _profile_rows(card):
+    raw=card.get('profiles') or []
+    if isinstance(raw,dict):raw=[dict(value or {},name=name) for name,value in raw.items()]
+    rows=[]
+    for item in raw:
+        if not isinstance(item,dict):continue
+        name=str(item.get('name') or '').strip()
+        if not name or name=='off':continue
+        try:count=int(item.get('sinks',item.get('n_sinks',1)))
+        except (TypeError,ValueError):count=0
+        if count<1:continue
+        availability=str(item.get('available','unknown')).lower()
+        label=str(item.get('description') or name)
+        rows.append({'name':name,'label':label,'priority':int(item.get('priority') or 0),
+                     'available':availability})
+    return sorted(rows,key=lambda item:(item['available'] in ('no','false'),-item['priority'],item['label'].casefold()))
+def _port_rows(sink):
+    raw=sink.get('ports') or []
+    if isinstance(raw,dict):raw=[dict(value or {},name=name) for name,value in raw.items()]
+    rows=[]
+    for item in raw:
+        if not isinstance(item,dict):continue
+        name=str(item.get('name') or '').strip()
+        if not name:continue
+        available=str(item.get('availability',item.get('available','unknown'))).lower()
+        rows.append({'name':name,'label':str(item.get('description') or name),'available':available,'priority':int(item.get('priority') or 0)})
+    return sorted(rows,key=lambda item:(item['available'] not in ('yes','true'),-item['priority'],item['label'].casefold()))
 def saved_output_route():
     data=_read_json(LOCALSINK,{})
-    if not isinstance(data,dict):data={}
-    return {key:str(data.get(key) or '') for key in ('card','name','sink','verb','ucmDevice','label')}
+    if isinstance(data,dict):return {key:str(data.get(key) or '') for key in ('card','profile','sink','port')}
+    return {'card':'','profile':'','sink':'','port':''}
+def pipewire_sink_owners():
+    # Prefer the live PipeWire node -> device relationship over name guessing.
+    try:
+        result=run([exe('pw-dump')],False,8,media_env())
+        if result.returncode:return {}
+        graph=json.loads(result.stdout)
+        devices={str(item.get('id')):str((item.get('info') or {}).get('props',{}).get('device.name') or '')
+                 for item in graph if item.get('type')=='PipeWire:Interface:Device'}
+        return {str(props['node.name']):devices.get(str(props.get('device.id')),'')
+                for item in graph if item.get('type')=='PipeWire:Interface:Node'
+                for props in [(item.get('info') or {}).get('props') or {}]
+                if props.get('node.name') and props.get('media.class')=='Audio/Sink'}
+    except (OSError,ValueError,TypeError,subprocess.TimeoutExpired):return {}
 
-def ucm_pairs(text):
-    lines=text.splitlines();items=[]
-    for i,line in enumerate(lines):
-        match=re.match(r'^\s*\d+:\s*(\S.*)$',line)
-        if match:items.append((match.group(1).strip(),lines[i+1].strip() if i+1<len(lines) else ''))
-    return items
-
-def parse_ucm_value(output, identifier):
-    # alsaucm prints IDENTIFIER=VALUE; never pass the entire line to aplay.
-    for line in output.splitlines():
-        key,sep,value=line.strip().partition('=')
-        if sep and key==identifier:
-            pcm=value.strip().strip('"')
-            return pcm if pcm and not any(ch.isspace() for ch in pcm) else ''
-    return ''
-
-def ucm_command(card,*args):
-    return run([exe('alsaucm'),'-c',f'hw:{card}',*args],False,8)
-
+def sink_owner(sink,cards):
+    # A live card index or PipeWire device.name is evidence of ownership.
+    # Never infer ownership from the ALSA node name or selected UI card.
+    index=sink.get('cardIndex')
+    if index:
+        owner=next((card for card in cards if card['index']==index),None)
+        if owner:return owner
+    name=sink.get('cardName')
+    if name:
+        return next((card for card in cards if card['name']==name),None)
+    return None
 def audio_topology():
-    text=Path('/proc/asound/cards').read_text()
-    raw=run([exe('aplay'),'-l'],False,8)
-    if raw.returncode:raise RuntimeError('ALSA playback enumeration failed: '+raw.stderr.strip())
-    pcms=run([exe('aplay'),'-L'],False,8)
-    hw={}
-    for n,ident,dev,desc in re.findall(r'^card (\d+):\s*(\S+)\s*\[[^\n]*?device (\d+):\s*([^\n]+)',raw.stdout,re.M):
-        hw.setdefault(n,[]).append((ident,dev,desc.strip()))
-    named=[]
-    if pcms.returncode==0:
-        for name,description in re.findall(r'^([^\s][^\n]*)\n[ \t]+([^\n]+)',pcms.stdout,re.M):
-            if 'CARD=' in name and name not in named:named.append(name)
+    cards_raw=_pactl_json('cards');sinks_raw=_pactl_json('sinks');saved=saved_output_route();pw_owners=pipewire_sink_owners()
+    sinks=[]
+    for sink in sinks_raw:
+        if not isinstance(sink,dict):continue
+        name=str(sink.get('name') or '')
+        props=sink.get('properties') or {}
+        # Match audio-switch.sh's final sink stage: expose every real sink,
+        # including HDMI and sinks created after a profile change. Hide only
+        # this setup's custom DSP, loopback and silent-routing sinks.
+        # Exclude the module-created desktop sink, not physical sinks whose
+        # names happen to contain words such as 'loopback' or 'sonobus'.
+        if name=='camilladsp' or (name.startswith('alsa_output.') and str(props.get('alsa.card_name') or '').lower()=='loopback'):continue
+        card_index=str(sink.get('card') if sink.get('card') is not None else '')
+        card_name=str(pw_owners.get(name) or props.get('device.name') or '')
+        label=str(sink.get('description') or props.get('device.description') or name)
+        ports=_port_rows(sink)
+        if not ports:ports=[{'name':'','label':label,'available':'unknown','priority':0}]
+        active_port=sink.get('active_port') or {}
+        active_port=str(active_port.get('name') or '') if isinstance(active_port,dict) else str(active_port)
+        sinks.append({'name':name,'label':label,'cardIndex':card_index,'cardName':card_name,'ports':ports,'activePort':active_port})
     cards=[]
-    for n,ident,label in re.findall(r'^\s*(\d+)\s+\[([^] ]+)\s*\]:\s*([^\n]+)',text,re.M):
-        if ident=='Loopback' or n not in hw:continue
-        routes=[]
-        for _,dev,desc in hw[n]:
-            pcm=f'plughw:CARD={ident},DEV={dev}'
-            routes.append({'name':pcm,'label':f'Hardware {dev} · {desc}','cardName':ident,'sink':pcm,'verb':'','ucmDevice':''})
-        for pcm in named:
-            if re.search(r'CARD='+re.escape(ident)+r'(?:,|$)',pcm):
-                routes.append({'name':pcm,'label':f'ALSA PCM · {pcm}','cardName':ident,'sink':pcm,'verb':'','ucmDevice':''})
-        verbs=ucm_command(n,'list','_verbs')
-        if verbs.returncode==0:
-            for verb,comment in ucm_pairs(verbs.stdout):
-                devices=ucm_command(n,'list',f'_devices/{verb}')
-                if devices.returncode:continue
-                for device,detail in ucm_pairs(devices.stdout):
-                    # UCM's playback PCM is authoritative. Some UCM entries are capture-only.
-                    result=ucm_command(n,'get',f'PlaybackPCM/{device}/{verb}')
-                    if result.returncode:continue
-                    pcm=parse_ucm_value(result.stdout, f'PlaybackPCM/{device}/{verb}')
-                    if not pcm:continue
-                    # UCM may return a manager-local alias such as
-                    # _ucm0001.hw:card[,device]. It cannot be opened by a
-                    # separate aplay process. Use the underlying hardware PCM;
-                    # UCM is still applied independently for physical routing.
-                    alias=re.fullmatch(r'_ucm[0-9a-fA-F]+\.hw:([^\s]+)',pcm)
-                    if alias:pcm='plughw:'+alias.group(1)
-                    elif pcm.startswith('hw:'):pcm='plughw:'+pcm[3:]
-                    elif pcm.startswith('_ucm'):continue
-                    routes.append({'name':f'ucm:{verb}:{device}','label':f'{verb} · {device}'+(f' · {detail}' if detail and detail!=device else ''),
-                                   'cardName':ident,'sink':pcm,'verb':verb,'ucmDevice':device})
-        routes.sort(key=lambda r:(0 if r['verb'] else 1 if r['label'].startswith('ALSA PCM') else 2,r['label'].casefold()))
-        cards.append({'name':ident,'index':n,'label':label.strip(),'sinks':routes})
-    return {'cards':cards,'saved':saved_output_route()}
+    for card in cards_raw:
+        if not isinstance(card,dict):continue
+        name=str(card.get('name') or '');index=str(card.get('index',''));props=card.get('properties') or {}
+        profiles=_profile_rows(card)
+        if not name or not profiles:continue
+        label=str(props.get('device.description') or props.get('alsa.card_name') or card.get('description') or name)
+        active=card.get('active_profile') or {};active_name=str(active.get('name') if isinstance(active,dict) else active or '')
+        # Keep the sink menu global; the selected sink's owner is recorded separately.
+        cards.append({'name':name,'index':index,'label':label,'profiles':profiles,'activeProfile':active_name,'sinks':sinks[:]})
+    cards.sort(key=lambda item:item['label'].casefold())
+    for card in cards:
+        card['sinks'].sort(key=lambda sink:(sink_owner(sink,cards)!=card,sink['label'].casefold()))
+    return {'cards':cards,'saved':saved}
 def set_output_profile(card,profile,normalize=False,topology=None):
-    topology=topology or audio_topology()
-    if not any(c['name']==card for c in topology['cards']) or profile!='ALSA':raise ValueError('ALSA has no selectable card profiles; choose a card and PCM')
-    return topology
+    card=str(card or '').strip();profile=str(profile or '').strip()
+    if topology is None:topology=audio_topology()
+    item=next((x for x in topology['cards'] if x['name']==card),None)
+    if item is None:raise ValueError('Selected audio card is unavailable')
+    if profile not in {x['name'] for x in item['profiles']}:raise ValueError('Selected card profile is unavailable')
+    if next(x for x in item['profiles'] if x['name']==profile)['available'] in ('no','false'):
+        raise RuntimeError('Playback profile is reported unavailable by the audio device: '+profile)
+    if item['activeProfile']==profile:
+        updated=audio_topology()
+        if normalize:normalize_with_media()
+        return updated
+    result=run([exe('pactl'),'set-card-profile',card,profile],False,10,media_env())
+    if result.returncode:raise RuntimeError(result.stderr.strip() or 'Could not activate audio card profile')
+    previous={x['name'] for x in item['sinks'] if sink_owner(x,topology['cards'])==item}
+    deadline=time.monotonic()+5.0
+    while time.monotonic()<deadline:
+        for current in _pactl_json('cards'):
+            if not isinstance(current,dict) or current.get('name')!=card:continue
+            active=current.get('active_profile') or {}
+            active_name=active.get('name') if isinstance(active,dict) else active
+            if active_name==profile:
+                updated=audio_topology()
+                selected=next((x for x in updated['cards'] if x['name']==card),None)
+                owned={x['name'] for x in selected['sinks'] if sink_owner(x,updated['cards'])==selected} if selected else set()
+                if owned:
+                    if normalize:normalize_with_media()
+                    return updated
+            break
+        time.sleep(.1)
+    updated=audio_topology()
+    current=next((x for x in updated['cards'] if x['name']==card),None)
+    if current is None or current['activeProfile']!=profile:
+        raise RuntimeError('Audio card profile did not become active: '+profile)
+    # A cross-card output can still be selected; report the actual live sinks
+    # instead of accepting an unrelated sink as proof of this card's readiness.
+    if normalize:normalize_with_media()
+    return updated
 def choose_output_route(requested=None):
-    top=audio_topology();saved=top['saved']
-    if not top['cards']:raise RuntimeError('No physical ALSA playback cards')
-    requested=requested if isinstance(requested,dict) else saved
-    routes=[(card,route) for card in top['cards'] for route in card['sinks']]
-    key=requested.get('name') or requested.get('sink') or ''
-    match=next(((c,r) for c,r in routes if c['name']==requested.get('card') and (r['name']==key or r['sink']==key)),None)
-    if match is None:
-        if key and requested is not saved:raise ValueError('Selected ALSA output is unavailable: '+key)
-        # An explicit UCM device is required when multiple routes share a PCM.
-        match=routes[0]
-    card,route=match
-    return {**route,'card':card['name'],'label':card['label']+' · '+route['label']}
+    explicit=isinstance(requested,dict)
+    remembered=bool(requested.get('_remembered')) if explicit else False
+    if explicit and not remembered and not requested.get('sink'):
+        raise ValueError('Choose a playback sink; no automatic output is selected')
+    topology=audio_topology();cards=topology['cards']
+    requested=requested if explicit else topology['saved']
+    if not cards:raise RuntimeError('No physical laptop audio card was found')
+    card_name=str(requested.get('card') or '')
+    selected_card=next((x for x in cards if x['name']==card_name),None)
+    if selected_card is None and explicit and card_name:raise RuntimeError('Selected audio card is unavailable: '+card_name)
+    sink_name=str(requested.get('sink') or '')
+    if selected_card is None:
+        # A route copied from another laptop must not force its old card/profile.
+        sinks=cards[0]['sinks']
+        default=run([exe('pactl'),'get-default-sink'],False,5,media_env()).stdout.strip()
+        candidate=next((x for x in sinks if x['name']==default and sink_owner(x,cards)),None)
+        if candidate is None:candidate=next((x for x in sinks if x['name']==sink_name and sink_owner(x,cards)),None)
+        if candidate is None:candidate=next((x for x in sinks if sink_owner(x,cards) and x['name']!=sink_name),None)
+        if candidate is None:candidate=next((x for x in sinks if sink_owner(x,cards)),None)
+        if candidate is None:raise RuntimeError('No playback sink with a verified card owner is available')
+        selected_card=sink_owner(candidate,cards)
+        sink_name=candidate['name']
+    profile_name=str(requested.get('profile') or '')
+    if profile_name not in {x['name'] for x in selected_card['profiles']}:
+        if explicit and profile_name:raise RuntimeError('Selected card profile is unavailable: '+profile_name)
+        profile_name=next((x['name'] for x in selected_card['profiles'] if x['name']==selected_card['activeProfile'] and x['available'] not in ('no','false')),None) or next((x['name'] for x in selected_card['profiles'] if x['available'] not in ('no','false')),None)
+        if not profile_name:raise RuntimeError('No available playback profile on '+selected_card['label'])
+    if next(x for x in selected_card['profiles'] if x['name']==profile_name)['available'] in ('no','false'):
+        raise RuntimeError('Selected playback profile is reported unavailable: '+profile_name)
+    if selected_card['activeProfile']!=profile_name:
+        topology=set_output_profile(selected_card['name'],profile_name,normalize=False,topology=topology)
+        cards=topology['cards']
+        selected_card=next(x for x in cards if x['name']==selected_card['name'])
+        if sink_name and not any(x['name']==sink_name for x in selected_card['sinks']):
+            deadline=time.monotonic()+2.0
+            while time.monotonic()<deadline:
+                topology=audio_topology();cards=topology['cards']
+                selected_card=next(x for x in cards if x['name']==selected_card['name'])
+                if any(x['name']==sink_name for x in selected_card['sinks']):break
+                time.sleep(.1)
+    sink=next((x for x in selected_card['sinks'] if x['name']==sink_name),None)
+    if sink is None:
+        if explicit and sink_name and not remembered:raise RuntimeError('Selected playback sink is unavailable: '+sink_name)
+        sink=next((x for x in selected_card['sinks'] if sink_owner(x,cards)==selected_card and any(p['available'] not in ('no','false') for p in x['ports'])),None)
+        if sink is None:raise RuntimeError('The selected card profile exposes no available physical sink; choose an explicit sink on another card or another playback profile')
+    port_name=str(requested.get('port') or '') if sink['name']==str(requested.get('sink') or '') else ''
+    port=next((x for x in sink['ports'] if x['name']==port_name),None)
+    if port is None:
+        if explicit and port_name and not remembered:raise RuntimeError('Selected playback port is unavailable: '+port_name)
+        port=next((x for x in sink['ports'] if x['name']==sink.get('activePort') and x['available'] not in ('no','false')),None)
+        if port is None:port=next((x for x in sink['ports'] if x['available'] not in ('no','false')),None)
+        if port is None:raise RuntimeError('No currently available port on '+sink['label'])
+    if port['available'] in ('no','false'):
+        if not remembered:raise RuntimeError('Selected output port is reported unavailable: '+port['name'])
+        port=next((x for x in sink['ports'] if x['name']==sink.get('activePort') and x['available'] not in ('no','false')),None) or next((x for x in sink['ports'] if x['available'] not in ('no','false')),None)
+        if port is None:raise RuntimeError('No currently available port on '+sink['label'])
+    if port['name'] and port['name']!=sink.get('activePort'):
+        result=run([exe('pactl'),'set-sink-port',sink['name'],port['name']],False,10,media_env())
+        if result.returncode:raise RuntimeError(result.stderr.strip() or 'Could not activate the selected output port')
+    fresh=audio_topology();cards=fresh['cards']
+    live=next((x for x in (cards[0]['sinks'] if cards else []) if x['name']==sink['name']),None)
+    if live is None or not any(x['name']==port['name'] and x['available'] not in ('no','false') for x in live['ports']) or (port['name'] and live['activePort']!=port['name']):
+        raise RuntimeError('Selected output or port disappeared; reopen the output picker')
+    sink=live
+    owner=sink_owner(sink,cards)
+    if owner is None:owner_card='';owner_profile=''
+    else:owner_card=owner['name'];owner_profile=owner['activeProfile']
+    route={'card':selected_card['name'],'profile':selected_card['activeProfile'],
+           'sink':sink['name'],'port':port['name'],'label':sink['label']+((' · '+port['label']) if port['name'] else ''),
+           'sinkCard':owner_card,'sinkProfile':owner_profile}
+    return route
 OUTPUT_CHOICES=STATE/'output-choices.json'
 CARD_CHOICES=STATE/'output-card-profiles.json'
 def remembered_card_profile(card):
@@ -1294,73 +1463,98 @@ def remembered_output(card,profile):
     entry=choices.get(card+'\n'+profile,{})
     return entry if isinstance(entry,dict) else {}
 def remember_output(route):
-    _write_json(LOCALSINK,route)
+    choices=_read_json(OUTPUT_CHOICES,{})
+    if not isinstance(choices,dict):choices={}
+    choices[route['card']+'\n'+route['profile']]={key:route.get(key,'') for key in ('card','profile','sink','port')}
+    _write_json(OUTPUT_CHOICES,choices)
+    card_profiles=_read_json(CARD_CHOICES,{})
+    if not isinstance(card_profiles,dict):card_profiles={}
+    card_profiles[route['card']]=route['profile']
+    _write_json(CARD_CHOICES,card_profiles)
 def output_state():
     topology=audio_topology();topology['selected']=topology['saved'].copy()
     choices=_read_json(OUTPUT_CHOICES,{})
     topology['remembered']=choices if isinstance(choices,dict) else {}
     topology['rememberedProfiles']=_read_json(CARD_CHOICES,{})
     return topology
-def activate_output_route(route):
-    verb=route.get('verb','');device=route.get('ucmDevice','')
-    if not (verb and device):return
-    cards=audio_topology()['cards']
-    card=next((c for c in cards if c['name']==route['card']),None)
-    if card is None or not any(r['name']==route['name'] and r['verb']==verb and r['ucmDevice']==device for r in card['sinks']):
-        raise ValueError('UCM output no longer available')
-    script=f'open hw:{card["index"]}\nreset\nset _verb {verb}\nset _enadev {device}\n'
-    result=subprocess.run([exe('alsaucm'),'-n','-b','-'],input=script,text=True,capture_output=True,timeout=12)
-    if result.returncode:raise RuntimeError('ALSA UCM route failed: '+(result.stderr or result.stdout).strip())
-
 def start_local_monitor(route=None,resolved=False):
+    # A pre-resolved route was selected under the mode lock; do not apply it twice.
     selected=route if resolved else choose_output_route(route)
+    sink=selected['sink']
     stop_local_monitor()
-    activate_output_route(selected)
-    command='set -o pipefail; "$1" -q -D camilladsp_output_shared -r 96000 -f S32_LE -c 2 -t raw | "$2" -q -D "$3" -r 96000 -f S32_LE -c 2 -t raw'
-    with (STATE/'local-monitor.log').open('ab',buffering=0) as log:
-        proc=subprocess.Popen([exe('bash'),'-c',command,'monitor',exe('arecord'),exe('aplay'),selected['sink']],
-                              stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
-    LOCALMONPID.write_text(str(proc.pid)+'\n')
-    time.sleep(.8)
-    if proc.poll() is not None:
-        LOCALMONPID.unlink(missing_ok=True)
-        raise RuntimeError('ALSA playback failed on '+selected['sink']+': '+log_tail(STATE/'local-monitor.log')[-1500:])
-    _write_json(LOCALSINK,selected)
-    return {'pid':proc.pid,**selected}
+    command='set -o pipefail; "$1" -q -D camilladsp_output_shared -r 96000 -f S32_LE -c 2 -t raw | "$2" --playback --device="$3" --rate=96000 --format=s32le --channels=2'
+    args=['/run/current-system/sw/bin/bash','-c',command,'monitor',exe('arecord'),exe('pacat'),sink]
+    log=(STATE/'local-monitor.log').open('ab',buffering=0)
+    try:process=subprocess.Popen(args,stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True,env=media_env())
+    finally:log.close()
+    LOCALMONPID.write_text(str(process.pid)+'\n')
+    # Confirm that this monitor's pacat stream is on the requested sink.
+    deadline=time.monotonic()+4.0
+    while time.monotonic()<deadline:
+        if process.poll() is not None:break
+        try:
+            target=next((row.get('index') for row in _pactl_json('sinks') if row.get('name')==sink),None)
+            if target is not None:
+                for row in _pactl_json('sink-inputs'):
+                    props=row.get('properties') or {}
+                    pid=str(props.get('application.process.id') or '')
+                    if row.get('sink')==target and pid.isdecimal():
+                        try:
+                            if os.getpgid(int(pid))==process.pid:
+                                _write_json(LOCALSINK,selected)
+                                remember_output(selected)
+                                return {'pid':process.pid,**selected}
+                        except (OSError,ProcessLookupError):pass
+        except (OSError,RuntimeError,subprocess.TimeoutExpired):pass
+        time.sleep(.1)
+    stop_local_monitor()
+    raise RuntimeError('Local playback stream did not appear on '+sink+'; check '+str(STATE/'local-monitor.log'))
 def mode_state():
-    if STOPPED.exists():return {'mode':'stopped','label':'No source selected','source':'','localWanted':False,'sonobusWanted':False,'camilla':False,'sonobus':False,'localMonitor':False,'systemAudio':False,'airplay':False,'localOutput':saved_output_route(),'localOutputLabel':'','sonobusPolicy':{}}
-    name=audio_mode();label,source,local,sono=MODES[name]
+    if STOPPED.exists() and not alive(rpid(CAMPID),'camilladsp'):
+        return {'mode':'stopped','label':'No source selected','source':'',
+            'localWanted':False,'sonobusWanted':False,'camilla':False,
+            'sonobus':False,'localMonitor':False,'systemAudio':False,
+            'airplay':False,'localOutput':saved_output_route(),
+            'localOutputLabel':'','sonobusPolicy':{}}
+    name=audio_mode();label,source,local,sono=MODES[name];policy=MODE_POLICIES[name]
+    local_pid=rpid(LOCALMONPID)
     route=_read_json(LOCALSINK,{})
-    return {'mode':name,'label':label,'source':source,'localWanted':local,'sonobusWanted':sono,
-        'camilla':alive(rpid(CAMPID),'camilladsp') or alive(rpid(DIRECT)),'sonobus':bool(sonopids()),'localMonitor':alive(rpid(LOCALMONPID)),
-        'systemAudio':alive(rpid(CAMPID),'camilladsp') or alive(rpid(DIRECT)),
-        'airplay':run(['systemctl','is-active','--quiet','shairport-sync.service'],False,5).returncode==0,
-        'localOutput':saved_output_route(),'localOutputLabel':route.get('label','Not selected') if isinstance(route,dict) else 'Not selected',
-        'sonobusPolicy':MODE_POLICIES[name]}
+    if not isinstance(route,dict):route={}
+    selected={key:str(route.get(key) or '') for key in ('card','profile','sink','port')}
+    return {
+        'mode':name,'label':label,'source':source,'localWanted':local,'sonobusWanted':sono,
+        'camilla':alive(rpid(CAMPID),'camilladsp'),'sonobus':bool(sonopids()),'localMonitor':alive(local_pid),
+        'systemAudio':run(['systemctl','--user','is-active',SYSTEM_AUDIO_SERVICE],False,5).stdout.strip()=='active',
+        'airplay':run(['systemctl','is-active','shairport-sync.service'],False,5).stdout.strip()=='active',
+        'localOutput':selected,'localOutputLabel':(route.get('label') or 'Not selected'),'sonobusPolicy':policy,
+    }
 def apply_mode(name,password=None,restore_camilla=True,output=None,normalize=True,output_resolved=False):
     if name not in MODES:raise ValueError('Invalid audio mode')
     label,source,local,sono=MODES[name];policy=MODE_POLICIES[name]
-    if restore_camilla and not (alive(rpid(CAMPID),'camilladsp') or alive(rpid(DIRECT))):
+    if STOPPED.exists():
+        user_service('start','pipewire.socket')
+        user_service('start','pipewire-pulse.socket')
+        user_service('start','wireplumber.service')
+    if restore_camilla and not alive(rpid(CAMPID),'camilladsp'):
         try:saved=ACTIVE.read_text().strip()
         except OSError:saved=''
         available=profiles()
-        selected=resolve_saved_profile(saved) if saved else next(p for p in available if p.name!='00-direct.yml')
-        if selected.name=='00-direct.yml':start_direct_bridge()
-        else:start_camilla(selected)
+        selected=profile(saved) if saved else available[0]
+        start_camilla(selected)
     apply_source_services(source)
     if local:
         selected=output if output_resolved else choose_output_route(output)
         current=saved_output_route()
-        wanted={key:selected[key] for key in ('card','name','sink','verb','ucmDevice')}
-        if not alive(rpid(LOCALMONPID)) or any(current.get(key)!=wanted[key] for key in wanted):
+        wanted={key:selected[key] for key in ('card','profile','sink','port')}
+        if not alive(rpid(LOCALMONPID)) or current!=wanted:
             start_local_monitor(selected,resolved=True)
     elif alive(rpid(LOCALMONPID)):stop_local_monitor()
     if sono:
         if not sonobus_matches(policy):restart_sonobus(password,policy,normalize=False)
     elif sonopids():stop_sonobus()
     MODE.write_text(name+'\n')
-    STOPPED.unlink(missing_ok=True)
     if normalize:normalize_with_media()
+    STOPPED.unlink(missing_ok=True)
     if source=='system' and QUEUE_FILE.is_file() and not alive(rpid(MPVPID),'mpv'):
         try:ensure_mpv()
         except (OSError,RuntimeError):pass
@@ -1369,8 +1563,8 @@ def set_mode(name,password=None,output=None):
     with LOCK:
         if name not in MODES:raise ValueError('Invalid audio mode')
         selected=choose_output_route(output) if MODES[name][2] else None
-        if STOPPED.exists() and (alive(rpid(CAMPID),'camilladsp') or alive(rpid(DIRECT))):
-            stop_local_monitor();stop_camilla(include_stale=True);stop_direct_bridge()
+        if STOPPED.exists() and alive(rpid(CAMPID),'camilladsp'):
+            stop_local_monitor();stop_camilla(include_stale=True)
         # Do not release CamillaDSP or SonoBus just because the source mode changed.
         return apply_mode(name,password,output=selected,output_resolved=selected is not None)
 def mpv(command):
@@ -1635,7 +1829,7 @@ def toggle_away_display():
 def full_state():
     return {
         'mode':mode_state(),'awayDisplay':away_display_state(),
-        'profiles':{'profiles':[profile_id(item) for item in profiles()],'filters':listening_filters(),'active':active(),'running':alive(rpid(CAMPID),'camilladsp') or alive(rpid(DIRECT))},
+        'profiles':{'profiles':[item.name for item in profiles()],'filters':listening_filters(),'active':active(),'running':alive(rpid(CAMPID),'camilladsp')},
         'player':player_state(),'systemMedia':system_state(),'groups':groups_state(),'playlists':lists(),
     }
 
@@ -1643,11 +1837,11 @@ def volatile_state():
     return {
         'audioStopSignal':True,
         'mode':mode_state(),'awayDisplay':away_display_state(),
-        'profiles':{'active':active(),'filters':listening_filters(),'running':alive(rpid(CAMPID),'camilladsp') or alive(rpid(DIRECT))},
+        'profiles':{'active':active(),'filters':listening_filters(),'running':alive(rpid(CAMPID),'camilladsp')},
         'player':player_state(),'groups':groups_state(),
     }
 
-PAGE='<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>CamillaDSP Studio</title><style>\n:root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display",sans-serif;--v:#865dff;--b:#3f8eff;--g:#35d6a0}*{box-sizing:border-box}body{margin:0;min-height:100svh;padding:22px 16px 36px;color:#fff;background:radial-gradient(900px 520px at 50% -150px,#6542a8,#211a38 44%,#070910);background-attachment:fixed}main{max-width:540px;margin:auto}.hidden{display:none!important}.hero,.card{border:1px solid #ffffff22;background:linear-gradient(145deg,#ffffff1c,#ffffff0d);box-shadow:inset 0 1px #ffffff22,0 20px 50px #0005;backdrop-filter:blur(22px)}.hero{padding:25px 22px;border-radius:29px}.card{padding:18px;border-radius:24px;margin:14px 0}.card+.grid{margin-top:14px}.eyebrow,.label,.section-title{color:#bcb7cb;text-transform:uppercase;letter-spacing:.1em;font-size:12px;font-weight:800}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--g);box-shadow:0 0 15px var(--g);margin-right:8px}h1{margin:10px 0 5px;font-size:32px;letter-spacing:-.04em}.subtitle,.details,.meta{color:#b9b4c5;font-size:13px}.section-title{margin:27px 3px 10px}.title{font-size:20px;font-weight:800;margin-top:6px;overflow-wrap:anywhere}.grid{display:grid;gap:10px}.two{grid-template-columns:1fr 1fr}.three{grid-template-columns:1fr 1.2fr 1fr}.pc-transport{margin-bottom:18px}.pc-library-actions{margin-top:18px}.wide{grid-column:1/-1}button,input{font:inherit}button{border:0;color:#fff;cursor:pointer}.action,.item,.transport,.back{width:100%;transition:transform .12s,filter .15s}.action:active,.item:active,.transport:active,.back:active{transform:scale(.96);filter:brightness(1.15)}.action{min-height:54px;border-radius:18px;background:#ffffff1b;font-weight:780}.primary{background:linear-gradient(135deg,var(--b),var(--v))}.green{background:linear-gradient(135deg,#24ae7c,#287d95)}.danger{background:linear-gradient(135deg,#e64e74,#8e2b4b)}.active{outline:2px solid #a783ff;background:linear-gradient(135deg,#4e82ff66,#8552ff77)!important}.search{width:100%;min-height:49px;border:1px solid #ffffff22;border-radius:17px;padding:12px 15px;color:#fff;background:#ffffff12;outline:0}.search:focus{border-color:#9b7aff;box-shadow:0 0 0 4px #825dff2e}.list{display:grid;gap:10px;margin-top:10px}.cover-art{width:48px;height:48px;flex:none;object-fit:cover;border-radius:11px;background:#ffffff18}.cover-art.large{width:100%;max-width:220px;height:auto;aspect-ratio:1;display:block;margin:0 auto 16px;border-radius:20px}.cover-fallback{display:grid;place-items:center;color:#c3b6f3;font-size:24px}.cover-fallback.large{display:grid;font-size:68px}.item-cover{display:flex;align-items:center;gap:12px;min-width:0}.item-cover .copy{min-width:0;flex:1;overflow-wrap:anywhere;font-size:16px;line-height:1.3}.item-cover .name{font-size:16px;line-height:1.3;font-weight:780}.item-cover .meta{font-size:13px;line-height:1.35;font-weight:400}.item{text-align:left;min-height:64px;padding:13px 15px;border-radius:19px;background:#ffffff16}.name{display:block;font-weight:780}.meta{display:block;margin-top:4px}.playlist-row{position:relative}\n.playlist-open{display:block;padding-right:120px;min-height:76px}\n.playlist-controls{position:absolute;right:12px;top:50%;transform:translateY(-50%);display:flex;gap:8px;z-index:1}\n.playlist-icon{display:grid;place-items:center;width:44px;height:44px;border:1px solid #ffffff38;border-radius:14px;background:#242036e8;box-shadow:0 4px 14px #0005}\n.playlist-icon:hover{background:#564282}\n.playlist-icon:active{transform:scale(.94)}\n.playlist-icon .media-icon{width:20px;height:20px}\n.playlist-icon.busy{font-size:20px}.header{display:grid;grid-template-columns:72px 1fr 72px;align-items:center}.header h1{text-align:center;font-size:23px}.back{min-height:43px;border-radius:15px;background:#ffffff18}.range{--fill:0%;width:100%;height:36px;background:transparent;appearance:none}.range::-webkit-slider-runnable-track{height:6px;border-radius:99px;background:linear-gradient(to right,#fff var(--fill),#ffffff2d var(--fill))}.range::-webkit-slider-thumb{appearance:none;width:21px;height:21px;margin-top:-7.5px;border-radius:50%;background:#fff;box-shadow:0 3px 10px #0008}.times{display:flex;justify-content:space-between;color:#aaa5b5;font-size:12px}.range-row{display:grid;grid-template-columns:24px 1fr 24px;align-items:center;gap:7px}.transport{display:grid;place-items:center;min-height:78px;border-radius:999px;background:#ffffff19}.transport.main{min-height:98px;background:linear-gradient(145deg,#9e68ff,#583ad2)}.media-icon{display:block;width:34px;height:34px;fill:none;stroke:#fff;stroke-width:2.15;stroke-linecap:round;stroke-linejoin:round;pointer-events:none}.transport.main .media-icon{width:42px;height:42px}.icon-fill{fill:#fff;stroke:#fff}.range{touch-action:none}.range.dragging::-webkit-slider-thumb{transform:scale(1.08)}.source-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}\n\n/* Final interaction and consistency pass */\nbutton{position:relative;overflow:hidden;-webkit-user-select:none;user-select:none;touch-action:manipulation}\nbutton:focus-visible,.search:focus-visible,.range:focus-visible{outline:2px solid #b79cff;outline-offset:3px}\nbutton:disabled{opacity:.58;cursor:default}\n.action,.item,.transport,.back{will-change:transform}\n.action.busy::after,.item.busy::after{content:"";position:absolute;inset:0;background:linear-gradient(105deg,transparent 25%,#ffffff2e 50%,transparent 75%);animation:ui-shine .8s linear infinite}\n@keyframes ui-shine{from{transform:translateX(-100%)}to{transform:translateX(100%)}}\n.transport{transition:transform .12s ease,filter .15s ease,box-shadow .2s ease}\n.transport.main.playing{box-shadow:0 18px 42px #6b45dd77,inset 0 1px #ffffff35}\n.media-icon{transition:transform .16s ease}.transport:active .media-icon{transform:scale(.9)}\n.range{cursor:pointer}.range.dragging::-webkit-slider-thumb{transform:scale(1.1)}\n.range::-webkit-slider-runnable-track{transition:background .08s linear}\n.mode-active{outline:2px solid #72e5bc;background:linear-gradient(135deg,#24ae7c,#287d95)!important}\n#repeat.active,#shuffle.active{outline:2px solid #a783ff;background:linear-gradient(135deg,#4e82ff66,#8552ff77)!important}\n.output-modal{position:fixed;inset:0;z-index:50;display:grid;place-items:end center;padding:18px;background:#05060bbb;backdrop-filter:blur(12px)}.output-sheet{width:min(100%,540px);max-height:82svh;overflow:auto;padding:20px;border:1px solid #ffffff2b;border-radius:26px;background:linear-gradient(145deg,#272139,#11131c);box-shadow:0 28px 80px #000b}.output-options{display:grid;gap:10px;margin:16px 0}.output-choice{display:grid;grid-template-columns:24px 1fr;gap:10px;align-items:center;padding:14px;border-radius:18px;background:#ffffff12}.output-choice input{width:20px;height:20px;accent-color:#865dff}.output-choice strong,.output-choice span{display:block}.output-choice span{margin-top:3px;color:#aaa5b5;font-size:11px;overflow-wrap:anywhere}.modal-actions{display:grid;grid-template-columns:1fr 1.4fr;gap:10px}\n\n@media (prefers-reduced-motion:reduce){*{animation-duration:.001ms!important;transition-duration:.001ms!important;scroll-behavior:auto!important}}\n\n/* Page rhythm and accessible navigation. */\n#profiles>.hero{margin-bottom:20px}\n#profiles>.action{display:block;margin:14px 0 20px}\n#profiles>.grid{margin-top:12px}\n#profiles>.section-title{margin-top:26px;margin-bottom:12px}\n#groups-page .header,#listening-page .header,#songs .header,#playlist .header,#pc .header{margin-bottom:18px}\n#groups-page .card{display:grid;gap:12px}\n#groups-page .card .search,#groups-page .card .action{margin:0}\n#groups-page .card label{display:flex;align-items:center;gap:9px}\n.card>.details{margin-top:6px}\n#pc .card>.label{margin-bottom:8px}\n#listening-page .search{margin-bottom:16px}\n#song-search,#playlist-search{display:block;margin:0 0 16px}\n#song-list,#playlist-songs{margin-top:0}\n.system-media-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}\n.card .range{display:block;margin-top:12px}\n.card .times{margin-top:2px}\n.card .range-row{margin:14px 0 16px}\n.card .grid{margin-top:14px}\n.range-row{grid-template-columns:24px minmax(0,1fr) 24px;gap:10px}\n.volume-icon{display:grid;place-items:center;color:#d6d3de;pointer-events:none}\n.volume-icon svg{display:block;width:20px;height:20px}\n.local-now-header{display:flex;align-items:center;gap:14px;min-width:0;margin:10px 0 16px}\n.local-now-copy{flex:1;min-width:0}\n.local-now-copy .details{margin-top:6px;overflow-wrap:anywhere}\n.local-now-artwork{flex:0 0 72px;width:72px;height:72px;position:relative;display:grid;place-items:center;overflow:hidden;border-radius:15px;background:linear-gradient(145deg,#433b68,#222d42);color:#c8c1e9;font-size:32px;line-height:1}\n.local-now-artwork::before{content:\'♫\'}\n.local-now-artwork img{position:absolute;inset:0;display:block;width:100%;height:100%;object-fit:cover}\n.back-to-top{position:fixed;z-index:40;top:max(14px,env(safe-area-inset-top));left:50%;transform:translateX(-50%);width:auto;min-height:44px;padding:9px 17px;border:1px solid #ffffff38;border-radius:999px;background:#262039f2;box-shadow:0 8px 28px #0009;white-space:nowrap;font-size:14px;font-weight:750;backdrop-filter:blur(14px)}\n.back-to-top:active{transform:translateX(-50%) scale(.96)}\n\n/* Playlist actions: clear affordance without changing the page layout. */\n.playlist-row{border-radius:19px;transition:background .16s ease}\n.playlist-row:hover{background:#ffffff08}\n.playlist-icon{transition:background .16s ease,border-color .16s ease,transform .12s ease}\n.playlist-icon:hover{border-color:#aa90ff;background:#493572}\n#shuffle:disabled{opacity:.42;cursor:not-allowed}\n#shuffle:not(:disabled){background:linear-gradient(135deg,#6252a7,#373b77)}\n\n/* Unified indigo, blue and mint palette. */\n:root{--v:#8574f5;--b:#6c9cff;--g:#55d9ae}\nbody{background:radial-gradient(900px 520px at 50% -150px,#514784,#1d2039 48%,#0b101b)}\n.hero,.card{border-color:#a8b7ef25;background:linear-gradient(145deg,#b8c8ff18,#a8b8ee0a)}\n.action:not(.primary):not(.green):not(.danger):not(.active){background:#a8b7ef1b}\n#shuffle:not(:disabled){background:linear-gradient(135deg,#6257ae,#465b99)}\n.playlist-icon{background:#242941e8;border-color:#b7c7ff38}\n.playlist-icon:hover{background:#414a77;border-color:#9caeff}\n.output-sheet{background:linear-gradient(145deg,#252b47,#111827)}\n\n/* Shared home palette and compact destination layout. */\n:root{--v:#8574f5;--b:#6c9cff;--g:#55d9ae}\n#profiles{max-width:480px;margin-inline:auto}\n#profiles>.hero{padding:17px 18px;border-radius:23px;margin-bottom:12px}\n#profiles>.hero h1{font-size:27px;margin:6px 0 3px}\n#profiles>.card{padding:16px;margin:10px 0;border-radius:21px}\n#profiles>.section-title{margin:18px 3px 8px}\n#profiles>.action{min-height:48px;margin:10px 0 12px;border-radius:16px}\n#profiles .source-grid{grid-template-columns:repeat(3,minmax(0,1fr));gap:9px;margin-top:8px}\n#profiles .source-grid .source-heading{grid-column:1/-1;color:#bcb7cb;font-size:11px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;margin:9px 2px 0}\n#profiles .source-grid .action{min-height:50px;padding:8px 5px;border-radius:15px;font-size:14px;line-height:1.2}\n#profiles .card .grid{margin-top:10px}\n#profiles .transport{min-height:64px}\n#profiles .transport.main{min-height:80px}\n#profiles .pc-transport{margin-bottom:12px}\n</style></head><body><main>\n<section id="profiles"><div class="hero"><div class="eyebrow"><span class="dot"></span><span id="engine-status">Audio engine offline</span></div><h1>CamillaDSP Studio</h1><div class="subtitle">System audio, AirPlay and PC Music through CamillaDSP and SonoBus.</div></div><div class="section-title">System media</div><div class="card"><div class="system-media-heading"><div class="label">Active desktop player</div></div><div id="system-title" class="title">No system media</div><div id="system-details" class="details"></div><input id="system-seek" class="range" type="range" aria-label="System media playback position" min="0" max="1" step=".1"><div class="times"><span id="system-elapsed">0:00</span><span id="system-duration">0:00</span></div><div class="range-row"><span class="volume-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 4V5L7 9H3z"/></svg></span><input id="system-volume" class="range" type="range" aria-label="Master volume" min="0" max="100" value="100"><span class="volume-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M2 9v6h4l5 4V5L6 9H2z"/><path d="M14 8.2a5 5 0 0 1 0 7.6l1.4 1.4a7 7 0 0 0 0-10.4L14 8.2z"/><path d="M17 5.3a9 9 0 0 1 0 13.4l1.4 1.4a11 11 0 0 0 0-16.2L17 5.3z"/></svg></span></div><div class="grid three"><button id="system-previous" class="transport" aria-label="Previous"><svg class="media-icon" viewBox="0 0 24 24"><path d="M6 5v14"></path><path d="M18 6.5 8.5 12 18 17.5z"></path></svg></button><button id="system-toggle" class="transport main" aria-label="Play"><svg class="media-icon" viewBox="0 0 24 24"><path id="system-play-shape" class="icon-fill" d="M8 5.5 19 12 8 18.5z"></path></svg></button><button id="system-next" class="transport" aria-label="Next"><svg class="media-icon" viewBox="0 0 24 24"><path d="M18 5v14"></path><path d="M6 6.5 15.5 12 6 17.5z"></path></svg></button></div></div><button id="open-pc" class="action green">Local Music Library</button><button id="away-display-toggle" class="action" type="button" aria-pressed="false" style="margin-top:10px">Away and display off</button><div class="section-title">Audio source</div><div class="card"><div id="source-title" class="title">Loading…</div><div id="source-details" class="details"></div><div id="mode-grid" class="source-grid"></div></div><div class="section-title">SonoBus Group</div><div class="card"><div class="label">Selected group</div><div id="sonobus-group" class="title">Loading…</div><div id="sonobus-status" class="details">Checking SonoBus…</div></div><button id="open-groups" class="action">Manage SonoBus Group</button><div class="section-title">Active profile</div><div class="card"><div id="active-profile" class="title">Loading…</div><div id="active-state" class="details"></div></div><button id="open-listening" class="action">Select Listening Profile</button><div class="section-title" id="restart-heading">Restart services</div><div class="grid two" aria-labelledby="restart-heading"><button id="restart-camilla" class="action">Restart CamillaDSP</button><button id="restart-sonobus" class="action">Restart SonoBus</button><button id="restart-airplay" class="action">Restart AirPlay</button><button id="restart-vnc" class="action">Restart VNC</button></div><button id="audio-toggle" class="action danger" type="button" style="margin-top:16px;min-height:64px">Stop all audio</button></section>\n<section id="groups-page" class="hidden"><div class="header"><button data-back="profiles" class="back">Back</button><h1>SonoBus Group</h1><div></div></div><div class="card"><select id="group-select" class="search"></select><input id="group-key" class="search" placeholder="Profile name"><input id="group-name" class="search" placeholder="Group name"><input id="group-user" class="search" placeholder="Username"><input id="group-server" class="search" value="aoo.sonobus.net:10998" placeholder="Connection server"><label class="details"><input id="group-required" type="checkbox"> Password required</label><input id="group-password" class="search" type="password" placeholder="Password (never saved)"><button id="save-group" class="action primary">Save Group Profile</button></div></section>\n<section id="listening-page" class="hidden"><div class="header"><button data-back="profiles" class="back">Back</button><h1>Listening Profiles</h1><div></div></div><div class="section-title">Listening profiles</div><input id="profile-search" class="search" placeholder="Search profiles"><div id="profile-list"></div></section>\n<section id="pc" class="hidden"><div class="header"><button id="pc-back" class="back">Back</button><h1>PC Music</h1><div></div></div><div class="card"><div class="label">Now playing</div><div class="local-now-header"><span id="now-cover" class="local-now-artwork" aria-hidden="true"></span><div class="local-now-copy"><div id="now-title" class="title">Nothing playing</div><div id="now-details" class="details"></div></div></div><input id="seek" class="range" type="range" aria-label="Local music playback position" min="0" max="1" step=".1"><div class="times"><span id="elapsed">0:00</span><span id="duration">0:00</span></div><div class="range-row"><span class="volume-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 4V5L7 9H3z"/></svg></span><input id="volume" class="range" type="range" aria-label="Master volume" min="0" max="100" value="100"><span class="volume-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M2 9v6h4l5 4V5L6 9H2z"/><path d="M14 8.2a5 5 0 0 1 0 7.6l1.4 1.4a7 7 0 0 0 0-10.4L14 8.2z"/><path d="M17 5.3a9 9 0 0 1 0 13.4l1.4 1.4a11 11 0 0 0 0-16.2L17 5.3z"/></svg></span></div><div class="grid two"><button id="repeat" class="action">Repeat Off</button><button id="shuffle" class="action" title="Update the saved shuffled playlist without changing what is playing">Shuffle for next play</button></div></div><div class="grid three pc-transport"><button data-cmd="previous" class="transport" aria-label="Previous"><svg class="media-icon" viewBox="0 0 24 24"><path d="M6 5v14"></path><path d="M18 6.5 8.5 12 18 17.5z"></path></svg></button><button data-cmd="toggle" class="transport main" aria-label="Play"><svg class="media-icon" viewBox="0 0 24 24"><path id="local-play-shape" class="icon-fill" d="M8 5.5 19 12 8 18.5z"></path></svg></button><button data-cmd="next" class="transport" aria-label="Next"><svg class="media-icon" viewBox="0 0 24 24"><path d="M18 5v14"></path><path d="M6 6.5 15.5 12 6 17.5z"></path></svg></button></div><div class="grid pc-library-actions"><button id="all-songs" class="action primary">All Songs</button></div><div class="section-title">Playlists</div><div id="playlists" class="list"></div></section>\n<section id="songs" class="hidden"><div class="header"><button data-back="pc" class="back">Back</button><h1>All Songs</h1><div></div></div><input id="song-search" class="search" type="search" aria-label="Search all songs" placeholder="Search all songs"><div id="song-list" class="list"></div></section>\n<section id="playlist" class="hidden"><div class="header"><button data-back="pc" class="back">Back</button><h1 id="playlist-title">Playlist</h1><div></div></div><input id="playlist-search" class="search" type="search" aria-label="Search this playlist" placeholder="Search this playlist"><div id="playlist-songs" class="list"></div></section><button id="back-to-top" class="back-to-top hidden" type="button">Go back to top of page ↑</button><div id="output-modal" class="output-modal hidden"><div class="output-sheet"><div class="label">Laptop playback device</div><div id="output-mode-title" class="title">Choose output</div><div class="details">Choose an ALSA card, then its UCM output or playback PCM. Apply output commits laptop playback.</div><div class="output-options"><label class="details">Card<select id="output-card" class="search"></select></label><label class="details">ALSA output / UCM route<select id="output-sink" class="search"></select></label></div><div class="modal-actions"><button id="output-cancel" class="action">Back without changes</button><button id="output-apply" class="action primary">Apply output</button></div></div></div>\n</main><script>const $=selector=>document.querySelector(selector);\nconst screens=[\'profiles\',\'pc\',\'songs\',\'playlist\',\'groups-page\',\'listening-page\'].map(id=>$(\'#\'+id));\nlet all=[],inside=[],current=\'\';\n\nconst state={\n  system:{slider:$(\'#system-seek\'),elapsed:$(\'#system-elapsed\'),durationLabel:$(\'#system-duration\'),volume:$(\'#system-volume\'),duration:0,dragging:false,polling:false,repoll:false,clockPosition:0,clockAt:0,clockPlaying:false,lastAvailableAt:0,trackKey:\'\',skipPending:false,skipFrom:\'\',skipStarted:0,skipWarned:false,volumeHold:0,volumeTimer:null,volumePending:null},\n  local:{slider:$(\'#seek\'),elapsed:$(\'#elapsed\'),durationLabel:$(\'#duration\'),volume:$(\'#volume\'),duration:0,dragging:false,polling:false,volumeHold:0,volumeTimer:null,volumePending:null}\n};\n\nconst fmt=value=>{const v=Math.max(0,Number(value)||0);return Math.floor(v/60)+\':\'+String(Math.floor(v)%60).padStart(2,\'0\')};\nfunction show(id){screens.forEach(screen=>screen.classList.toggle(\'hidden\',screen.id!==id));scrollTo({top:0,behavior:\'smooth\'});updateBackToTop()}\nfunction updateBackToTop(){const visible=[\'songs\',\'playlist\'].some(id=>!$(\'#\'+id).classList.contains(\'hidden\'));$(\'#back-to-top\').classList.toggle(\'hidden\',!visible||window.scrollY<320)}\nwindow.addEventListener(\'scroll\',updateBackToTop,{passive:true});$(\'#back-to-top\').onclick=()=>window.scrollTo({top:0,behavior:\'smooth\'});$(\'#open-groups\').onclick=()=>show(\'groups-page\');$(\'#open-listening\').onclick=()=>show(\'listening-page\');\nfunction notificationBox(){const banners=[...document.querySelectorAll(\'#global-task-feedback\')];let banner=banners.shift()||null;banners.forEach(item=>item.remove());if(!banner){banner=document.createElement(\'div\');banner.id=\'global-task-feedback\';banner.setAttribute(\'role\',\'status\');banner.setAttribute(\'aria-live\',\'polite\');banner.style.cssText=\'position:fixed;left:12px;right:12px;top:12px;z-index:5000;box-sizing:border-box;padding:14px 64px 14px 18px;border-radius:14px;background:#152033;color:#eef5ff;border:1px solid #43638f;box-shadow:0 12px 32px rgba(0,0,0,.4);font-weight:700;text-align:center;\';const message=document.createElement(\'span\');message.className=\'task-feedback-message\';const close=document.createElement(\'button\');close.type=\'button\';close.className=\'task-feedback-close\';close.textContent=\'×\';close.setAttribute(\'aria-label\',\'Close notification\');close.style.cssText=\'position:absolute;right:8px;top:50%;transform:translateY(-50%);width:48px;height:48px;border:0;border-radius:12px;background:transparent;color:inherit;font-size:38px;font-weight:400;line-height:42px;cursor:pointer;\';close.addEventListener(\'click\',()=>{clearTimeout(showTaskFeedback.timer);banner.classList.add(\'hidden\')});banner.append(message,close);document.body.appendChild(banner)}return banner}function showTaskFeedback(message,kind=\'working\'){const banner=notificationBox(),messageNode=banner.querySelector(\'.task-feedback-message\');if(messageNode)messageNode.textContent=String(message||\'Working…\');banner.style.background=kind===\'done\'?\'#163d2b\':(kind===\'error\'?\'#4a2025\':\'#152033\');banner.style.borderColor=kind===\'done\'?\'#2f7654\':(kind===\'error\'?\'#a64b56\':\'#43638f\');banner.classList.remove(\'hidden\');clearTimeout(showTaskFeedback.timer);if(kind!==\'working\')showTaskFeedback.timer=setTimeout(()=>banner.classList.add(\'hidden\'),10000)}function note(message,error=false){if(error&&message)showTaskFeedback(message,\'error\')}\nasync function api(url,options={}){const response=await fetch(url,{cache:\'no-store\',...options});const data=await response.json().catch(()=>null);if(!data||typeof data!==\'object\'||Array.isArray(data))throw Error(\'Invalid server response\');if(!response.ok||data.ok===false)throw Error(data.error||\'Request failed\');return data}\nconst post=(url,data={})=>api(url,{method:\'POST\',headers:{\'Content-Type\':\'application/json\'},body:JSON.stringify(data)});\nfunction fill(element,value,maximum){const max=Number(maximum),v=Number(value);const percent=Number.isFinite(max)&&max>0&&Number.isFinite(v)?Math.max(0,Math.min(100,v/max*100)):0;element.style.setProperty(\'--fill\',percent+\'%\')}\nfunction renderTimeline(media,position,duration){\n  const total=Number.isFinite(Number(duration))?Math.max(0,Number(duration)):0;\n  const current=Number.isFinite(Number(position))?Math.max(0,Math.min(Number(position),total>0?total:Number(position))):0;\n  media.duration=total;\n  media.slider.max=String(total>0?total:1);\n  if(!media.dragging)media.slider.value=String(current);\n  const shown=media.dragging?Number(media.slider.value):current;\n  fill(media.slider,shown,total);\n  media.elapsed.textContent=fmt(shown);\n  media.durationLabel.textContent=fmt(total);\n}\n\nfunction renderActiveProfile(data){\n  const info=data.filters?.[data.active];\n  $(\'#active-profile\').textContent=data.active?(info?.group||\'Other\'):\'No profile\';\n  $(\'#active-state\').textContent=data.active?((info?.label||data.active)+\' · \'+(data.running?\'Running\':\'Stopped\')):\'Stopped\'\n}\nfunction renderSonobusStatus(mode,groups){\n  const selected=groups?.profiles?.[groups.active];\n  $(\'#sonobus-group\').textContent=selected?.group||\'No group selected\';\n  $(\'#sonobus-status\').textContent=(mode.sonobus?\'Process running\':\'Process stopped\')+\n    (selected?\' • Profile: \'+groups.active+\' • User: \'+selected.username:\'\')\n}\nasync function busy(button,work,label=\'Working…\',doneLabel=\'Done\',feedback=false){if(button.disabled)return;const original=button.innerHTML;button.disabled=true;button.classList.add(\'busy\');if(!button.classList.contains(\'transport\'))button.textContent=label;if(feedback)showTaskFeedback(label,\'working\');try{const result=await work();if(feedback&&doneLabel)showTaskFeedback(doneLabel,\'done\');return result}catch(error){showTaskFeedback(error?.message||String(error),\'error\');throw error}finally{button.disabled=false;button.classList.remove(\'busy\');button.innerHTML=original}}\nfunction setPlayIcon(shape,button,playing){if(!shape||!button)return;shape.setAttribute(\'d\',playing?\'M8 5h3v14H8z M14 5h3v14h-3z\':\'M8 5.5 19 12 8 18.5z\');button.setAttribute(\'aria-label\',playing?\'Pause\':\'Play\');button.classList.toggle(\'playing\',playing)}\n\nfunction setSystemAvailability(data){for(const id of [\'system-previous\',\'system-toggle\',\'system-next\'])$(\'#\'+id).disabled=!data.available;$(\'#system-seek\').disabled=!data.available||!data.seekable}\nfunction systemTrackKey(data){\n  if(!data||!data.available)return \'\';\n  return [data.player||\'\',data.trackId||\'\',data.title||\'\',data.artist||\'\',data.duration||\'\'].join(\'\\x1f\')\n}\nfunction resetSystemPosition(){\n  const media=state.system;\n  media.clockPlaying=false;media.clockAt=0;media.clockPosition=0;\n  media.dragging=false;media.slider.classList.remove(\'dragging\');\n  renderTimeline(media,0,0)\n}\nfunction systemPositionError(message){\n  const media=state.system;\n  if(!media.skipWarned){media.skipWarned=true;showTaskFeedback(message,\'error\')}\n}\nfunction renderSystem(data){\n  const media=state.system,now=performance.now();\n  if(!data||typeof data!==\'object\')return;\n  if(!data.available&&media.lastAvailableAt&&now-media.lastAvailableAt<1500){\n    if(media.skipPending)resetSystemPosition();\n    return\n  }\n  if(data.available)media.lastAvailableAt=now;\n  else media.lastAvailableAt=0;\n  $(\'#system-title\').textContent=data.title||\'No system media\';\n  $(\'#system-details\').textContent=[data.artist,data.player,data.status].filter(Boolean).join(\' • \');\n  const key=systemTrackKey(data),duration=Number(data.duration),position=data.position===null||data.position===undefined||data.position===\'\'?NaN:Number(data.position);\n  const valid=!!data.available&&Number.isFinite(duration)&&duration>0&&Number.isFinite(position)&&position>=0&&position<=duration+2;\n  if(media.skipPending){\n    // Ignore snapshots from the old track after the skip command.\n    const changed=key&&key!==media.skipFrom;\n    const restarted=key&&key===media.skipFrom&&valid&&position<=3;\n    if(!changed&&!restarted){\n      resetSystemPosition();\n      if(now-media.skipStarted>2000)systemPositionError(\'Could not confirm the new track position. Marker held at 0:00.\');\n      return\n    }\n    media.skipPending=false;media.skipWarned=false\n  }\n  media.trackKey=key;\n  if(!valid){\n    resetSystemPosition();\n    if(data.available)systemPositionError(\'System media position is unavailable or invalid. Marker held at 0:00.\');\n  }else{\n    media.skipWarned=false;\n    media.clockPosition=Math.min(position,duration);\n    media.clockAt=now;\n    media.clockPlaying=!!data.playing;\n    renderTimeline(media,media.clockPosition,duration)\n  }\n  setSystemAvailability(data);\n  if(media.volumePending!==null&&Number.isFinite(data.volume)&&Math.abs(data.volume-media.volumePending)<=1)media.volumePending=null;\n  if(media.volumePending===null&&now>=media.volumeHold&&document.activeElement!==media.volume&&Number.isFinite(data.volume)){\n    displayMasterVolume(data.volume)\n  }\n  setPlayIcon($(\'#system-play-shape\'),$(\'#system-toggle\'),!!data.playing)\n}\nfunction tickSystem(){\n  const media=state.system;\n  if(document.hidden||media.skipPending||!media.clockPlaying||media.dragging||!media.clockAt||media.duration<=0)return;\n  renderTimeline(media,Math.min(media.duration,media.clockPosition+(performance.now()-media.clockAt)/1000),media.duration)\n}\nasync function pollSystem(force=false){\n  const media=state.system;\n  if(media.polling){if(force)media.repoll=true;return}\n  media.polling=true;\n  try{renderSystem(await api(\'/api/system-media\'))}\n  catch(error){resetSystemPosition();systemPositionError(\'System media update failed: \'+(error?.message||String(error)))}\n  finally{media.polling=false;if(media.repoll){media.repoll=false;pollSystem()}}\n}\nasync function pollLocal(){const media=state.local;if(media.polling)return;media.polling=true;try{if(!$(\'#pc\').classList.contains(\'hidden\')){const data=await api(\'/api/player\');$(\'#now-title\').textContent=data.title||\'Nothing playing\';updateLocalNowArtwork(data.cover||\'\');$(\'#now-details\').textContent=[data.artist,data.album].filter(Boolean).join(\' • \')||(data.path||\'\');renderTimeline(media,data.currentTime,data.duration);if(media.volumePending!==null&&Number.isFinite(data.volume)&&Math.abs(data.volume-media.volumePending)<=1){media.volumePending=null}if(media.volumePending===null&&performance.now()>=media.volumeHold&&document.activeElement!==media.volume&&Number.isFinite(data.volume)){displayMasterVolume(data.volume)}$(\'#shuffle\').disabled=!data.canShuffleQueue;$(\'#repeat\').textContent=\'Repeat \'+({off:\'Off\',all:\'All\',one:\'1\'}[data.repeat]||\'Off\');$(\'#repeat\').classList.toggle(\'active\',data.repeat!==\'off\');setPlayIcon($(\'#local-play-shape\'),document.querySelector(\'[data-cmd="toggle"]\'),data.playing)}}catch(error){note(error.message,true)}finally{media.polling=false}}\n\nfunction bindSeek(media,url){\n  const slider=media.slider;\n  const begin=()=>{media.dragging=true;slider.classList.add(\'dragging\')};\n  const end=()=>{media.dragging=false;slider.classList.remove(\'dragging\')};\n  slider.addEventListener(\'pointerdown\',begin);\n  slider.addEventListener(\'pointercancel\',end);\n  slider.addEventListener(\'touchstart\',begin,{passive:true});\n  slider.oninput=()=>{media.dragging=true;const value=Number(slider.value);fill(slider,value,media.duration);media.elapsed.textContent=fmt(value)};\n  slider.onchange=async()=>{const target=Math.max(0,Number(slider.value)||0);end();try{await post(url,{seconds:target});if(media===state.system)await pollSystem(true)}catch(error){note(error.message,true);if(media===state.system)await pollSystem(true)}};\n}\nfunction displayMasterVolume(value,origin=null){\n  const v=Number(value);\n  if(!Number.isFinite(v))return;\n  for(const media of [state.system,state.local]){\n    if(media!==origin && (document.activeElement===media.volume || media.volumePending!==null))continue;\n    media.volume.value=String(v);fill(media.volume,v,100)\n  }\n}\nlet volumeWriteQueue=Promise.resolve();\nfunction bindVolume(media,url){\n  const control=media.volume;\n  const send=()=>{\n    const value=Math.max(0,Math.min(100,Number(control.value)||0));\n    for(const item of [state.system,state.local]){\n      item.volumeHold=performance.now()+1500;item.volumePending=value;\n    }\n    for(const item of [state.system,state.local]){item.volume.value=String(value);fill(item.volume,value,100)}\n    volumeWriteQueue=volumeWriteQueue.catch(()=>{}).then(()=>post(url,{volume:value}));\n    volumeWriteQueue.then(result=>{\n      const actual=Number(result.volume);\n      if(Number.isFinite(actual)){\n        for(const item of [state.system,state.local])item.volumePending=null;\n        displayMasterVolume(actual)\n      }\n    }).catch(error=>{\n      for(const item of [state.system,state.local])item.volumePending=null;\n      note(error.message,true);pollSystem(true);pollLocal()\n    })\n  };\n  control.oninput=()=>{\n    const value=Number(control.value);\n    media.volumeHold=performance.now()+1500;\n    for(const item of [state.system,state.local]){item.volume.value=String(value);fill(item.volume,value,100)}\n    clearTimeout(media.volumeTimer);media.volumeTimer=setTimeout(send,90)\n  };\n  control.onchange=()=>{clearTimeout(media.volumeTimer);send()}\n}\n\nfunction coverNode(url,large=false){const node=document.createElement(url?\'img\':\'div\');node.className=\'cover-art\'+(large?\' large\':\'\')+(url?\'\':\' cover-fallback\');if(url){node.src=url;node.loading=large?\'eager\':\'lazy\';node.alt=\'Album cover\';node.onerror=()=>{const fallback=coverNode(\'\',large);fallback.id=node.id;fallback.dataset.failedCover=url;node.replaceWith(fallback)}}else{node.textContent=\'♫\';node.setAttribute(\'aria-label\',\'No album art\')}return node}\nlet localNowArtworkURL=\'\';\nfunction updateLocalNowArtwork(url){const next=url||\'\';if(next===localNowArtworkURL)return;localNowArtworkURL=next;const tile=$(\'#now-cover\');tile.replaceChildren();if(!next)return;const image=document.createElement(\'img\');image.alt=\'\';image.decoding=\'async\';image.addEventListener(\'error\',()=>image.remove(),{once:true});image.src=next;tile.appendChild(image)}\nfunction updateCover(id,url){const current=$(\'#\'+id);if(!current)return;if(url&&((current.tagName===\'IMG\'&&current.getAttribute(\'src\')===url)||current.dataset.failedCover===url))return;if(!url&&current.classList.contains(\'cover-fallback\'))return;const next=coverNode(url,true);next.id=id;current.replaceWith(next)}\nfunction render(sel,data,query){const list=$(sel);list.replaceChildren();const term=query.toLowerCase();const filtered=data.filter(song=>!term||[song.title,song.artist,song.album,song.relative].join(\' \').toLowerCase().includes(term));if(!filtered.length){const empty=document.createElement(\'div\');empty.className=\'card details\';empty.textContent=query?\'No matches\':\'Nothing here yet\';list.append(empty);return}const fragment=document.createDocumentFragment();for(const song of filtered){const button=document.createElement(\'button\');button.className=\'item\';button.innerHTML=\'<span class="name"></span><span class="meta"></span>\';button.children[0].textContent=song.title;button.children[1].textContent=[song.artist,song.album].filter(Boolean).join(\' • \')||song.relative;const wrap=document.createElement(\'div\');wrap.className=\'item-cover\';const copy=document.createElement(\'div\');copy.className=\'copy\';copy.append(...button.children);wrap.append(coverNode(song.cover),copy);button.append(wrap);button.onclick=async()=>{try{await busy(button,()=>post(\'/api/play/song\',{path:song.path}),\'Playing…\');note(\'Playing \'+song.title);await refreshVolatile()}catch(error){note(error.message,true)}};fragment.append(button)}list.append(fragment)}\nconst MODE_LABELS={ipad_ipad:\'External\',laptop_laptop:\'Laptop\',ipad_laptop:\'Laptop\',ipad_both:\'Both\',laptop_ipad:\'External\',laptop_both:\'Both\'};const LOCAL_MODES=new Set([\'ipad_laptop\',\'ipad_both\',\'laptop_laptop\',\'laptop_both\']);let pendingMode=null,outputTopology=null,lastOutputRefresh=0,outputProfileBusy=false;const outputCard=$(\'#output-card\'),outputSink=$(\'#output-sink\');function selectedCard(){return outputTopology?.cards.find(item=>item.name===outputCard.value)}function fillSinks(preferred=\'\'){\n  const card=selectedCard(),prior=outputSink.value;\n  outputSink.replaceChildren();\n  // Only show sinks exposed by the live graph. A different profile may create\n  // new sinks; it cannot be selected until the system actually exposes it.\n  for(const sink of (card?.sinks||[]).filter(item=>item.cardName===card.name)){const port={name:\'\',label:sink.label,available:\'yes\'};\n    const value=JSON.stringify({card:card.name,name:sink.name});\n    const label=sink.label;\n    const option=new Option(label+(port.available===\'no\'||port.available===\'false\'?\' (unavailable)\':\'\'),value);\n    option.disabled=port.available===\'no\'||port.available===\'false\';outputSink.add(option)\n  }\n  const wanted=preferred||prior;\n  const match=[...outputSink.options].find(option=>!option.disabled&&option.value===wanted);\n  if(match)outputSink.value=match.value;\n  else outputSink.selectedIndex=-1;\n}\nasync function applyMode(mode,output=null){const b=document.querySelector(`[data-mode="${mode}"]`);try{await busy(b,()=>post(\'/api/mode\',{mode,password:$(\'#group-password\').value,output}),\'Applying audio route…\',\'Audio route activated\',true);await refreshAll()}catch(error){note(error.message,true)}}\n\nasync function chooseOutput(mode){pendingMode=mode;outputTopology=await api(\'/api/outputs\');lastOutputRefresh=performance.now();const saved=outputTopology.saved||{};outputCard.replaceChildren(...outputTopology.cards.map(item=>new Option(item.label,item.name)));if(!outputTopology.cards.length)throw Error(\'No playback cards available\');outputCard.value=outputTopology.cards.some(item=>item.name===saved.card)?saved.card:outputCard.value;fillSinks(saved.name?JSON.stringify({card:saved.card,name:saved.name}):\'\');$(\'#output-mode-title\').textContent=MODE_LABELS[mode];$(\'#output-modal\').classList.remove(\'hidden\')}\nasync function commitOutput(){\n  if(outputProfileBusy||!pendingMode)return;\n  const card=selectedCard();\n  if(!card)throw Error(\'Choose an ALSA card\');\n  if(outputSink.selectedIndex<0||!outputSink.value)throw Error(\'Choose a physical ALSA device\');\n  const selected=JSON.parse(outputSink.value);\n  const output={card:card.name,name:selected.name};\n  outputProfileBusy=true;\n  try{await busy($(\'#output-apply\'),()=>post(\'/api/mode\',{mode:pendingMode,password:$(\'#group-password\').value,output}), \'Applying audio route…\',\'Audio route activated\',true);\n    $(\'#output-modal\').classList.add(\'hidden\');pendingMode=null;await refreshAll()\n  }catch(error){note(error.message,true)}finally{outputProfileBusy=false}\n}\noutputCard.onchange=()=>{if(!outputProfileBusy)fillSinks()};\noutputSink.onchange=()=>{};\n$(\'#output-apply\').onclick=()=>commitOutput();\nfor(const [source,items] of [[\'External\',[\'ipad_ipad\',\'ipad_laptop\',\'ipad_both\']],[\'Laptop\',[\'laptop_ipad\',\'laptop_laptop\',\'laptop_both\']]]){const heading=document.createElement(\'div\');heading.className=\'source-heading\';heading.textContent=\'Playing from \'+source;$(\'#mode-grid\').append(heading);for(const key of items){const b=document.createElement(\'button\');b.className=\'action\';b.dataset.mode=key;b.textContent=MODE_LABELS[key];b.onclick=async()=>{try{if(LOCAL_MODES.has(key))await chooseOutput(key);else await applyMode(key)}catch(error){note(error.message,true)}};$(\'#mode-grid\').append(b)}}$(\'#output-cancel\').onclick=async()=>{\n  if(outputProfileBusy)return;\n  outputProfileBusy=true;$(\'#output-cancel\').disabled=true;\n  try{\n    $(\'#output-modal\').classList.add(\'hidden\');pendingMode=null;\n  }catch(error){note(\'Could not restore original card profile: \'+error.message,true)}\n  finally{outputProfileBusy=false;$(\'#output-cancel\').disabled=false}\n};function loadGroups(data){const state=data.groups,select=$(\'#group-select\');select.replaceChildren(...Object.entries(state.profiles).map(([key,g])=>new Option(key+\' • \'+g.group,key,key===state.active,key===state.active)));const show=()=>{const key=select.value||state.active,g=state.profiles[key];if(!g)return;$(\'#group-key\').value=key;$(\'#group-name\').value=g.group;$(\'#group-user\').value=g.username;$(\'#group-server\').value=g.server;$(\'#group-required\').checked=!!g.passwordRequired};select.onchange=show;show()}$(\'#save-group\').onclick=async()=>{try{await busy($(\'#save-group\'),()=>post(\'/api/groups/save\',{key:$(\'#group-key\').value,group:$(\'#group-name\').value,username:$(\'#group-user\').value,server:$(\'#group-server\').value,passwordRequired:$(\'#group-required\').checked}),\'Saving group…\',null,false);await refreshAll();note(\'Group profile saved\')}catch(error){note(error.message,true)}};$(\'#open-pc\').onclick=async()=>{try{show(\'pc\');await refreshStatic()}catch(error){note(error.message,true)}};\n$(\'#away-display-toggle\').onclick=async()=>{try{await busy($(\'#away-display-toggle\'),()=>post(\'/api/away-display\'),\'Switching away/display…\',null,false);await refreshVolatile()}catch(error){note(error.message,true)}};\n$(\'#pc-back\').onclick=()=>show(\'profiles\');\n$(\'#all-songs\').onclick=async()=>{try{all=(await api(\'/api/songs\')).songs;show(\'songs\');render(\'#song-list\',all,\'\');}catch(error){note(error.message,true)}};\n$(\'#song-search\').oninput=()=>render(\'#song-list\',all,$(\'#song-search\').value);\n$(\'#playlist-search\').oninput=()=>render(\'#playlist-songs\',inside,$(\'#playlist-search\').value);\ndocument.querySelectorAll(\'[data-back]\').forEach(button=>button.onclick=()=>show(button.dataset.back));\ndocument.querySelectorAll(\'[data-cmd]\').forEach(button=>button.onclick=async()=>{try{await busy(button,()=>post(\'/api/player/command\',{command:button.dataset.cmd}),\'…\',null,false);await pollLocal()}catch(error){note(error.message,true)}});\n$(\'#repeat\').onclick=async()=>{try{const data=await api(\'/api/player\');await post(\'/api/player/repeat\',{mode:{off:\'all\',all:\'one\',one:\'off\'}[data.repeat]||\'off\'});await pollLocal()}catch(error){note(error.message,true)}};\n$(\'#shuffle\').onclick=async()=>{try{await busy($(\'#shuffle\'),()=>post(\'/api/player/shuffle\'),\'Updating saved shuffle…\',\'Saved shuffle updated for next play\',true)}catch(error){note(error.message,true)}};\nfor(const [id,command] of [[\'system-previous\',\'previous\'],[\'system-toggle\',\'toggle\'],[\'system-next\',\'next\']])$(\'#\'+id).onclick=async()=>{if(command!==\'toggle\'){const media=state.system;media.skipPending=true;media.skipFrom=media.trackKey;media.skipStarted=performance.now();media.skipWarned=false;resetSystemPosition()}else{state.system.skipPending=false}try{await busy($(\'#\'+id),()=>post(\'/api/system-media\',{command}),\'…\',null,false);await pollSystem(true)}catch(error){if(command!==\'toggle\')systemPositionError(\'System media skip failed: \'+(error?.message||String(error)));else note(error.message,true)}};\n$(\'#audio-toggle\').onclick=async()=>{try{await busy($(\'#audio-toggle\'),()=>post(\'/api/audio-toggle\'),\'Switching audio services…\',\'Audio services updated\',true);await refreshStatic()}catch(error){note(error.message,true)}};\n$(\'#restart-camilla\').onclick=()=>busy($(\'#restart-camilla\'),()=>post(\'/api/restart-camilladsp\'),\'Restarting CamillaDSP…\',\'CamillaDSP restarted\',true).then(refreshStatic).catch(error=>note(error.message,true));\n$(\'#restart-sonobus\').onclick=()=>busy($(\'#restart-sonobus\'),()=>post(\'/api/restart-sonobus\'),\'Restarting SonoBus…\',\'SonoBus restarted\',true).then(refreshVolatile).catch(error=>note(error.message,true));\n$(\'#restart-airplay\').onclick=()=>busy($(\'#restart-airplay\'),()=>post(\'/api/restart-airplay\'),\'Restarting AirPlay…\',\'AirPlay restarted\',true).then(refreshVolatile).catch(error=>note(error.message,true));\n$(\'#restart-vnc\').onclick=()=>busy($(\'#restart-vnc\'),()=>post(\'/api/restart-vnc\'),\'Restarting VNC…\',\'VNC restarted\').catch(error=>note(error.message,true));\n$(\'#profile-search\').oninput=()=>{if(profileSnapshot)renderProfileSnapshot(profileSnapshot);else refreshStatic()};\nbindSeek(state.local,\'/api/player/seek\');bindSeek(state.system,\'/api/system-media/seek\');bindVolume(state.local,\'/api/player/volume\');bindVolume(state.system,\'/api/system-volume\');\nlet staticRefreshRunning=false,volatileRefreshRunning=false,profileSnapshot=null;\nfunction renderProfileSnapshot(data){\n  const query=$(\'#profile-search\').value.toLowerCase(),root=$(\'#profile-list\');\n  renderActiveProfile(data);root.replaceChildren();\n  const groups=new Map();\n  for(const name of data.profiles||[]){\n    const info=data.filters?.[name]||{group:\'Other\',label:name};\n    if(![name,info.group,info.label].some(value=>value.toLowerCase().includes(query)))continue;\n    if(!groups.has(info.group))groups.set(info.group,[]);\n    groups.get(info.group).push({name,label:info.label});\n  }\n  for(const group of ["Other","CMF","EarPods",...groups.keys()]){if(!groups.has(group))continue;const items=groups.get(group);\n    const heading=document.createElement(\'div\');heading.className=\'section-title\';heading.textContent=group;root.append(heading);\n    const list=document.createElement(\'div\');list.className=\'list\';\n    for(const {name,label} of items){\n      const button=document.createElement(\'button\');\n      button.className=\'item\'+(name===data.active&&data.running?\' active\':\'\');\n      const title=document.createElement(\'span\');title.className=\'name\';title.textContent=label;\n      button.append(title);\n      button.onclick=async()=>{try{await busy(button,()=>post(\'/api/select\',{profile:name}),\'Switching profile…\',\'Profile activated\',true);await refreshStatic()}catch(error){note(error.message,true)}};\n      list.append(button);\n    }\n    root.append(list);\n  }\n}\nfunction playlistAction(playlist,shuffle){\n  const button=document.createElement(\'button\');button.type=\'button\';button.className=\'playlist-icon\';\n  button.setAttribute(\'aria-label\',(shuffle?\'Play saved shuffle of \':\'Play \')+playlist.name);\n  button.title=(shuffle?\'Play saved shuffle\':\'Play playlist\')+\' · \'+playlist.name;\n  button.innerHTML=shuffle\n    ? \'<svg class="media-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h3c5 0 7 10 12 10h3m-4-4 4 4-4 4M3 17h3c2 0 3-1 4-3m3-4c1-2 2-3 5-3h3m-4-4 4 4-4 4"/></svg>\'\n    : \'<svg class="media-icon" viewBox="0 0 24 24" aria-hidden="true"><path class="icon-fill" d="M8 5.5 19 12 8 18.5z"/></svg>\';\n  button.onclick=()=>busy(button,()=>post(\'/api/play/playlist\',{name:playlist.name,shuffle}),\'…\',null,false).then(refreshVolatile).catch(error=>note(error.message,true));\n  return button\n}\nfunction renderPlaylistSnapshot(playlists){\n  const list=$(\'#playlists\');list.replaceChildren();\n  for(const playlist of playlists){\n    const row=document.createElement(\'div\');row.className=\'playlist-row\';\n    const open=document.createElement(\'button\');open.className=\'item playlist-open\';open.dataset.playlistName=playlist.name;open.innerHTML=\'<span class="name"></span><span class="meta"></span>\';open.children[0].textContent=playlist.name;open.children[1].textContent=playlist.count+(playlist.count===1?\' song\':\' songs\');const wrap=document.createElement(\'div\');wrap.className=\'item-cover\';const copy=document.createElement(\'div\');copy.className=\'copy\';copy.append(...open.children);wrap.append(coverNode(playlist.cover),copy);open.append(wrap);\n    open.onclick=async()=>{current=playlist.name;inside=(await api(\'/api/playlist?name=\'+encodeURIComponent(playlist.name))).songs;$(\'#playlist-title\').textContent=playlist.name;show(\'playlist\');render(\'#playlist-songs\',inside,\'\')};\n    const controls=document.createElement(\'div\');controls.className=\'playlist-controls\';\n    const play=playlistAction(playlist,false),shuffle=playlistAction(playlist,true);\n    controls.append(play,shuffle);row.append(open,controls);list.append(row)\n  }\n}\nfunction updatePlaylistCover(player){if(!player?.playlist||!player.playing)return;for(const button of document.querySelectorAll(\'#playlists [data-playlist-name]\')){if(button.dataset.playlistName!==player.playlist)continue;const old=button.querySelector(\'.item-cover .cover-art\');if(!old)continue;const url=player.cover||\'\';if(url&&old.tagName===\'IMG\'&&old.getAttribute(\'src\')===url)return;if(!url&&old.classList.contains(\'cover-fallback\'))return;old.replaceWith(coverNode(url))}}\nfunction renderVolatile(data){\n  $(\'#audio-toggle\').textContent=data.mode.mode===\'stopped\'?\'Start all audio\':\'Stop all audio\';\n  if(data.awayDisplay){const button=$(\'#away-display-toggle\');button.textContent=data.awayDisplay.displayOff?\'Show lock screen\':data.awayDisplay.away?\'Unlock desktop\':\'Away and display off\';button.setAttribute(\'aria-pressed\',String(!!data.awayDisplay.active));button.classList.toggle(\'mode-active\',!!data.awayDisplay.active)}\n  if(data.profiles)renderActiveProfile(data.profiles);\n  renderSonobusStatus(data.mode,data.groups);\n  $(\'#engine-status\').textContent=data.mode.camilla?\'Audio engine online\':\'Audio engine offline\';$(\'.dot\').style.opacity=data.mode.camilla?\'1\':\'.25\';\n  $(\'#source-title\').textContent=({ipad_external:\'External\',laptop_external:\'Laptop\',ipad_ipad:\'External\',ipad_laptop:\'Laptop\',ipad_both:\'Both\',laptop_ipad:\'External\',laptop_laptop:\'Laptop\',laptop_both:\'Both\'})[data.mode.mode]||data.mode.label;$(\'#source-details\').textContent=\'CamillaDSP \'+(data.mode.camilla?\'running\':\'stopped\')+\' • SonoBus \'+(data.mode.sonobus?\'on\':\'off\')+\' • AirPlay \'+(data.mode.airplay?\'on\':\'off\')+(data.mode.localWanted?\' • Output \'+(data.mode.localOutputLabel||\'Not selected\'):\'\');\n  document.querySelectorAll(\'[data-mode]\').forEach(button=>button.classList.toggle(\'mode-active\',button.dataset.mode===data.mode.mode));\n  updatePlaylistCover(data.player);\n  const local=data.player,lm=state.local;$(\'#now-title\').textContent=local.title||\'Nothing playing\';updateLocalNowArtwork(local.cover||\'\');$(\'#now-details\').textContent=[local.artist,local.album].filter(Boolean).join(\' • \')||(local.path||\'\');renderTimeline(lm,local.currentTime,local.duration);if(lm.volumePending===null&&document.activeElement!==lm.volume){displayMasterVolume(local.volume)}$(\'#shuffle\').disabled=!local.canShuffleQueue;$(\'#repeat\').textContent=\'Repeat \'+({off:\'Off\',all:\'All\',one:\'1\'}[local.repeat]||\'Off\');$(\'#repeat\').classList.toggle(\'active\',local.repeat!==\'off\');setPlayIcon($(\'#local-play-shape\'),document.querySelector(\'[data-cmd="toggle"]\'),local.playing)\n}\nasync function refreshStatic(){if(staticRefreshRunning)return;staticRefreshRunning=true;try{const data=await api(\'/api/state\');profileSnapshot=data.profiles;renderProfileSnapshot(data.profiles);renderPlaylistSnapshot(data.playlists);loadGroups(data);renderVolatile(data);renderSystem(data.systemMedia);return data}catch(error){note(error.message,true)}finally{staticRefreshRunning=false}}\nasync function refreshOutputPicker(){if($(\'#output-modal\').classList.contains(\'hidden\')||!pendingMode||outputProfileBusy||performance.now()-lastOutputRefresh<5000)return;const cardValue=outputCard.value,sinkValue=outputSink.value;try{const fresh=await api(\'/api/outputs\');lastOutputRefresh=performance.now();outputTopology=fresh;outputCard.replaceChildren(...fresh.cards.map(item=>new Option(item.label,item.name)));if(!fresh.cards.length){outputSink.replaceChildren();return}outputCard.value=fresh.cards.some(item=>item.name===cardValue)?cardValue:outputCard.value;fillSinks();if([...outputSink.options].some(option=>option.value===sinkValue&&!option.disabled))outputSink.value=sinkValue}catch(error){console.warn(\'output picker refresh failed\',error)}}\nasync function refreshVolatile(){if(volatileRefreshRunning||document.hidden)return;volatileRefreshRunning=true;try{renderVolatile(await api(\'/api/volatile\'));await refreshOutputPicker()}catch(error){console.warn(\'volatile refresh failed\',error)}finally{volatileRefreshRunning=false}}\nrefreshAll=async()=>refreshStatic();\nrefreshStatic();window.addEventListener(\'pageshow\',event=>{if(event.persisted){refreshStatic();refreshVolatile()}});document.addEventListener(\'visibilitychange\',()=>{if(!document.hidden){refreshStatic();refreshVolatile()}});setInterval(refreshVolatile,1000);setInterval(()=>{if(!document.hidden)pollSystem()},1000);setInterval(tickSystem,250);\n</script></body></html>'
+PAGE='<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>CamillaDSP Studio</title><style>\n:root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display",sans-serif;--v:#865dff;--b:#3f8eff;--g:#35d6a0}*{box-sizing:border-box}body{margin:0;min-height:100svh;padding:22px 16px 36px;color:#fff;background:radial-gradient(900px 520px at 50% -150px,#6542a8,#211a38 44%,#070910);background-attachment:fixed}main{max-width:540px;margin:auto}.hidden{display:none!important}.hero,.card{border:1px solid #ffffff22;background:linear-gradient(145deg,#ffffff1c,#ffffff0d);box-shadow:inset 0 1px #ffffff22,0 20px 50px #0005;backdrop-filter:blur(22px)}.hero{padding:25px 22px;border-radius:29px}.card{padding:18px;border-radius:24px;margin:14px 0}.card+.grid{margin-top:14px}.eyebrow,.label,.section-title{color:#bcb7cb;text-transform:uppercase;letter-spacing:.1em;font-size:12px;font-weight:800}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--g);box-shadow:0 0 15px var(--g);margin-right:8px}h1{margin:10px 0 5px;font-size:32px;letter-spacing:-.04em}.subtitle,.details,.meta{color:#b9b4c5;font-size:13px}.section-title{margin:27px 3px 10px}.title{font-size:20px;font-weight:800;margin-top:6px;overflow-wrap:anywhere}.grid{display:grid;gap:10px}.two{grid-template-columns:1fr 1fr}.three{grid-template-columns:1fr 1.2fr 1fr}.pc-transport{margin-bottom:18px}.pc-library-actions{margin-top:18px}.wide{grid-column:1/-1}button,input{font:inherit}button{border:0;color:#fff;cursor:pointer}.action,.item,.transport,.back{width:100%;transition:transform .12s,filter .15s}.action:active,.item:active,.transport:active,.back:active{transform:scale(.96);filter:brightness(1.15)}.action{min-height:54px;border-radius:18px;background:#ffffff1b;font-weight:780}.primary{background:linear-gradient(135deg,var(--b),var(--v))}.green{background:linear-gradient(135deg,#24ae7c,#287d95)}.danger{background:linear-gradient(135deg,#e64e74,#8e2b4b)}.active{outline:2px solid #a783ff;background:linear-gradient(135deg,#4e82ff66,#8552ff77)!important}.search{width:100%;min-height:49px;border:1px solid #ffffff22;border-radius:17px;padding:12px 15px;color:#fff;background:#ffffff12;outline:0}.search:focus{border-color:#9b7aff;box-shadow:0 0 0 4px #825dff2e}.list{display:grid;gap:10px;margin-top:10px}.cover-art{width:48px;height:48px;flex:none;object-fit:cover;border-radius:11px;background:#ffffff18}.cover-art.large{width:100%;max-width:220px;height:auto;aspect-ratio:1;display:block;margin:0 auto 16px;border-radius:20px}.cover-fallback{display:grid;place-items:center;color:#c3b6f3;font-size:24px}.cover-fallback.large{display:grid;font-size:68px}.item-cover{display:flex;align-items:center;gap:12px;min-width:0}.item-cover .copy{min-width:0;flex:1;overflow-wrap:anywhere;font-size:16px;line-height:1.3}.item-cover .name{font-size:16px;line-height:1.3;font-weight:780}.item-cover .meta{font-size:13px;line-height:1.35;font-weight:400}.item{text-align:left;min-height:64px;padding:13px 15px;border-radius:19px;background:#ffffff16}.name{display:block;font-weight:780}.meta{display:block;margin-top:4px}.playlist-row{position:relative}\n.playlist-open{display:block;padding-right:120px;min-height:76px}\n.playlist-controls{position:absolute;right:12px;top:50%;transform:translateY(-50%);display:flex;gap:8px;z-index:1}\n.playlist-icon{display:grid;place-items:center;width:44px;height:44px;border:1px solid #ffffff38;border-radius:14px;background:#242036e8;box-shadow:0 4px 14px #0005}\n.playlist-icon:hover{background:#564282}\n.playlist-icon:active{transform:scale(.94)}\n.playlist-icon .media-icon{width:20px;height:20px}\n.playlist-icon.busy{font-size:20px}.header{display:grid;grid-template-columns:72px 1fr 72px;align-items:center}.header h1{text-align:center;font-size:23px}.back{min-height:43px;border-radius:15px;background:#ffffff18}.range{--fill:0%;width:100%;height:36px;background:transparent;appearance:none}.range::-webkit-slider-runnable-track{height:6px;border-radius:99px;background:linear-gradient(to right,#fff var(--fill),#ffffff2d var(--fill))}.range::-webkit-slider-thumb{appearance:none;width:21px;height:21px;margin-top:-7.5px;border-radius:50%;background:#fff;box-shadow:0 3px 10px #0008}.times{display:flex;justify-content:space-between;color:#aaa5b5;font-size:12px}.range-row{display:grid;grid-template-columns:24px 1fr 24px;align-items:center;gap:7px}.transport{display:grid;place-items:center;min-height:78px;border-radius:999px;background:#ffffff19}.transport.main{min-height:98px;background:linear-gradient(145deg,#9e68ff,#583ad2)}.media-icon{display:block;width:34px;height:34px;fill:none;stroke:#fff;stroke-width:2.15;stroke-linecap:round;stroke-linejoin:round;pointer-events:none}.transport.main .media-icon{width:42px;height:42px}.icon-fill{fill:#fff;stroke:#fff}.range{touch-action:none}.range.dragging::-webkit-slider-thumb{transform:scale(1.08)}.source-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}\n\n/* Final interaction and consistency pass */\nbutton{position:relative;overflow:hidden;-webkit-user-select:none;user-select:none;touch-action:manipulation}\nbutton:focus-visible,.search:focus-visible,.range:focus-visible{outline:2px solid #b79cff;outline-offset:3px}\nbutton:disabled{opacity:.58;cursor:default}\n.action,.item,.transport,.back{will-change:transform}\n.action.busy::after,.item.busy::after{content:"";position:absolute;inset:0;background:linear-gradient(105deg,transparent 25%,#ffffff2e 50%,transparent 75%);animation:ui-shine .8s linear infinite}\n@keyframes ui-shine{from{transform:translateX(-100%)}to{transform:translateX(100%)}}\n.transport{transition:transform .12s ease,filter .15s ease,box-shadow .2s ease}\n.transport.main.playing{box-shadow:0 18px 42px #6b45dd77,inset 0 1px #ffffff35}\n.media-icon{transition:transform .16s ease}.transport:active .media-icon{transform:scale(.9)}\n.range{cursor:pointer}.range.dragging::-webkit-slider-thumb{transform:scale(1.1)}\n.range::-webkit-slider-runnable-track{transition:background .08s linear}\n.mode-active{outline:2px solid #72e5bc;background:linear-gradient(135deg,#24ae7c,#287d95)!important}\n#repeat.active,#shuffle.active{outline:2px solid #a783ff;background:linear-gradient(135deg,#4e82ff66,#8552ff77)!important}\n.output-modal{position:fixed;inset:0;z-index:50;display:grid;place-items:end center;padding:18px;background:#05060bbb;backdrop-filter:blur(12px)}.output-sheet{width:min(100%,540px);max-height:82svh;overflow:auto;padding:20px;border:1px solid #ffffff2b;border-radius:26px;background:linear-gradient(145deg,#272139,#11131c);box-shadow:0 28px 80px #000b}.output-options{display:grid;gap:10px;margin:16px 0}.output-choice{display:grid;grid-template-columns:24px 1fr;gap:10px;align-items:center;padding:14px;border-radius:18px;background:#ffffff12}.output-choice input{width:20px;height:20px;accent-color:#865dff}.output-choice strong,.output-choice span{display:block}.output-choice span{margin-top:3px;color:#aaa5b5;font-size:11px;overflow-wrap:anywhere}.modal-actions{display:grid;grid-template-columns:1fr 1.4fr;gap:10px}\n\n@media (prefers-reduced-motion:reduce){*{animation-duration:.001ms!important;transition-duration:.001ms!important;scroll-behavior:auto!important}}\n\n/* Page rhythm and accessible navigation. */\n#profiles>.hero{margin-bottom:20px}\n#profiles>.action{display:block;margin:14px 0 20px}\n#profiles>.grid{margin-top:12px}\n#profiles>.section-title{margin-top:26px;margin-bottom:12px}\n#groups-page .header,#listening-page .header,#songs .header,#playlist .header,#pc .header{margin-bottom:18px}\n#groups-page .card{display:grid;gap:12px}\n#groups-page .card .search,#groups-page .card .action{margin:0}\n#groups-page .card label{display:flex;align-items:center;gap:9px}\n.card>.details{margin-top:6px}\n#pc .card>.label{margin-bottom:8px}\n#listening-page .search{margin-bottom:16px}\n#song-search,#playlist-search{display:block;margin:0 0 16px}\n#song-list,#playlist-songs{margin-top:0}\n.system-media-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}\n.card .range{display:block;margin-top:12px}\n.card .times{margin-top:2px}\n.card .range-row{margin:14px 0 16px}\n.card .grid{margin-top:14px}\n.range-row{grid-template-columns:24px minmax(0,1fr) 24px;gap:10px}\n.volume-icon{display:grid;place-items:center;color:#d6d3de;pointer-events:none}\n.volume-icon svg{display:block;width:20px;height:20px}\n.local-now-header{display:flex;align-items:center;gap:14px;min-width:0;margin:10px 0 16px}\n.local-now-copy{flex:1;min-width:0}\n.local-now-copy .details{margin-top:6px;overflow-wrap:anywhere}\n.local-now-artwork{flex:0 0 72px;width:72px;height:72px;position:relative;display:grid;place-items:center;overflow:hidden;border-radius:15px;background:linear-gradient(145deg,#433b68,#222d42);color:#c8c1e9;font-size:32px;line-height:1}\n.local-now-artwork::before{content:\'♫\'}\n.local-now-artwork img{position:absolute;inset:0;display:block;width:100%;height:100%;object-fit:cover}\n.back-to-top{position:fixed;z-index:40;top:max(14px,env(safe-area-inset-top));left:50%;transform:translateX(-50%);width:auto;min-height:44px;padding:9px 17px;border:1px solid #ffffff38;border-radius:999px;background:#262039f2;box-shadow:0 8px 28px #0009;white-space:nowrap;font-size:14px;font-weight:750;backdrop-filter:blur(14px)}\n.back-to-top:active{transform:translateX(-50%) scale(.96)}\n\n/* Playlist actions: clear affordance without changing the page layout. */\n.playlist-row{border-radius:19px;transition:background .16s ease}\n.playlist-row:hover{background:#ffffff08}\n.playlist-icon{transition:background .16s ease,border-color .16s ease,transform .12s ease}\n.playlist-icon:hover{border-color:#aa90ff;background:#493572}\n#shuffle:disabled{opacity:.42;cursor:not-allowed}\n#shuffle:not(:disabled){background:linear-gradient(135deg,#6252a7,#373b77)}\n\n/* Unified indigo, blue and mint palette. */\n:root{--v:#8574f5;--b:#6c9cff;--g:#55d9ae}\nbody{background:radial-gradient(900px 520px at 50% -150px,#514784,#1d2039 48%,#0b101b)}\n.hero,.card{border-color:#a8b7ef25;background:linear-gradient(145deg,#b8c8ff18,#a8b8ee0a)}\n.action:not(.primary):not(.green):not(.danger):not(.active){background:#a8b7ef1b}\n#shuffle:not(:disabled){background:linear-gradient(135deg,#6257ae,#465b99)}\n.playlist-icon{background:#242941e8;border-color:#b7c7ff38}\n.playlist-icon:hover{background:#414a77;border-color:#9caeff}\n.output-sheet{background:linear-gradient(145deg,#252b47,#111827)}\n\n/* Shared home palette and compact destination layout. */\n:root{--v:#8574f5;--b:#6c9cff;--g:#55d9ae}\n#profiles{max-width:480px;margin-inline:auto}\n#profiles>.hero{padding:17px 18px;border-radius:23px;margin-bottom:12px}\n#profiles>.hero h1{font-size:27px;margin:6px 0 3px}\n#profiles>.card{padding:16px;margin:10px 0;border-radius:21px}\n#profiles>.section-title{margin:18px 3px 8px}\n#profiles>.action{min-height:48px;margin:10px 0 12px;border-radius:16px}\n#profiles .source-grid{grid-template-columns:repeat(3,minmax(0,1fr));gap:9px;margin-top:8px}\n#profiles .source-grid .source-heading{grid-column:1/-1;color:#bcb7cb;font-size:11px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;margin:9px 2px 0}\n#profiles .source-grid .action{min-height:50px;padding:8px 5px;border-radius:15px;font-size:14px;line-height:1.2}\n#profiles .card .grid{margin-top:10px}\n#profiles .transport{min-height:64px}\n#profiles .transport.main{min-height:80px}\n#profiles .pc-transport{margin-bottom:12px}\n</style></head><body><main>\n<section id="profiles"><div class="hero"><div class="eyebrow"><span class="dot"></span><span id="engine-status">Audio engine offline</span></div><h1>CamillaDSP Studio</h1><div class="subtitle">System audio, AirPlay and PC Music through CamillaDSP and SonoBus.</div></div><div class="section-title">System media</div><div class="card"><div class="system-media-heading"><div class="label">Active desktop player</div></div><div id="system-title" class="title">No system media</div><div id="system-details" class="details"></div><input id="system-seek" class="range" type="range" aria-label="System media playback position" min="0" max="1" step=".1"><div class="times"><span id="system-elapsed">0:00</span><span id="system-duration">0:00</span></div><div class="range-row"><span class="volume-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 4V5L7 9H3z"/></svg></span><input id="system-volume" class="range" type="range" aria-label="Master volume" min="0" max="100" value="100"><span class="volume-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M2 9v6h4l5 4V5L6 9H2z"/><path d="M14 8.2a5 5 0 0 1 0 7.6l1.4 1.4a7 7 0 0 0 0-10.4L14 8.2z"/><path d="M17 5.3a9 9 0 0 1 0 13.4l1.4 1.4a11 11 0 0 0 0-16.2L17 5.3z"/></svg></span></div><div class="grid three"><button id="system-previous" class="transport" aria-label="Previous"><svg class="media-icon" viewBox="0 0 24 24"><path d="M6 5v14"></path><path d="M18 6.5 8.5 12 18 17.5z"></path></svg></button><button id="system-toggle" class="transport main" aria-label="Play"><svg class="media-icon" viewBox="0 0 24 24"><path id="system-play-shape" class="icon-fill" d="M8 5.5 19 12 8 18.5z"></path></svg></button><button id="system-next" class="transport" aria-label="Next"><svg class="media-icon" viewBox="0 0 24 24"><path d="M18 5v14"></path><path d="M6 6.5 15.5 12 6 17.5z"></path></svg></button></div></div><button id="open-pc" class="action green">Local Music Library</button><button id="away-display-toggle" class="action" type="button" aria-pressed="false" style="margin-top:10px">Away and display off</button><div class="section-title">Audio source</div><div class="card"><div id="source-title" class="title">Loading…</div><div id="source-details" class="details"></div><div id="mode-grid" class="source-grid"></div></div><div class="section-title">SonoBus Group</div><div class="card"><div class="label">Selected group</div><div id="sonobus-group" class="title">Loading…</div><div id="sonobus-status" class="details">Checking SonoBus…</div></div><button id="open-groups" class="action">Manage SonoBus Group</button><div class="section-title">Active profile</div><div class="card"><div id="active-profile" class="title">Loading…</div><div id="active-state" class="details"></div></div><button id="open-listening" class="action">Select Listening Profile</button><div class="section-title" id="restart-heading">Restart services</div><div class="grid two" aria-labelledby="restart-heading"><button id="restart-camilla" class="action">Restart CamillaDSP</button><button id="restart-sonobus" class="action">Restart SonoBus</button><button id="restart-airplay" class="action">Restart AirPlay</button><button id="restart-vnc" class="action">Restart VNC</button></div><button id="audio-toggle" class="action danger" type="button" style="margin-top:16px;min-height:64px">Stop all audio</button></section>\n<section id="groups-page" class="hidden"><div class="header"><button data-back="profiles" class="back">Back</button><h1>SonoBus Group</h1><div></div></div><div class="card"><select id="group-select" class="search"></select><input id="group-key" class="search" placeholder="Profile name"><input id="group-name" class="search" placeholder="Group name"><input id="group-user" class="search" placeholder="Username"><input id="group-server" class="search" value="aoo.sonobus.net:10998" placeholder="Connection server"><label class="details"><input id="group-required" type="checkbox"> Password required</label><input id="group-password" class="search" type="password" placeholder="Password (never saved)"><button id="save-group" class="action primary">Save Group Profile</button></div></section>\n<section id="listening-page" class="hidden"><div class="header"><button data-back="profiles" class="back">Back</button><h1>Listening Profiles</h1><div></div></div><div class="section-title">Listening profiles</div><input id="profile-search" class="search" placeholder="Search profiles"><div id="profile-list"></div></section>\n<section id="pc" class="hidden"><div class="header"><button id="pc-back" class="back">Back</button><h1>PC Music</h1><div></div></div><div class="card"><div class="label">Now playing</div><div class="local-now-header"><span id="now-cover" class="local-now-artwork" aria-hidden="true"></span><div class="local-now-copy"><div id="now-title" class="title">Nothing playing</div><div id="now-details" class="details"></div></div></div><input id="seek" class="range" type="range" aria-label="Local music playback position" min="0" max="1" step=".1"><div class="times"><span id="elapsed">0:00</span><span id="duration">0:00</span></div><div class="range-row"><span class="volume-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 4V5L7 9H3z"/></svg></span><input id="volume" class="range" type="range" aria-label="Master volume" min="0" max="100" value="100"><span class="volume-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M2 9v6h4l5 4V5L6 9H2z"/><path d="M14 8.2a5 5 0 0 1 0 7.6l1.4 1.4a7 7 0 0 0 0-10.4L14 8.2z"/><path d="M17 5.3a9 9 0 0 1 0 13.4l1.4 1.4a11 11 0 0 0 0-16.2L17 5.3z"/></svg></span></div><div class="grid two"><button id="repeat" class="action">Repeat Off</button><button id="shuffle" class="action" title="Update the saved shuffled playlist without changing what is playing">Shuffle for next play</button></div></div><div class="grid three pc-transport"><button data-cmd="previous" class="transport" aria-label="Previous"><svg class="media-icon" viewBox="0 0 24 24"><path d="M6 5v14"></path><path d="M18 6.5 8.5 12 18 17.5z"></path></svg></button><button data-cmd="toggle" class="transport main" aria-label="Play"><svg class="media-icon" viewBox="0 0 24 24"><path id="local-play-shape" class="icon-fill" d="M8 5.5 19 12 8 18.5z"></path></svg></button><button data-cmd="next" class="transport" aria-label="Next"><svg class="media-icon" viewBox="0 0 24 24"><path d="M18 5v14"></path><path d="M6 6.5 15.5 12 6 17.5z"></path></svg></button></div><div class="grid pc-library-actions"><button id="all-songs" class="action primary">All Songs</button></div><div class="section-title">Playlists</div><div id="playlists" class="list"></div></section>\n<section id="songs" class="hidden"><div class="header"><button data-back="pc" class="back">Back</button><h1>All Songs</h1><div></div></div><input id="song-search" class="search" type="search" aria-label="Search all songs" placeholder="Search all songs"><div id="song-list" class="list"></div></section>\n<section id="playlist" class="hidden"><div class="header"><button data-back="pc" class="back">Back</button><h1 id="playlist-title">Playlist</h1><div></div></div><input id="playlist-search" class="search" type="search" aria-label="Search this playlist" placeholder="Search this playlist"><div id="playlist-songs" class="list"></div></section><button id="back-to-top" class="back-to-top hidden" type="button">Go back to top of page ↑</button><div id="output-modal" class="output-modal hidden"><div class="output-sheet"><div class="label">Laptop playback device</div><div id="output-mode-title" class="title">Choose output</div><div class="details">Choose a card and profile, then a sink and port. Choosing a profile activates it to show its live sinks. Apply output commits playback; Back restores the previous card profile.</div><div class="output-options"><label class="details">Card<select id="output-card" class="search"></select></label><label class="details">Profile<select id="output-profile" class="search"></select></label><label class="details">Sink / port<select id="output-sink" class="search"></select></label></div><div class="modal-actions"><button id="output-cancel" class="action">Back without changes</button><button id="output-apply" class="action primary">Apply output</button></div></div></div>\n</main><script>const $=selector=>document.querySelector(selector);\nconst screens=[\'profiles\',\'pc\',\'songs\',\'playlist\',\'groups-page\',\'listening-page\'].map(id=>$(\'#\'+id));\nlet all=[],inside=[],current=\'\';\n\nconst state={\n  system:{slider:$(\'#system-seek\'),elapsed:$(\'#system-elapsed\'),durationLabel:$(\'#system-duration\'),volume:$(\'#system-volume\'),duration:0,dragging:false,polling:false,repoll:false,clockPosition:0,clockAt:0,clockPlaying:false,lastAvailableAt:0,trackKey:\'\',skipPending:false,skipFrom:\'\',skipStarted:0,skipWarned:false,volumeHold:0,volumeTimer:null,volumePending:null},\n  local:{slider:$(\'#seek\'),elapsed:$(\'#elapsed\'),durationLabel:$(\'#duration\'),volume:$(\'#volume\'),duration:0,dragging:false,polling:false,volumeHold:0,volumeTimer:null,volumePending:null}\n};\n\nconst fmt=value=>{const v=Math.max(0,Number(value)||0);return Math.floor(v/60)+\':\'+String(Math.floor(v)%60).padStart(2,\'0\')};\nfunction show(id){screens.forEach(screen=>screen.classList.toggle(\'hidden\',screen.id!==id));scrollTo({top:0,behavior:\'smooth\'});updateBackToTop()}\nfunction updateBackToTop(){const visible=[\'songs\',\'playlist\'].some(id=>!$(\'#\'+id).classList.contains(\'hidden\'));$(\'#back-to-top\').classList.toggle(\'hidden\',!visible||window.scrollY<320)}\nwindow.addEventListener(\'scroll\',updateBackToTop,{passive:true});$(\'#back-to-top\').onclick=()=>window.scrollTo({top:0,behavior:\'smooth\'});$(\'#open-groups\').onclick=()=>show(\'groups-page\');$(\'#open-listening\').onclick=()=>show(\'listening-page\');\nfunction notificationBox(){const banners=[...document.querySelectorAll(\'#global-task-feedback\')];let banner=banners.shift()||null;banners.forEach(item=>item.remove());if(!banner){banner=document.createElement(\'div\');banner.id=\'global-task-feedback\';banner.setAttribute(\'role\',\'status\');banner.setAttribute(\'aria-live\',\'polite\');banner.style.cssText=\'position:fixed;left:12px;right:12px;top:12px;z-index:5000;box-sizing:border-box;padding:14px 64px 14px 18px;border-radius:14px;background:#152033;color:#eef5ff;border:1px solid #43638f;box-shadow:0 12px 32px rgba(0,0,0,.4);font-weight:700;text-align:center;\';const message=document.createElement(\'span\');message.className=\'task-feedback-message\';const close=document.createElement(\'button\');close.type=\'button\';close.className=\'task-feedback-close\';close.textContent=\'×\';close.setAttribute(\'aria-label\',\'Close notification\');close.style.cssText=\'position:absolute;right:8px;top:50%;transform:translateY(-50%);width:48px;height:48px;border:0;border-radius:12px;background:transparent;color:inherit;font-size:38px;font-weight:400;line-height:42px;cursor:pointer;\';close.addEventListener(\'click\',()=>{clearTimeout(showTaskFeedback.timer);banner.classList.add(\'hidden\')});banner.append(message,close);document.body.appendChild(banner)}return banner}function showTaskFeedback(message,kind=\'working\'){const banner=notificationBox(),messageNode=banner.querySelector(\'.task-feedback-message\');if(messageNode)messageNode.textContent=String(message||\'Working…\');banner.style.background=kind===\'done\'?\'#163d2b\':(kind===\'error\'?\'#4a2025\':\'#152033\');banner.style.borderColor=kind===\'done\'?\'#2f7654\':(kind===\'error\'?\'#a64b56\':\'#43638f\');banner.classList.remove(\'hidden\');clearTimeout(showTaskFeedback.timer);if(kind!==\'working\')showTaskFeedback.timer=setTimeout(()=>banner.classList.add(\'hidden\'),10000)}function note(message,error=false){if(error&&message)showTaskFeedback(message,\'error\')}\nasync function api(url,options={}){const response=await fetch(url,{cache:\'no-store\',...options});const data=await response.json().catch(()=>null);if(!data||typeof data!==\'object\'||Array.isArray(data))throw Error(\'Invalid server response\');if(!response.ok||data.ok===false)throw Error(data.error||\'Request failed\');return data}\nconst post=(url,data={})=>api(url,{method:\'POST\',headers:{\'Content-Type\':\'application/json\'},body:JSON.stringify(data)});\nfunction fill(element,value,maximum){const max=Number(maximum),v=Number(value);const percent=Number.isFinite(max)&&max>0&&Number.isFinite(v)?Math.max(0,Math.min(100,v/max*100)):0;element.style.setProperty(\'--fill\',percent+\'%\')}\nfunction renderTimeline(media,position,duration){\n  const total=Number.isFinite(Number(duration))?Math.max(0,Number(duration)):0;\n  const current=Number.isFinite(Number(position))?Math.max(0,Math.min(Number(position),total>0?total:Number(position))):0;\n  media.duration=total;\n  media.slider.max=String(total>0?total:1);\n  if(!media.dragging)media.slider.value=String(current);\n  const shown=media.dragging?Number(media.slider.value):current;\n  fill(media.slider,shown,total);\n  media.elapsed.textContent=fmt(shown);\n  media.durationLabel.textContent=fmt(total);\n}\n\nfunction renderActiveProfile(data){\n  const info=data.filters?.[data.active];\n  $(\'#active-profile\').textContent=data.active?(info?.group||\'Other\'):\'No profile\';\n  $(\'#active-state\').textContent=data.active?((info?.label||data.active)+\' · \'+(data.running?\'Running\':\'Stopped\')):\'Stopped\'\n}\nfunction renderSonobusStatus(mode,groups){\n  const selected=groups?.profiles?.[groups.active];\n  $(\'#sonobus-group\').textContent=selected?.group||\'No group selected\';\n  $(\'#sonobus-status\').textContent=(mode.sonobus?\'Process running\':\'Process stopped\')+\n    (selected?\' • Profile: \'+groups.active+\' • User: \'+selected.username:\'\')\n}\nasync function busy(button,work,label=\'Working…\',doneLabel=\'Done\',feedback=false){if(button.disabled)return;const original=button.innerHTML;button.disabled=true;button.classList.add(\'busy\');if(!button.classList.contains(\'transport\'))button.textContent=label;if(feedback)showTaskFeedback(label,\'working\');try{const result=await work();if(feedback&&doneLabel)showTaskFeedback(doneLabel,\'done\');return result}catch(error){showTaskFeedback(error?.message||String(error),\'error\');throw error}finally{button.disabled=false;button.classList.remove(\'busy\');button.innerHTML=original}}\nfunction setPlayIcon(shape,button,playing){if(!shape||!button)return;shape.setAttribute(\'d\',playing?\'M8 5h3v14H8z M14 5h3v14h-3z\':\'M8 5.5 19 12 8 18.5z\');button.setAttribute(\'aria-label\',playing?\'Pause\':\'Play\');button.classList.toggle(\'playing\',playing)}\n\nfunction setSystemAvailability(data){for(const id of [\'system-previous\',\'system-toggle\',\'system-next\'])$(\'#\'+id).disabled=!data.available;$(\'#system-seek\').disabled=!data.available||!data.seekable}\nfunction systemTrackKey(data){\n  if(!data||!data.available)return \'\';\n  return [data.player||\'\',data.trackId||\'\',data.title||\'\',data.artist||\'\',data.duration||\'\'].join(\'\\x1f\')\n}\nfunction resetSystemPosition(){\n  const media=state.system;\n  media.clockPlaying=false;media.clockAt=0;media.clockPosition=0;\n  media.dragging=false;media.slider.classList.remove(\'dragging\');\n  renderTimeline(media,0,0)\n}\nfunction systemPositionError(message){\n  const media=state.system;\n  if(!media.skipWarned){media.skipWarned=true;showTaskFeedback(message,\'error\')}\n}\nfunction renderSystem(data){\n  const media=state.system,now=performance.now();\n  if(!data||typeof data!==\'object\')return;\n  if(!data.available&&media.lastAvailableAt&&now-media.lastAvailableAt<1500){\n    if(media.skipPending)resetSystemPosition();\n    return\n  }\n  if(data.available)media.lastAvailableAt=now;\n  else media.lastAvailableAt=0;\n  $(\'#system-title\').textContent=data.title||\'No system media\';\n  $(\'#system-details\').textContent=[data.artist,data.player,data.status].filter(Boolean).join(\' • \');\n  const key=systemTrackKey(data),duration=Number(data.duration),position=data.position===null||data.position===undefined||data.position===\'\'?NaN:Number(data.position);\n  const valid=!!data.available&&Number.isFinite(duration)&&duration>0&&Number.isFinite(position)&&position>=0&&position<=duration+2;\n  if(media.skipPending){\n    // Ignore snapshots from the old track after the skip command.\n    const changed=key&&key!==media.skipFrom;\n    const restarted=key&&key===media.skipFrom&&valid&&position<=3;\n    if(!changed&&!restarted){\n      resetSystemPosition();\n      if(now-media.skipStarted>2000)systemPositionError(\'Could not confirm the new track position. Marker held at 0:00.\');\n      return\n    }\n    media.skipPending=false;media.skipWarned=false\n  }\n  media.trackKey=key;\n  if(!valid){\n    resetSystemPosition();\n    if(data.available)systemPositionError(\'System media position is unavailable or invalid. Marker held at 0:00.\');\n  }else{\n    media.skipWarned=false;\n    media.clockPosition=Math.min(position,duration);\n    media.clockAt=now;\n    media.clockPlaying=!!data.playing;\n    renderTimeline(media,media.clockPosition,duration)\n  }\n  setSystemAvailability(data);\n  if(media.volumePending!==null&&Number.isFinite(data.volume)&&Math.abs(data.volume-media.volumePending)<=1)media.volumePending=null;\n  if(media.volumePending===null&&now>=media.volumeHold&&document.activeElement!==media.volume&&Number.isFinite(data.volume)){\n    displayMasterVolume(data.volume)\n  }\n  setPlayIcon($(\'#system-play-shape\'),$(\'#system-toggle\'),!!data.playing)\n}\nfunction tickSystem(){\n  const media=state.system;\n  if(document.hidden||media.skipPending||!media.clockPlaying||media.dragging||!media.clockAt||media.duration<=0)return;\n  renderTimeline(media,Math.min(media.duration,media.clockPosition+(performance.now()-media.clockAt)/1000),media.duration)\n}\nasync function pollSystem(force=false){\n  const media=state.system;\n  if(media.polling){if(force)media.repoll=true;return}\n  media.polling=true;\n  try{renderSystem(await api(\'/api/system-media\'))}\n  catch(error){resetSystemPosition();systemPositionError(\'System media update failed: \'+(error?.message||String(error)))}\n  finally{media.polling=false;if(media.repoll){media.repoll=false;pollSystem()}}\n}\nasync function pollLocal(){const media=state.local;if(media.polling)return;media.polling=true;try{if(!$(\'#pc\').classList.contains(\'hidden\')){const data=await api(\'/api/player\');$(\'#now-title\').textContent=data.title||\'Nothing playing\';updateLocalNowArtwork(data.cover||\'\');$(\'#now-details\').textContent=[data.artist,data.album].filter(Boolean).join(\' • \')||(data.path||\'\');renderTimeline(media,data.currentTime,data.duration);if(media.volumePending!==null&&Number.isFinite(data.volume)&&Math.abs(data.volume-media.volumePending)<=1){media.volumePending=null}if(media.volumePending===null&&performance.now()>=media.volumeHold&&document.activeElement!==media.volume&&Number.isFinite(data.volume)){displayMasterVolume(data.volume)}$(\'#shuffle\').disabled=!data.canShuffleQueue;$(\'#repeat\').textContent=\'Repeat \'+({off:\'Off\',all:\'All\',one:\'1\'}[data.repeat]||\'Off\');$(\'#repeat\').classList.toggle(\'active\',data.repeat!==\'off\');setPlayIcon($(\'#local-play-shape\'),document.querySelector(\'[data-cmd="toggle"]\'),data.playing)}}catch(error){note(error.message,true)}finally{media.polling=false}}\n\nfunction bindSeek(media,url){\n  const slider=media.slider;\n  const begin=()=>{media.dragging=true;slider.classList.add(\'dragging\')};\n  const end=()=>{media.dragging=false;slider.classList.remove(\'dragging\')};\n  slider.addEventListener(\'pointerdown\',begin);\n  slider.addEventListener(\'pointercancel\',end);\n  slider.addEventListener(\'touchstart\',begin,{passive:true});\n  slider.oninput=()=>{media.dragging=true;const value=Number(slider.value);fill(slider,value,media.duration);media.elapsed.textContent=fmt(value)};\n  slider.onchange=async()=>{const target=Math.max(0,Number(slider.value)||0);end();try{await post(url,{seconds:target});if(media===state.system)await pollSystem(true)}catch(error){note(error.message,true);if(media===state.system)await pollSystem(true)}};\n}\nfunction displayMasterVolume(value,origin=null){\n  const v=Number(value);\n  if(!Number.isFinite(v))return;\n  for(const media of [state.system,state.local]){\n    if(media!==origin && (document.activeElement===media.volume || media.volumePending!==null))continue;\n    media.volume.value=String(v);fill(media.volume,v,100)\n  }\n}\nlet volumeWriteQueue=Promise.resolve();\nfunction bindVolume(media,url){\n  const control=media.volume;\n  const send=()=>{\n    const value=Math.max(0,Math.min(100,Number(control.value)||0));\n    for(const item of [state.system,state.local]){\n      item.volumeHold=performance.now()+1500;item.volumePending=value;\n    }\n    for(const item of [state.system,state.local]){item.volume.value=String(value);fill(item.volume,value,100)}\n    volumeWriteQueue=volumeWriteQueue.catch(()=>{}).then(()=>post(url,{volume:value}));\n    volumeWriteQueue.then(result=>{\n      const actual=Number(result.volume);\n      if(Number.isFinite(actual)){\n        for(const item of [state.system,state.local])item.volumePending=null;\n        displayMasterVolume(actual)\n      }\n    }).catch(error=>{\n      for(const item of [state.system,state.local])item.volumePending=null;\n      note(error.message,true);pollSystem(true);pollLocal()\n    })\n  };\n  control.oninput=()=>{\n    const value=Number(control.value);\n    media.volumeHold=performance.now()+1500;\n    for(const item of [state.system,state.local]){item.volume.value=String(value);fill(item.volume,value,100)}\n    clearTimeout(media.volumeTimer);media.volumeTimer=setTimeout(send,90)\n  };\n  control.onchange=()=>{clearTimeout(media.volumeTimer);send()}\n}\n\nfunction coverNode(url,large=false){const node=document.createElement(url?\'img\':\'div\');node.className=\'cover-art\'+(large?\' large\':\'\')+(url?\'\':\' cover-fallback\');if(url){node.src=url;node.loading=large?\'eager\':\'lazy\';node.alt=\'Album cover\';node.onerror=()=>{const fallback=coverNode(\'\',large);fallback.id=node.id;fallback.dataset.failedCover=url;node.replaceWith(fallback)}}else{node.textContent=\'♫\';node.setAttribute(\'aria-label\',\'No album art\')}return node}\nlet localNowArtworkURL=\'\';\nfunction updateLocalNowArtwork(url){const next=url||\'\';if(next===localNowArtworkURL)return;localNowArtworkURL=next;const tile=$(\'#now-cover\');tile.replaceChildren();if(!next)return;const image=document.createElement(\'img\');image.alt=\'\';image.decoding=\'async\';image.addEventListener(\'error\',()=>image.remove(),{once:true});image.src=next;tile.appendChild(image)}\nfunction updateCover(id,url){const current=$(\'#\'+id);if(!current)return;if(url&&((current.tagName===\'IMG\'&&current.getAttribute(\'src\')===url)||current.dataset.failedCover===url))return;if(!url&&current.classList.contains(\'cover-fallback\'))return;const next=coverNode(url,true);next.id=id;current.replaceWith(next)}\nfunction render(sel,data,query){const list=$(sel);list.replaceChildren();const term=query.toLowerCase();const filtered=data.filter(song=>!term||[song.title,song.artist,song.album,song.relative].join(\' \').toLowerCase().includes(term));if(!filtered.length){const empty=document.createElement(\'div\');empty.className=\'card details\';empty.textContent=query?\'No matches\':\'Nothing here yet\';list.append(empty);return}const fragment=document.createDocumentFragment();for(const song of filtered){const button=document.createElement(\'button\');button.className=\'item\';button.innerHTML=\'<span class="name"></span><span class="meta"></span>\';button.children[0].textContent=song.title;button.children[1].textContent=[song.artist,song.album].filter(Boolean).join(\' • \')||song.relative;const wrap=document.createElement(\'div\');wrap.className=\'item-cover\';const copy=document.createElement(\'div\');copy.className=\'copy\';copy.append(...button.children);wrap.append(coverNode(song.cover),copy);button.append(wrap);button.onclick=async()=>{try{await busy(button,()=>post(\'/api/play/song\',{path:song.path}),\'Playing…\');note(\'Playing \'+song.title);await refreshVolatile()}catch(error){note(error.message,true)}};fragment.append(button)}list.append(fragment)}\nconst MODE_LABELS={ipad_ipad:\'External\',laptop_laptop:\'Laptop\',ipad_laptop:\'Laptop\',ipad_both:\'Both\',laptop_ipad:\'External\',laptop_both:\'Both\'};const LOCAL_MODES=new Set([\'ipad_laptop\',\'ipad_both\',\'laptop_laptop\',\'laptop_both\']);let pendingMode=null,outputTopology=null,lastOutputRefresh=0,outputProfileBusy=false;const outputCard=$(\'#output-card\'),outputProfile=$(\'#output-profile\'),outputSink=$(\'#output-sink\');function selectedCard(){return outputTopology?.cards.find(item=>item.name===outputCard.value)}function fillSinks(preferred=\'\'){\n  const card=selectedCard(),profile=outputProfile.value,prior=outputSink.value;\n  outputSink.replaceChildren();\n  // Only show sinks exposed by the live graph. A different profile may create\n  // new sinks; it cannot be selected until the system actually exposes it.\n  for(const sink of card?.sinks||[])for(const port of sink.ports){\n    const value=JSON.stringify({card:card.name,profile,sink:sink.name,port:port.name});\n    const label=sink.label+(port.name&&port.label!==sink.label?\' · \'+port.label:\'\');\n    const option=new Option(label+(port.available===\'no\'||port.available===\'false\'?\' (unavailable)\':\'\'),value);\n    option.disabled=port.available===\'no\'||port.available===\'false\';outputSink.add(option)\n  }\n  const wanted=preferred||prior;\n  const match=[...outputSink.options].find(option=>!option.disabled&&option.value===wanted);\n  if(match)outputSink.value=match.value;\n  else outputSink.selectedIndex=-1;\n}\nfunction fillProfiles(preferred=\'\'){const card=selectedCard();outputProfile.replaceChildren();for(const item of card?.profiles||[]){const option=new Option(item.label+(item.available===\'no\'||item.available===\'false\'?\' (unavailable)\':\'\'),item.name);option.disabled=item.available===\'no\'||item.available===\'false\';outputProfile.add(option)}outputProfile.value=card?.profiles?.some(item=>item.name===preferred&&item.available!==\'no\'&&item.available!==\'false\')?preferred:(card?.activeProfile||\'\');if(outputProfile.selectedOptions[0]?.disabled)outputProfile.value=card?.profiles?.find(item=>item.available!==\'no\'&&item.available!==\'false\')?.name||\'\';fillSinks()}\nasync function applyMode(mode,output=null){const b=document.querySelector(`[data-mode="${mode}"]`);try{await busy(b,()=>post(\'/api/mode\',{mode,password:$(\'#group-password\').value,output}),\'Applying audio route…\',\'Audio route activated\',true);await refreshAll()}catch(error){note(error.message,true)}}\nlet outputOriginalProfiles={},outputChangedCards=new Set();\nasync function chooseOutput(mode){pendingMode=mode;outputTopology=await api(\'/api/outputs\');lastOutputRefresh=performance.now();outputOriginalProfiles=Object.fromEntries(outputTopology.cards.map(card=>[card.name,card.activeProfile]));outputChangedCards=new Set();const saved=outputTopology.saved||{};outputCard.replaceChildren(...outputTopology.cards.map(item=>new Option(item.label,item.name)));if(!outputTopology.cards.length)throw Error(\'No playback cards available\');outputCard.value=outputTopology.cards.some(item=>item.name===saved.card)?saved.card:outputCard.value;fillProfiles(selectedCard()?.activeProfile||\'\');$(\'#output-mode-title\').textContent=MODE_LABELS[mode];$(\'#output-modal\').classList.remove(\'hidden\')}\nasync function commitOutput(){\n  if(outputProfileBusy||!pendingMode)return;\n  const card=selectedCard(),profile=outputProfile.value;\n  if(!card||!profile)throw Error(\'Choose a card and playback profile\');\n  if(outputSink.selectedIndex<0||!outputSink.value)throw Error(\'Choose an available sink and port\');\n  const selected=JSON.parse(outputSink.value);\n  const output={card:card.name,profile,sink:selected.sink,port:selected.port||\'\'};\n  outputProfileBusy=true;\n  try{await busy($(\'#output-apply\'),()=>post(\'/api/mode\',{mode:pendingMode,password:$(\'#group-password\').value,output}), \'Applying audio route…\',\'Audio route activated\',true);\n    $(\'#output-modal\').classList.add(\'hidden\');pendingMode=null;await refreshAll()\n  }catch(error){note(error.message,true)}finally{outputProfileBusy=false}\n}\noutputCard.onchange=async()=>{\n  if(outputProfileBusy)return;\n  fillProfiles(outputTopology?.rememberedProfiles?.[outputCard.value]||\'\');\n  // A card change selects a profile too; activate it before listing its sinks.\n  if(outputProfile.value)await activatePickerProfile();\n};\nasync function activatePickerProfile(){\n  const card=selectedCard(),profile=outputProfile.value;\n  if(!card||!profile||outputProfileBusy)return;\n  outputProfileBusy=true;$(\'#output-apply\').disabled=true;outputSink.replaceChildren();\n  try{\n    const response=await post(\'/api/output-profile\',{card:card.name,profile});\n    outputTopology=response.topology;\n    if(profile!==outputOriginalProfiles[card.name])outputChangedCards.add(card.name);\n    else outputChangedCards.delete(card.name);\n    fillSinks();\n  }catch(error){note(error.message,true);outputTopology=await api(\'/api/outputs\');fillProfiles(outputTopology.cards.find(item=>item.name===card.name)?.activeProfile||\'\')}\n  finally{outputProfileBusy=false;$(\'#output-apply\').disabled=false}\n}\noutputProfile.onchange=activatePickerProfile;\noutputSink.onchange=()=>{};\n$(\'#output-apply\').onclick=()=>commitOutput();\nfor(const [source,items] of [[\'External\',[\'ipad_ipad\',\'ipad_laptop\',\'ipad_both\']],[\'Laptop\',[\'laptop_ipad\',\'laptop_laptop\',\'laptop_both\']]]){const heading=document.createElement(\'div\');heading.className=\'source-heading\';heading.textContent=\'Playing from \'+source;$(\'#mode-grid\').append(heading);for(const key of items){const b=document.createElement(\'button\');b.className=\'action\';b.dataset.mode=key;b.textContent=MODE_LABELS[key];b.onclick=async()=>{try{if(LOCAL_MODES.has(key))await chooseOutput(key);else await applyMode(key)}catch(error){note(error.message,true)}};$(\'#mode-grid\').append(b)}}$(\'#output-cancel\').onclick=async()=>{\n  if(outputProfileBusy)return;\n  outputProfileBusy=true;$(\'#output-cancel\').disabled=true;\n  try{\n    for(const card of outputChangedCards){\n      const original=outputOriginalProfiles[card];\n      if(original)await post(\'/api/output-profile\',{card,profile:original});\n    }\n    $(\'#output-modal\').classList.add(\'hidden\');pendingMode=null;\n  }catch(error){note(\'Could not restore original card profile: \'+error.message,true)}\n  finally{outputProfileBusy=false;$(\'#output-cancel\').disabled=false}\n};function loadGroups(data){const state=data.groups,select=$(\'#group-select\');select.replaceChildren(...Object.entries(state.profiles).map(([key,g])=>new Option(key+\' • \'+g.group,key,key===state.active,key===state.active)));const show=()=>{const key=select.value||state.active,g=state.profiles[key];if(!g)return;$(\'#group-key\').value=key;$(\'#group-name\').value=g.group;$(\'#group-user\').value=g.username;$(\'#group-server\').value=g.server;$(\'#group-required\').checked=!!g.passwordRequired};select.onchange=show;show()}$(\'#save-group\').onclick=async()=>{try{await busy($(\'#save-group\'),()=>post(\'/api/groups/save\',{key:$(\'#group-key\').value,group:$(\'#group-name\').value,username:$(\'#group-user\').value,server:$(\'#group-server\').value,passwordRequired:$(\'#group-required\').checked}),\'Saving group…\',null,false);await refreshAll();note(\'Group profile saved\')}catch(error){note(error.message,true)}};$(\'#open-pc\').onclick=async()=>{try{show(\'pc\');await refreshStatic()}catch(error){note(error.message,true)}};\n$(\'#away-display-toggle\').onclick=async()=>{try{await busy($(\'#away-display-toggle\'),()=>post(\'/api/away-display\'),\'Switching away/display…\',null,false);await refreshVolatile()}catch(error){note(error.message,true)}};\n$(\'#pc-back\').onclick=()=>show(\'profiles\');\n$(\'#all-songs\').onclick=async()=>{try{all=(await api(\'/api/songs\')).songs;show(\'songs\');render(\'#song-list\',all,\'\');}catch(error){note(error.message,true)}};\n$(\'#song-search\').oninput=()=>render(\'#song-list\',all,$(\'#song-search\').value);\n$(\'#playlist-search\').oninput=()=>render(\'#playlist-songs\',inside,$(\'#playlist-search\').value);\ndocument.querySelectorAll(\'[data-back]\').forEach(button=>button.onclick=()=>show(button.dataset.back));\ndocument.querySelectorAll(\'[data-cmd]\').forEach(button=>button.onclick=async()=>{try{await busy(button,()=>post(\'/api/player/command\',{command:button.dataset.cmd}),\'…\',null,false);await pollLocal()}catch(error){note(error.message,true)}});\n$(\'#repeat\').onclick=async()=>{try{const data=await api(\'/api/player\');await post(\'/api/player/repeat\',{mode:{off:\'all\',all:\'one\',one:\'off\'}[data.repeat]||\'off\'});await pollLocal()}catch(error){note(error.message,true)}};\n$(\'#shuffle\').onclick=async()=>{try{await busy($(\'#shuffle\'),()=>post(\'/api/player/shuffle\'),\'Updating saved shuffle…\',\'Saved shuffle updated for next play\',true)}catch(error){note(error.message,true)}};\nfor(const [id,command] of [[\'system-previous\',\'previous\'],[\'system-toggle\',\'toggle\'],[\'system-next\',\'next\']])$(\'#\'+id).onclick=async()=>{if(command!==\'toggle\'){const media=state.system;media.skipPending=true;media.skipFrom=media.trackKey;media.skipStarted=performance.now();media.skipWarned=false;resetSystemPosition()}else{state.system.skipPending=false}try{await busy($(\'#\'+id),()=>post(\'/api/system-media\',{command}),\'…\',null,false);await pollSystem(true)}catch(error){if(command!==\'toggle\')systemPositionError(\'System media skip failed: \'+(error?.message||String(error)));else note(error.message,true)}};\n$(\'#audio-toggle\').onclick=async()=>{try{await busy($(\'#audio-toggle\'),()=>post(\'/api/audio-toggle\'),\'Switching audio services…\',\'Audio services updated\',true);await refreshStatic()}catch(error){note(error.message,true)}};\n$(\'#restart-camilla\').onclick=()=>busy($(\'#restart-camilla\'),()=>post(\'/api/restart-camilladsp\'),\'Restarting CamillaDSP…\',\'CamillaDSP restarted\',true).then(refreshStatic).catch(error=>note(error.message,true));\n$(\'#restart-sonobus\').onclick=()=>busy($(\'#restart-sonobus\'),()=>post(\'/api/restart-sonobus\'),\'Restarting SonoBus…\',\'SonoBus restarted\',true).then(refreshVolatile).catch(error=>note(error.message,true));\n$(\'#restart-airplay\').onclick=()=>busy($(\'#restart-airplay\'),()=>post(\'/api/restart-airplay\'),\'Restarting AirPlay…\',\'AirPlay restarted\',true).then(refreshVolatile).catch(error=>note(error.message,true));\n$(\'#restart-vnc\').onclick=()=>busy($(\'#restart-vnc\'),()=>post(\'/api/restart-vnc\'),\'Restarting VNC…\',\'VNC restarted\').catch(error=>note(error.message,true));\n$(\'#profile-search\').oninput=()=>{if(profileSnapshot)renderProfileSnapshot(profileSnapshot);else refreshStatic()};\nbindSeek(state.local,\'/api/player/seek\');bindSeek(state.system,\'/api/system-media/seek\');bindVolume(state.local,\'/api/player/volume\');bindVolume(state.system,\'/api/system-volume\');\nlet staticRefreshRunning=false,volatileRefreshRunning=false,profileSnapshot=null;\nfunction renderProfileSnapshot(data){\n  const query=$(\'#profile-search\').value.toLowerCase(),root=$(\'#profile-list\');\n  renderActiveProfile(data);root.replaceChildren();\n  const groups=new Map();\n  for(const name of data.profiles||[]){\n    const info=data.filters?.[name]||{group:\'Other\',label:name};\n    if(![name,info.group,info.label].some(value=>value.toLowerCase().includes(query)))continue;\n    if(!groups.has(info.group))groups.set(info.group,[]);\n    groups.get(info.group).push({name,label:info.label});\n  }\n  for(const [group,items] of groups){\n    const heading=document.createElement(\'div\');heading.className=\'section-title\';heading.textContent=group;root.append(heading);\n    const list=document.createElement(\'div\');list.className=\'list\';\n    for(const {name,label} of items){\n      const button=document.createElement(\'button\');\n      button.className=\'item\'+(name===data.active&&data.running?\' active\':\'\');\n      const title=document.createElement(\'span\');title.className=\'name\';title.textContent=label;\n      button.append(title);\n      button.onclick=async()=>{try{await busy(button,()=>post(\'/api/select\',{profile:name}),\'Switching profile…\',\'Profile activated\',true);await refreshStatic()}catch(error){note(error.message,true)}};\n      list.append(button);\n    }\n    root.append(list);\n  }\n}\nfunction playlistAction(playlist,shuffle){\n  const button=document.createElement(\'button\');button.type=\'button\';button.className=\'playlist-icon\';\n  button.setAttribute(\'aria-label\',(shuffle?\'Play saved shuffle of \':\'Play \')+playlist.name);\n  button.title=(shuffle?\'Play saved shuffle\':\'Play playlist\')+\' · \'+playlist.name;\n  button.innerHTML=shuffle\n    ? \'<svg class="media-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h3c5 0 7 10 12 10h3m-4-4 4 4-4 4M3 17h3c2 0 3-1 4-3m3-4c1-2 2-3 5-3h3m-4-4 4 4-4 4"/></svg>\'\n    : \'<svg class="media-icon" viewBox="0 0 24 24" aria-hidden="true"><path class="icon-fill" d="M8 5.5 19 12 8 18.5z"/></svg>\';\n  button.onclick=()=>busy(button,()=>post(\'/api/play/playlist\',{name:playlist.name,shuffle}),\'…\',null,false).then(refreshVolatile).catch(error=>note(error.message,true));\n  return button\n}\nfunction renderPlaylistSnapshot(playlists){\n  const list=$(\'#playlists\');list.replaceChildren();\n  for(const playlist of playlists){\n    const row=document.createElement(\'div\');row.className=\'playlist-row\';\n    const open=document.createElement(\'button\');open.className=\'item playlist-open\';open.dataset.playlistName=playlist.name;open.innerHTML=\'<span class="name"></span><span class="meta"></span>\';open.children[0].textContent=playlist.name;open.children[1].textContent=playlist.count+(playlist.count===1?\' song\':\' songs\');const wrap=document.createElement(\'div\');wrap.className=\'item-cover\';const copy=document.createElement(\'div\');copy.className=\'copy\';copy.append(...open.children);wrap.append(coverNode(playlist.cover),copy);open.append(wrap);\n    open.onclick=async()=>{current=playlist.name;inside=(await api(\'/api/playlist?name=\'+encodeURIComponent(playlist.name))).songs;$(\'#playlist-title\').textContent=playlist.name;show(\'playlist\');render(\'#playlist-songs\',inside,\'\')};\n    const controls=document.createElement(\'div\');controls.className=\'playlist-controls\';\n    const play=playlistAction(playlist,false),shuffle=playlistAction(playlist,true);\n    controls.append(play,shuffle);row.append(open,controls);list.append(row)\n  }\n}\nfunction updatePlaylistCover(player){if(!player?.playlist||!player.playing)return;for(const button of document.querySelectorAll(\'#playlists [data-playlist-name]\')){if(button.dataset.playlistName!==player.playlist)continue;const old=button.querySelector(\'.item-cover .cover-art\');if(!old)continue;const url=player.cover||\'\';if(url&&old.tagName===\'IMG\'&&old.getAttribute(\'src\')===url)return;if(!url&&old.classList.contains(\'cover-fallback\'))return;old.replaceWith(coverNode(url))}}\nfunction renderVolatile(data){\n  $(\'#audio-toggle\').textContent=data.mode.mode===\'stopped\'?\'Start all audio\':\'Stop all audio\';\n  if(data.awayDisplay){const button=$(\'#away-display-toggle\');button.textContent=data.awayDisplay.displayOff?\'Show lock screen\':data.awayDisplay.away?\'Unlock desktop\':\'Away and display off\';button.setAttribute(\'aria-pressed\',String(!!data.awayDisplay.active));button.classList.toggle(\'mode-active\',!!data.awayDisplay.active)}\n  if(data.profiles)renderActiveProfile(data.profiles);\n  renderSonobusStatus(data.mode,data.groups);\n  $(\'#engine-status\').textContent=data.mode.camilla?\'Audio engine online\':\'Audio engine offline\';$(\'.dot\').style.opacity=data.mode.camilla?\'1\':\'.25\';\n  $(\'#source-title\').textContent=({ipad_external:\'External\',laptop_external:\'Laptop\',ipad_ipad:\'External\',ipad_laptop:\'Laptop\',ipad_both:\'Both\',laptop_ipad:\'External\',laptop_laptop:\'Laptop\',laptop_both:\'Both\'})[data.mode.mode]||data.mode.label;$(\'#source-details\').textContent=\'CamillaDSP \'+(data.mode.camilla?\'running\':\'stopped\')+\' • SonoBus \'+(data.mode.sonobus?\'on\':\'off\')+\' • AirPlay \'+(data.mode.airplay?\'on\':\'off\')+(data.mode.localWanted?\' • Output \'+(data.mode.localOutputLabel||\'Not selected\'):\'\');\n  document.querySelectorAll(\'[data-mode]\').forEach(button=>button.classList.toggle(\'mode-active\',button.dataset.mode===data.mode.mode));\n  updatePlaylistCover(data.player);\n  const local=data.player,lm=state.local;$(\'#now-title\').textContent=local.title||\'Nothing playing\';updateLocalNowArtwork(local.cover||\'\');$(\'#now-details\').textContent=[local.artist,local.album].filter(Boolean).join(\' • \')||(local.path||\'\');renderTimeline(lm,local.currentTime,local.duration);if(lm.volumePending===null&&document.activeElement!==lm.volume){displayMasterVolume(local.volume)}$(\'#shuffle\').disabled=!local.canShuffleQueue;$(\'#repeat\').textContent=\'Repeat \'+({off:\'Off\',all:\'All\',one:\'1\'}[local.repeat]||\'Off\');$(\'#repeat\').classList.toggle(\'active\',local.repeat!==\'off\');setPlayIcon($(\'#local-play-shape\'),document.querySelector(\'[data-cmd="toggle"]\'),local.playing)\n}\nasync function refreshStatic(){if(staticRefreshRunning)return;staticRefreshRunning=true;try{const data=await api(\'/api/state\');profileSnapshot=data.profiles;renderProfileSnapshot(data.profiles);renderPlaylistSnapshot(data.playlists);loadGroups(data);renderVolatile(data);renderSystem(data.systemMedia);return data}catch(error){note(error.message,true)}finally{staticRefreshRunning=false}}\nasync function refreshOutputPicker(){if($(\'#output-modal\').classList.contains(\'hidden\')||!pendingMode||outputProfileBusy||outputProfile.disabled||performance.now()-lastOutputRefresh<5000)return;const cardValue=outputCard.value,profileValue=outputProfile.value,sinkValue=outputSink.value;try{const fresh=await api(\'/api/outputs\');lastOutputRefresh=performance.now();outputTopology=fresh;outputCard.replaceChildren(...fresh.cards.map(item=>new Option(item.label,item.name)));if(!fresh.cards.length){outputProfile.replaceChildren();outputSink.replaceChildren();return}outputCard.value=fresh.cards.some(item=>item.name===cardValue)?cardValue:outputCard.value;fillProfiles(profileValue);if([...outputSink.options].some(option=>option.value===sinkValue&&!option.disabled))outputSink.value=sinkValue}catch(error){console.warn(\'output picker refresh failed\',error)}}\nasync function refreshVolatile(){if(volatileRefreshRunning||document.hidden)return;volatileRefreshRunning=true;try{renderVolatile(await api(\'/api/volatile\'));await refreshOutputPicker()}catch(error){console.warn(\'volatile refresh failed\',error)}finally{volatileRefreshRunning=false}}\nrefreshAll=async()=>refreshStatic();\nrefreshStatic();window.addEventListener(\'pageshow\',event=>{if(event.persisted){refreshStatic();refreshVolatile()}});document.addEventListener(\'visibilitychange\',()=>{if(!document.hidden){refreshStatic();refreshVolatile()}});setInterval(refreshVolatile,1000);setInterval(()=>{if(!document.hidden)pollSystem()},1000);setInterval(tickSystem,250);\n</script></body></html>'
 class H(BaseHTTPRequestHandler):
     def data(self,n,t,b):self.send_response(n);self.send_header('Content-Type',t);self.send_header('Content-Length',str(len(b)));self.send_header('Cache-Control','private, max-age=3600' if n==200 and t=='image/jpeg' else 'no-store');self.end_headers();self.wfile.write(b)
     def out(self,n,d):self.data(n,'application/json; charset=utf-8',json.dumps(d,separators=(',',':')).encode())
@@ -1673,7 +1867,7 @@ class H(BaseHTTPRequestHandler):
                 self.data(200,'image/jpeg',image);return
             if p=='/api/state':r=full_state()
             elif p=='/api/volatile':r=volatile_state()
-            elif p=='/api/profiles':r={'profiles':[profile_id(x) for x in profiles()],'filters':listening_filters(),'active':active(),'running':alive(rpid(CAMPID),'camilladsp') or alive(rpid(DIRECT))}
+            elif p=='/api/profiles':r={'profiles':[x.name for x in profiles()],'filters':listening_filters(),'active':active(),'running':alive(rpid(CAMPID),'camilladsp')}
             elif p=='/api/mode':r=mode_state()
             elif p=='/api/away-display':r=away_display_state()
             elif p=='/api/outputs':r=output_state()
@@ -1725,27 +1919,91 @@ class S(ThreadingHTTPServer):allow_reuse_address=True;daemon_threads=True
 
 def start_runtime(force=False):
     global MASTER_RESTORING
-    MASTER_RESTORING=True;ensure()
-    if STOPPED.exists() and not force:return
+    MASTER_RESTORING=True
+    ensure()
+    if STOPPED.exists() and not force:
+        run(['systemctl','--user','stop',SYSTEM_AUDIO_SERVICE],False,10)
+        run(['systemctl','stop','shairport-sync.service','nqptp.service'],False,10)
+        return
+    for unit in ('pipewire.socket','pipewire-pulse.socket','wireplumber.service'):
+        user_service('start',unit)
+    for _ in range(100):
+        if run([exe('pactl'),'info'],False,3,media_env()).returncode==0:break
+        time.sleep(.1)
+    else:raise RuntimeError('PipeWire did not become ready')
+    alsa100()
+    # Keep persisted master until the route has been restored; a newly
+    # created default sink may temporarily report 100%.
     available=profiles()
-    selected=ACTIVE.read_text().strip() if ACTIVE.is_file() else ''
-    try:chosen=resolve_saved_profile(selected) if selected else profile('00-filterless.yml')
-    except (ValueError,FileNotFoundError,StopIteration):chosen=profile('00-filterless.yml')
-    if chosen.name=='00-direct.yml':start_direct_bridge()
-    elif not alive(rpid(CAMPID),'camilladsp'):start_camilla(chosen)
-    try:apply_mode(audio_mode(),restore_camilla=False)
-    except (RuntimeError,ValueError) as error:
-        print('Audio route not fully restored: '+str(error),flush=True)
+    if not available:raise RuntimeError('No CamillaDSP profiles found in '+str(PROFILES))
+    saved=ACTIVE.read_text().strip() if ACTIVE.is_file() else '';selected=None
+    if saved:
+        try:selected=profile(saved)
+        except (ValueError,FileNotFoundError):pass
+    if selected is None:
+        selected=available[0]
+    # Reuse a verified surviving engine; never start a competing instance.
+    if not alive(rpid(CAMPID),'camilladsp'):
+        stop_camilla(include_stale=True)
+        start_camilla(selected)
+    mode=audio_mode()
+    try:
+        apply_mode(mode,restore_camilla=False)
+    except RuntimeError as error:
+        if 'exposes no available physical sink' not in str(error):raise
+        label,source,local,sono=MODES[mode]
+        apply_source_services(source);stop_local_monitor()
+        if sono:restart_sonobus(None,MODE_POLICIES[mode],normalize=False)
+        else:stop_sonobus()
+        MODE.write_text(mode+'\n')
+        normalize_with_media()
+    except ValueError as error:
+        # A saved password-protected group cannot be joined unattended. Keep
+        # CamillaDSP and the web UI alive so the password can be entered there.
+        if 'requires a password' not in str(error):raise
+        label,source,local,sono=MODES[mode]
+        apply_source_services(source)
+        if local:start_local_monitor()
+        else:stop_local_monitor()
+        stop_sonobus();MODE.write_text(mode+'\n')
+        normalize_with_media()
+    if MODES[audio_mode()][1]=='system' and QUEUE_FILE.is_file():
+        try:ensure_mpv()
+        except (OSError,RuntimeError):pass
     MASTER_RESTORING=False
-def stop_audio_services(mark_stopped=True):
+def stop_audio_services(mark_stopped=True,stop_pipewire=True):
     global MASTER_RESTORING
+    # Capture the last live value before stopping PipeWire, then prevent
+    # status polling from saving a recreated sink's 100% default.
     with LOCK:
+        if not MASTER_RESTORING and not STOPPED.exists():master_volume()
         MASTER_RESTORING=True
         if mark_stopped:STOPPED.touch()
-        stop_local_monitor();stop_mpv();stop_sonobus();stop_camilla(include_stale=True);stop_direct_bridge();airplay(False)
+        STOP_ACK.unlink(missing_ok=True)
+        try:
+            stop_local_monitor()
+            stop_mpv()
+            stop_sonobus()
+            stop_camilla(include_stale=True)
+            user_service('stop',SYSTEM_AUDIO_SERVICE)
+            airplay(False)
+            if stop_pipewire:
+                for unit in ('wireplumber.service','pipewire-pulse.service','pipewire.service',
+                             'pipewire-pulse.socket','pipewire.socket'):
+                    user_service('stop',unit)
+        finally:
+            if mark_stopped:STOP_ACK.touch()
 def release_audio_for_output_switch():
-    # Terminal and web now use the same API; legacy signal handoff is not needed.
-    STOP_ACK.touch()
+    # Transfer ownership without stopping PipeWire or marking the whole system stopped.
+    with LOCK:
+        STOP_ACK.unlink(missing_ok=True)
+        try:
+            stop_local_monitor();stop_mpv();stop_sonobus();stop_camilla(include_stale=True)
+            user_service('stop',SYSTEM_AUDIO_SERVICE)
+            airplay(False)
+        except Exception as error:
+            (STATE/'audio-start-error').write_text(str(error)+'\n')
+        finally:STOP_ACK.touch()
 def toggle_audio_services():
     with LOCK:
         if STOPPED.exists():
@@ -1799,101 +2057,80 @@ def watch_sonobus_workspace(stop):
             print(f'SonoBus workspace watcher: {error}',flush=True)
         stop.wait(.5)
 
-def watch_outputs(stop):
-    while not stop.wait(3):
-        if STOPPED.exists() or not MODES[audio_mode()][2]:continue
-        try:
-            with LOCK:
-                if not alive(rpid(LOCALMONPID)):
-                    route=choose_output_route()
-                    start_local_monitor(route,resolved=True)
-        except (OSError,ValueError,RuntimeError,subprocess.TimeoutExpired) as error:
-            print('ALSA hotplug monitor: '+str(error),flush=True)
-
 def main():
-    ensure()
+    global LOCAL_ENGINE_OWNED
     me=os.getpid()
+    SWITCH_STATE.mkdir(parents=True,exist_ok=True)
     startup_lock=(SWITCH_STATE/'audio-switch.lock').open('a+')
     fcntl.flock(startup_lock,fcntl.LOCK_EX)
-    old=rpid(SERVERPID)
+    legacy_pid=HOME/'.local/state/sway/audio/camilladsp-webremote/web-server.pid'
+    previous=rpid(legacy_pid)
+    if previous and previous!=me and alive(previous):
+        try:os.kill(previous,signal.SIGTERM)
+        except OSError:pass
+        deadline=time.monotonic()+10
+        while alive(previous) and time.monotonic()<deadline:time.sleep(.05)
+        if alive(previous):raise RuntimeError('Previous legacy webremote instance did not exit')
+    ensure();old=rpid(SERVERPID)
     if old and old!=me and alive(old):
-        os.kill(old,signal.SIGTERM)
+        try:os.kill(old,signal.SIGTERM)
+        except OSError:pass
         deadline=time.monotonic()+10
         while alive(old) and time.monotonic()<deadline:time.sleep(.05)
-        if alive(old):raise RuntimeError('Previous server did not stop')
+        if alive(old):raise RuntimeError('Previous webremote instance did not complete audio shutdown; refusing unsafe replacement')
     SERVERPID.unlink(missing_ok=True)
-    others=other_camilla_processes();tracked=rpid(CAMPID)
-    if others and (len(others)!=1 or others[0]!=tracked or not reusable_camilla(tracked)):
-        raise RuntimeError('Untracked CamillaDSP process: '+str(others))
-    if not STOPPED.exists():start_runtime()
+    # First replacement of an older server may leave its tracked engine alive.
+    tracked=rpid(CAMPID)
+    if tracked and reusable_camilla(tracked):
+        stop_local_monitor();stop_camilla(include_stale=True)
+    # A running engine may have survived a previous server. Never restart it
+    # just because the monitor PID is absent or stale.
+    running=other_camilla_processes()
+    tracked=rpid(CAMPID)
+    if running:
+        verified=reusable_camilla(running[0]) if len(running)==1 else False
+        if verified and tracked!=running[0] and not alive(tracked,'camilladsp'):
+            CAMPID.write_text(str(running[0])+'\n')
+            ACTIVE.write_text(verified.name+'\n')
+            tracked=running[0]
+            print('Recovered existing CamillaDSP PID '+str(tracked),flush=True)
+        if verified and tracked in running:
+            try:recorded=ACTIVE.read_text().strip()
+            except OSError:recorded=''
+            if recorded!=verified.name:ACTIVE.write_text(verified.name+'\n')
+        LOCAL_ENGINE_OWNED=tracked in running and alive(rpid(LOCALMONPID))
+        if not LOCAL_ENGINE_OWNED and tracked in running and verified:
+            # A previous server died after starting CamillaDSP but before its
+            # monitor. Finish its route without starting another engine.
+            start_runtime()
+            LOCAL_ENGINE_OWNED=False
+        elif not LOCAL_ENGINE_OWNED:
+            print('Existing CamillaDSP is not owned by this pair; leaving it untouched: '+str(running),flush=True)
+            LOCAL_ENGINE_OWNED=True
+    else:
+        LOCAL_ENGINE_OWNED=False
+        ensure()
     watcher_stop=threading.Event()
     threading.Thread(target=watch_sonobus_workspace,args=(watcher_stop,),daemon=True).start()
+    if not running:start_runtime()
     threading.Thread(target=watch_master_volume,args=(watcher_stop,),daemon=True).start()
-    threading.Thread(target=watch_outputs,args=(watcher_stop,),daemon=True).start()
-    server=S(('0.0.0.0',PORT),H)
-    SERVERPID.write_text(str(me)+'\n')
-    fcntl.flock(startup_lock,fcntl.LOCK_UN);startup_lock.close()
+    server=S(('0.0.0.0',PORT),H);SERVERPID.write_text(str(me)+'\n');STOP_CAP.write_text(str(me)+'\n')
+    fcntl.flock(startup_lock,fcntl.LOCK_UN)
+    startup_lock.close()
     def shut(*_):threading.Thread(target=server.shutdown,daemon=True).start()
     signal.signal(signal.SIGTERM,shut);signal.signal(signal.SIGHUP,shut)
-    print(f'ALSA web remote listening on 0.0.0.0:{PORT}',flush=True)
+    signal.signal(signal.SIGUSR1,lambda *_:threading.Thread(target=release_audio_for_output_switch,daemon=True).start())
+    print(f'CamillaDSP web remote listening on 0.0.0.0:{PORT}',flush=True)
     try:server.serve_forever()
     except KeyboardInterrupt:pass
     finally:
-        watcher_stop.set();server.server_close();cleanup()
+        watcher_stop.set()
+        server.server_close();cleanup()
         if rpid(SERVERPID)==me:SERVERPID.unlink(missing_ok=True)
-
-def toggle_master_mute():
-    SWITCH_STATE.mkdir(parents=True,exist_ok=True)
-    if MUTE.exists():MUTE.unlink()
-    else:MUTE.touch()
-    value=float(MASTER_VOLUME.read_text().strip().rstrip('%')) if MASTER_VOLUME.exists() else 50.
-    apply_master_volume(value)
-    return {'muted':MUTE.exists(),'volume':value}
-
-def toggle_mic_mute():
-    SWITCH_STATE.mkdir(parents=True,exist_ok=True)
-    muted=not MIC_MUTE.exists()
-    if muted:MIC_MUTE.touch()
-    else:MIC_MUTE.unlink()
-    for card in re.findall(r'^\s*(\d+)\s+\[',Path('/proc/asound/cards').read_text(),re.M):
-        listing=run([exe('amixer'),'-c',card,'scontrols'],False,5).stdout
-        for name,index in re.findall(r"^Simple mixer control '([^']+)',(\d+)$",listing,re.M):
-            info=run([exe('amixer'),'-c',card,'sget',f'{name},{index}'],False,5).stdout
-            if 'cswitch' in info:
-                run([exe('amixer'),'-c',card,'sset',f'{name},{index}','nocap' if muted else 'cap'],False,5)
-    return {'muted':muted}
-
-def post_local(path,data):
-    from urllib.request import Request,urlopen
-    request=Request('http://127.0.0.1:'+str(PORT)+path,data=json.dumps(data).encode(),headers={'Content-Type':'application/json'},method='POST')
-    with urlopen(request,timeout=90) as response:result=json.load(response)
-    if not result.get('ok'):raise RuntimeError(result.get('error','Request failed'))
-    return result
-
-def audio_diagnostics():
-    result={'mode':audio_mode(),'stopped':STOPPED.exists(),'engine':alive(rpid(CAMPID),'camilladsp'),
-            'directBridge':alive(rpid(DIRECT)),'localMonitor':alive(rpid(LOCALMONPID)),
-            'sonobus':bool(sonopids()),'savedMaster':read_saved_master(),'muted':MUTE.exists(),
-            'profile':active(),'savedOutput':saved_output_route()}
-    for name,args in (('cards',[exe('aplay'),'-l']),('pcms',[exe('aplay'),'-L']),
-                      ('master',[exe('amixer'),'-c','Loopback','sget','Studio Master'])):
-        check=run(args,False,8)
-        result[name]={'ok':check.returncode==0,'stdout':check.stdout[-4000:],'stderr':check.stderr[-1000:]}
-    for name in ('camilladsp.log','direct-bridge.log','local-monitor.log','sonobus.log'):
-        result[name]=log_tail(STATE/name,1200)
-    return result
-
+        if rpid(STOP_CAP)==me:STOP_CAP.unlink(missing_ok=True)
 def topology_cli():
     import sys
     try:
-        if len(sys.argv)==2 and sys.argv[1]=='--audio-diagnostics':
-            print(json.dumps(audio_diagnostics(),ensure_ascii=False,indent=2));return
-        if len(sys.argv)==2 and sys.argv[1] in ('--volume-up','--volume-down','--volume-toggle','--mic-toggle'):
-            action=sys.argv[1]
-            if action=='--mic-toggle':result=toggle_mic_mute()
-            elif action=='--volume-toggle':result=toggle_master_mute()
-            else:result=set_master_volume(max(0,min(100,master_volume()+(5 if action=='--volume-up' else -5))))
-            print(json.dumps(result));return
         if len(sys.argv)==2 and sys.argv[1]=='--audio-toggle':
             ensure()
             server=rpid(SERVERPID)
@@ -1927,14 +2164,12 @@ def topology_cli():
             print(json.dumps(toggle_away_display()));return
         if len(sys.argv)==2 and sys.argv[1]=='--away-display-status':
             print(json.dumps(away_display_state()));return
-        if len(sys.argv)==3 and sys.argv[1]=='--apply-laptop-output':
-            route=json.loads(sys.argv[2]);result=post_local('/api/mode',{'mode':'laptop_laptop','output':route}) if alive(rpid(SERVERPID)) else set_mode('laptop_laptop',output=route);print(json.dumps(result));return
         if len(sys.argv)==3 and sys.argv[1]=='--select-filter':
-            print(json.dumps(post_local('/api/select',{'profile':sys.argv[2]}) if alive(rpid(SERVERPID)) else switch_profile(sys.argv[2]),ensure_ascii=False));return
+            print(json.dumps(switch_profile(sys.argv[2]),ensure_ascii=False));return
         if len(sys.argv)==2 and sys.argv[1]=='--normalize-audio':
             print(json.dumps(normalize_with_media()));return
         if len(sys.argv)==2 and sys.argv[1]=='--dsp-profiles':
-            print(json.dumps([profile_id(item) for item in profiles()],ensure_ascii=False));return
+            print(json.dumps([item.name for item in profiles()],ensure_ascii=False));return
         if len(sys.argv)==2 and sys.argv[1]=='--dsp-filter-info':
             print(json.dumps(listening_filters(),ensure_ascii=False));return
         if len(sys.argv)==3 and sys.argv[1]=='--remember-output':

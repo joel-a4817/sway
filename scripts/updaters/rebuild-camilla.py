@@ -10,11 +10,16 @@ SAMPLE_RATE = 96000
 N_FFT = 65536
 CAMILLA_PLAYBACK_DEVICE = "hw:Loopback,0,1"
 CAMILLA_PLAYBACK_FORMAT = "S32_LE"
-BRIR_ROOT = Path.home() / 'Documents/prefs/audio-filters'
-EARPODS_HPCF = BRIR_ROOT / 'Apple_EarPods_Ahastyle_Covers_Custom_Average_A+B.wav'
-CLOUD3_HPCF = BRIR_ROOT / 'HyperX_Cloud_III_Average.wav'
-CMF_BUDS_PRO_2_HPCF = BRIR_ROOT / "CMF_by_Nothing_Buds_Pro_2_Sample_A.wav"
-CAMILLA_ROOT = BRIR_ROOT
+BRIR_ROOT = Path('/home/joel/Documents/prefs/audio/BRIRs')
+EARPODS_HPCF = Path('/home/joel/Documents/prefs/audio/Apple_EarPods_Ahastyle_Covers_Custom_Average_A+B.wav')
+CLOUD3_HPCF = Path('/home/joel/Documents/prefs/audio/HyperX_Cloud_III_Average.wav')
+CMF_BUDS_PRO_2_HPCF = Path(
+    "/home/joel/Documents/prefs/audio/"
+    "CMF_by_Nothing_Buds_Pro_2_Sample_A.wav"
+)
+CAMILLA_ROOT = Path(
+    "/home/joel/Documents/prefs/audio/camilladsp"
+)
 
 # Discover every BRIR profile folder automatically and sort by the
 # millisecond value at the start of its name, from least to most reverb.
@@ -27,12 +32,20 @@ def profile_sort_key(folder_name):
         )
     return int(match.group(1)), folder_name.casefold()
 
-def discover_profiles():
-    if not BRIR_ROOT.is_dir():
-        raise SystemExit(f'Missing audio filter directory: {BRIR_ROOT}')
-    return sorted((p.name for p in BRIR_ROOT.iterdir()
-                   if p.is_dir() and (p / 'BRIR_True_Stereo.wav').is_file()),
-                  key=profile_sort_key)
+PROFILES = sorted(
+    (path.name for path in BRIR_ROOT.iterdir() if path.is_dir()),
+    key=profile_sort_key,
+)
+# Reserve 00 for filterless. Both anechoic device variants use 01;
+# subsequent reverberant environments advance once per environment.
+ANECHOIC_OE = '(0000ms) Anechoic (OE)'
+PROFILE_NUMBERS = {
+    folder: index for index, folder in enumerate(
+        (name for name in PROFILES if name != ANECHOIC_OE), 1
+    )
+}
+if ANECHOIC_OE in PROFILES:
+    PROFILE_NUMBERS[ANECHOIC_OE] = 1
 
 def slugify(value):
     value = value.lower().replace("'", '')
@@ -223,7 +236,7 @@ def make_camilladsp_profile(
         f"{index:02d}-{device}-{slug}.yml"
     )
 
-    output_path = BRIR_ROOT / folder_name / filename
+    output_path = CAMILLA_ROOT / filename
 
     gain_text = f"{gain:.17f}"
     brir_text = yaml_string(brir)
@@ -404,35 +417,38 @@ pipeline:
     return output_path, config
 
 def main():
-    folders = discover_profiles()
+    """Reusable CamillaDSP profile rebuild"""
     hf = load_required_ash_helpers()
-    expected = {write_filterless_camilladsp_profile()}
-    for folder in folders:
+    report = []
+    for index, folder in enumerate(PROFILES):
+        cloud3 = folder == '(0000ms) Anechoic (OE)'
         brir = BRIR_ROOT / folder / 'BRIR_True_Stereo.wav'
-        # OE uses the over-ear calibration; IE and all other rooms offer both in-ear calibrations.
-        variants = (('cloud3', 'HyperX Cloud III', CLOUD3_HPCF),) if folder.casefold().endswith('(oe)') else (
-            ('cmf-buds-pro-2', 'CMF Buds Pro 2', CMF_BUDS_PRO_2_HPCF),
-            ('earpods', 'Apple EarPods', EARPODS_HPCF))
-        for device, title, hpcf in variants:
-            if not hpcf.is_file():
-                raise SystemExit(f'Missing HpCF: {hpcf}')
-            *_, gain = calculate_gain(brir, hpcf, hf)
-            path, config = make_camilladsp_profile(
-                index=folders.index(folder)+1, folder_name=folder, gain=gain,
-                brir=brir, hpcf=hpcf, device=device, title_device=title)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(config, encoding='utf-8')
-            expected.add(path)
-    for path in sorted(expected):
-        import subprocess
-        result = subprocess.run(['camilladsp', '--check', str(path)], capture_output=True, text=True)
-        if result.returncode:
-            raise SystemExit(f'Invalid profile {path}: {result.stderr or result.stdout}')
-    legacy = BRIR_ROOT / 'camilladsp'
-    if legacy.is_dir():
-        # Do not delete the old directory: the previous engine may still be using it.
-        print(f'Old flat profiles remain in {legacy}; switch to the new server before removing them.')
-    print(f'Validated {len(expected)} profiles in BRIR folders under {BRIR_ROOT}')
+        hpcf = CLOUD3_HPCF if cloud3 else EARPODS_HPCF
+        if not brir.is_file() or not hpcf.is_file():
+            raise SystemExit(f'Missing BRIR/HpCF: {brir} / {hpcf}')
+        left, right, peak, preamp, gain = calculate_gain(brir, hpcf, hf)
+        key = f'{PROFILE_NUMBERS[folder]:02d}-{"cloud3" if cloud3 else "earpods"}-{slugify(folder)}'
+        report.append((key, left, right, peak, preamp, gain, brir, hpcf))
+    if not CMF_BUDS_PRO_2_HPCF.is_file():
+        raise SystemExit(f'Missing CMF Buds Pro 2 HpCF: {CMF_BUDS_PRO_2_HPCF}')
+    paths = write_camilladsp_profiles(report)
+    active_file = Path('/home/joel/.local/state/sway/audio/camilladsp-webremote/active-profile')
+    if active_file.is_file():
+        old_name = active_file.read_text(encoding='utf-8').strip()
+        for old_index, folder in enumerate(PROFILES):
+            if folder == ANECHOIC_OE:
+                devices = ('cloud3',)
+            else:
+                devices = ('earpods', 'cmf-buds-pro-2')
+            for device in devices:
+                old = f'{old_index:02d}-{device}-{slugify(folder)}.yml'
+                new = f'{PROFILE_NUMBERS[folder]:02d}-{device}-{slugify(folder)}.yml'
+                if old_name == old and old != new and (CAMILLA_ROOT / new).is_file():
+                    temporary = active_file.with_name(active_file.name + '.tmp')
+                    temporary.write_text(new + '\n', encoding='utf-8')
+                    temporary.replace(active_file)
+                    break
+    print(f'Rebuilt {len(paths)} CamillaDSP YAML profiles in {CAMILLA_ROOT}')
 
 def write_filterless_camilladsp_profile():
     CAMILLA_ROOT.mkdir(parents=True, exist_ok=True)
@@ -456,6 +472,340 @@ devices:
 pipeline: []
 """, encoding="utf-8")
     return output_path
+
+def write_camilladsp_profiles(report):
+    CAMILLA_ROOT.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    if not CMF_BUDS_PRO_2_HPCF.is_file():
+        raise SystemExit(
+            f"Missing CMF Buds Pro 2 HpCF: "
+            f"{CMF_BUDS_PRO_2_HPCF}"
+        )
+
+    hf = load_required_ash_helpers()
+    expected_paths = set()
+
+    # Existing EarPods and Cloud III CamillaDSP profiles.
+    for (
+        index,
+        (
+            key,
+            left,
+            right,
+            peak,
+            preamp,
+            gain,
+            brir,
+            hpcf,
+        ),
+    ) in enumerate(report):
+        folder_name = PROFILES[index]
+        cloud3 = folder_name == "(0000ms) Anechoic (OE)"
+
+        device = (
+            "cloud3"
+            if cloud3
+            else "earpods"
+        )
+
+        title_device = (
+            "HyperX Cloud III"
+            if cloud3
+            else "Apple EarPods"
+        )
+
+        output_path, config = make_camilladsp_profile(
+            index=PROFILE_NUMBERS[folder_name],
+            folder_name=folder_name,
+            gain=gain,
+            brir=brir,
+            hpcf=hpcf,
+            device=device,
+            title_device=title_device,
+        )
+
+        output_path.write_text(
+            config,
+            encoding="utf-8",
+        )
+
+        expected_paths.add(output_path)
+
+    # CMF Buds Pro 2 profiles for every BRIR except the OE profile.
+    for index, folder_name in enumerate(PROFILES):
+        if folder_name == "(0000ms) Anechoic (OE)":
+            continue
+
+        brir = (
+            BRIR_ROOT
+            / folder_name
+            / "BRIR_True_Stereo.wav"
+        )
+
+        if not brir.is_file():
+            raise SystemExit(
+                f"Missing BRIR: {brir}"
+            )
+
+        (
+            left,
+            right,
+            peak,
+            preamp,
+            gain,
+        ) = calculate_gain(
+            brir,
+            CMF_BUDS_PRO_2_HPCF,
+            hf,
+        )
+
+        output_path, config = make_camilladsp_profile(
+            index=PROFILE_NUMBERS[folder_name],
+            folder_name=folder_name,
+            gain=gain,
+            brir=brir,
+            hpcf=CMF_BUDS_PRO_2_HPCF,
+            device="cmf-buds-pro-2",
+            title_device="CMF Buds Pro 2",
+        )
+
+        output_path.write_text(
+            config,
+            encoding="utf-8",
+        )
+
+        expected_paths.add(output_path)
+
+    # Remove only stale profiles managed by this generator.
+    managed_pattern = re.compile(
+        r"^[0-9]{2}-"
+        r"(earpods|cloud3|cmf-buds-pro-2)-"
+        r".*\.yml$"
+    )
+
+    for existing in CAMILLA_ROOT.glob("*.yml"):
+        if (
+            managed_pattern.match(existing.name)
+            and existing not in expected_paths
+        ):
+            existing.unlink()
+
+    verify_camilladsp_profiles(
+        expected_paths
+    )
+
+    filterless_path = write_filterless_camilladsp_profile()
+    return sorted(expected_paths | {filterless_path})
+
+def verify_camilladsp_profiles(paths):
+    cloud3_profiles = [
+        profile_path
+        for profile_path in paths
+        if "-cloud3-" in profile_path.name
+    ]
+
+    earpods_profiles = [
+        profile_path
+        for profile_path in paths
+        if "-earpods-" in profile_path.name
+    ]
+
+    cmf_profiles = [
+        profile_path
+        for profile_path in paths
+        if "-cmf-buds-pro-2-" in profile_path.name
+    ]
+
+    expected_cloud3 = sum(
+        folder == "(0000ms) Anechoic (OE)"
+        for folder in PROFILES
+    )
+
+    expected_earpods = (
+        len(PROFILES) - expected_cloud3
+    )
+
+    expected_cmf = sum(
+        folder != "(0000ms) Anechoic (OE)"
+        for folder in PROFILES
+    )
+
+    expected_total = (
+        expected_cloud3
+        + expected_earpods
+        + expected_cmf
+    )
+
+    if len(paths) != expected_total:
+        raise SystemExit(
+            "CamillaDSP verification failed: "
+            f"expected {expected_total} profiles, "
+            f"got {len(paths)}"
+        )
+
+    if len(cloud3_profiles) != expected_cloud3:
+        raise SystemExit(
+            "CamillaDSP verification failed: "
+            f"expected {expected_cloud3} Cloud III profile, "
+            f"got {len(cloud3_profiles)}"
+        )
+
+    if len(earpods_profiles) != expected_earpods:
+        raise SystemExit(
+            "CamillaDSP verification failed: "
+            f"expected {expected_earpods} EarPods profiles, "
+            f"got {len(earpods_profiles)}"
+        )
+
+    if len(cmf_profiles) != expected_cmf:
+        raise SystemExit(
+            "CamillaDSP verification failed: "
+            f"expected {expected_cmf} CMF Buds Pro 2 profiles, "
+            f"got {len(cmf_profiles)}"
+        )
+
+    capture_block = """  capture:
+    type: Alsa
+    channels: 2
+    device: "hw:Loopback,1,0"
+    format: S32_LE
+"""
+
+    playback_block = f"""  playback:
+    type: Alsa
+    channels: 2
+    device: "{CAMILLA_PLAYBACK_DEVICE}"
+    format: {CAMILLA_PLAYBACK_FORMAT}
+"""
+
+    pipeline_order = [
+        "name: split_true_stereo",
+        "names: [brir_FL_left]",
+        "names: [brir_FL_right]",
+        "names: [brir_FR_left]",
+        "names: [brir_FR_right]",
+        "name: sum_to_ears",
+        "names: [hpcf_left]",
+        "names: [hpcf_right]",
+    ]
+
+    for profile_path in sorted(paths):
+        profile_text = profile_path.read_text(
+            encoding="utf-8"
+        )
+
+        if "samplerate: 96000" not in profile_text:
+            raise SystemExit(
+                f"{profile_path}: expected samplerate 96000"
+            )
+
+        if "chunksize: 1024" not in profile_text:
+            raise SystemExit(
+                f"{profile_path}: expected chunksize 1024"
+            )
+
+        if capture_block not in profile_text:
+            raise SystemExit(
+                f"{profile_path}: incorrect capture block; "
+                "expected hw:Loopback,1,0 using S32_LE"
+            )
+
+        if playback_block not in profile_text:
+            raise SystemExit(
+                f"{profile_path}: incorrect playback block; "
+                f"expected {CAMILLA_PLAYBACK_DEVICE} using "
+                f"{CAMILLA_PLAYBACK_FORMAT}"
+            )
+
+        if profile_text.count("format: S32_LE") != 2:
+            raise SystemExit(
+                f"{profile_path}: expected exactly two "
+                "S32_LE device formats"
+            )
+
+        if "format: S24_3_LE" in profile_text:
+            raise SystemExit(
+                f"{profile_path}: stale S24_3_LE playback "
+                "format found"
+            )
+
+        if profile_text.count("filename:") != 6:
+            raise SystemExit(
+                f"{profile_path}: expected six convolution "
+                "filename entries"
+            )
+
+        if "-cloud3-" in profile_path.name:
+            expected_hpcf = CLOUD3_HPCF
+
+        elif "-cmf-buds-pro-2-" in profile_path.name:
+            expected_hpcf = CMF_BUDS_PRO_2_HPCF
+
+        else:
+            expected_hpcf = EARPODS_HPCF
+
+        if profile_text.count(str(expected_hpcf)) != 2:
+            raise SystemExit(
+                f"{profile_path}: expected two references "
+                f"to HpCF {expected_hpcf}"
+            )
+
+        brir_references = [
+            line
+            for line in profile_text.splitlines()
+            if (
+                "filename:" in line
+                and "BRIR_True_Stereo.wav" in line
+            )
+        ]
+
+        if len(brir_references) != 4:
+            raise SystemExit(
+                f"{profile_path}: expected four BRIR "
+                "filename references"
+            )
+
+        pipeline_start = profile_text.find(
+            "\npipeline:\n"
+        )
+
+        if pipeline_start == -1:
+            raise SystemExit(
+                f"{profile_path}: missing pipeline section"
+            )
+
+        pipeline_text = profile_text[
+            pipeline_start:
+        ]
+
+        positions = []
+
+        for item in pipeline_order:
+            position = pipeline_text.find(item)
+
+            if position == -1:
+                raise SystemExit(
+                    f"{profile_path}: missing pipeline item "
+                    f"{item!r}"
+                )
+
+            positions.append(position)
+
+        if positions != sorted(positions):
+            raise SystemExit(
+                f"{profile_path}: pipeline is not in "
+                "true-stereo BRIR -> ear sum -> HpCF order"
+            )
+
+        if profile_text.count("scale: linear") != 8:
+            raise SystemExit(
+                f"{profile_path}: expected eight linear "
+                "mixer source mappings"
+            )
+
 
 if __name__ == "__main__":
     main()

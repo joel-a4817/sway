@@ -32,7 +32,7 @@ else
         -z "With Audio" \
         "wf-recorder -a -o $OUT -f ~/Media/Videos/Screen-recordings/recording-\$(date +%Y%m%d-%H%M%S).mkv" \
         -z "Without Audio" \
-            "/home/joel/.config/sway/scripts/record-screen-alsa.sh -o $OUT -f ~/Media/Videos/Screen-recordings/recording-\$(date +%Y%m%d-%H%M%S).mkv" \
+            "wf-recorder -a --audio-backend=pipewire -o $OUT -f ~/Media/Videos/Screen-recordings/recording-\$(date +%Y%m%d-%H%M%S).mkv" \
         -z "Save & Copy Fullscreen" \
             "grim -o $OUT -t png - | tee ~/Media/Pictures/Screenshots/screenshot-\$(date +%Y%m%d-%H%M%S).png | wl-copy" \
         -z "Copy Fullscreen" \
