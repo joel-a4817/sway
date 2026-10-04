@@ -97,7 +97,7 @@ SWAYNAG_LOG="$STATE_DIR/media-control-swaynag.$$"
 
 mkdir -p "$STATE_DIR"
 chmod 700 "$STATE_DIR" 2>/dev/null || true
-printf '\n[%s] media-control pid=%s\n' "$(date -Iseconds 2>/dev/null || date)" "$$" >>"$ACTION_LOG"
+printf '[%s] media-control pid=%s\n' "$(date -Iseconds 2>/dev/null || date)" "$$" >"$ACTION_LOG"
 FINAL_PAUSE_REACHED=0
 EXIT_HANDLER_RUNNING=0
 
@@ -133,12 +133,12 @@ handle_script_exit() {
     EXIT_HANDLER_RUNNING=1
     trap - EXIT INT TERM HUP QUIT
     if [[ ${OUTPUT_PREVIEW_ACTIVE:-0} == 1 ]]; then
-        python3 "$TOPOLOGY_SCRIPT" --cancel-output-preview >>"$ACTION_LOG" 2>&1 || echo 'Output preview rollback failed; inspect the log.' >&2
+        python3 "$TOPOLOGY_SCRIPT" --cancel-output-preview >/dev/null 2>>"$ACTION_LOG" || echo 'Output preview rollback failed; inspect the log.' >&2
     fi
     if (( ! FINAL_PAUSE_REACHED && ! ${REPLACED:-0} )); then
         if (( status != 0 )); then
             echo; echo "Audio script exited unexpectedly."; echo "Exit status: $status"
-            [[ -s "$ACTION_LOG" ]] && { echo; echo "Action log:"; echo "$ACTION_LOG"; echo; tail -n 45 "$ACTION_LOG"; }
+            [[ -s "$ACTION_LOG" ]] && echo "Details: $ACTION_LOG"
         fi
         pause_before_close
     fi
@@ -161,7 +161,7 @@ TOPOLOGY_SCRIPT="$HOME_DIR/.config/sway/scripts/network/camilladsp-server-sonobu
 # then leaves playback paused before the menu appears.
 if ! python3 "$TOPOLOGY_SCRIPT" --normalize-menu-open >>"$ACTION_LOG" 2>&1; then
     echo 'Audio normalization failed while opening Audio Control.' >&2
-    tail -n 25 "$ACTION_LOG" >&2
+    echo "Details: $ACTION_LOG" >&2
     exit 1
 fi
 output_topology() { python3 "$TOPOLOGY_SCRIPT" --output-topology; }
@@ -173,10 +173,6 @@ run_quiet_action() {
         return "$status"
     fi
 }
-# Selection does not pause or mutate. The paired CLI owns pause, routing,
-# normalization as one transaction after the final choice; playback stays paused.
-TOPOLOGY_JSON="$(output_topology 2>/dev/null)" || TOPOLOGY_JSON='{"cards":[]}'
-mapfile -t CARDS < <(jq -r '.cards[] | [.name,.label] | @tsv' <<<"$TOPOLOGY_JSON")
 # Output devices are enumerated when Outputs is selected, not cached.
 terminal_columns() {
     local columns
@@ -287,7 +283,7 @@ for o in x:
   devices.setdefault(physical,{"key":physical,"label":dl,"nodes":[]})["nodes"].append({"id":o.get("id"),"name":p.get("node.name",""),"label":nl})
 print(json.dumps(list(devices.values())))'
 }
-camera_picker() {
+camera_picker() (
     local topo current device_key device_label node_id node_name node_label i
     local -a device_keys=() device_labels=() node_ids=() node_names=() node_labels=()
     topo="$(camera_topology)" || return 1
@@ -304,12 +300,27 @@ camera_picker() {
     else device_key="${device_keys[number-1]}"; device_label="${device_labels[number-1]}"; fi
     break
     done
+    # Device Select applies its last endpoint before the endpoint menu.
+    local camera_committed=0 original_camera_id='' camera_clients='[]'
+    trap 'if (( ! camera_committed )); then if [[ "$camera_clients" != "[]" ]]; then python3 "$TOPOLOGY_SCRIPT" --camera-restore-clients "$camera_clients" >/dev/null || echo "Camera client rollback failed" >&2; fi; if [[ "$original_camera_id" =~ ^[0-9]+$ ]]; then wpctl set-default "$original_camera_id" >/dev/null 2>&1 || echo "Camera rollback failed" >&2; fi; fi' EXIT
+    original_camera="$current"
+    original_camera_id="$(jq -r --arg n "$original_camera" '.[]|.nodes[]|select(.name==$n)|.id' <<<"$topo" | head -n 1)"
+    [[ "$original_camera_id" =~ ^[0-9]+$ ]] || { wrap_line 'Cannot identify the current camera for rollback; no camera change was made.' >&2; return 1; }
+    camera_last="$STATE_DIR/camera-last-endpoints.json"
+    remembered_node="$(jq -r --arg k "$device_key" '.[$k] // empty' "$camera_last" 2>/dev/null || true)"
+    stage_node="$(jq -r --arg k "$device_key" --arg n "$remembered_node" '.[]|select(.key==$k)|.nodes[]|select(.name==$n)|.id' <<<"$topo" | head -n 1)"
+    [[ "$stage_node" =~ ^[0-9]+$ ]] || stage_node="$(jq -r --arg k "$device_key" '.[]|select(.key==$k)|.nodes[0].id // empty' <<<"$topo")"
+    [[ "$stage_node" =~ ^[0-9]+$ ]] || { wrap_line 'Selected camera has no endpoint.' >&2; return 1; }
+    wpctl set-default "$stage_node" || return 1
+    stage_name="$(jq -r --arg k "$device_key" --argjson id "$stage_node" '.[]|select(.key==$k)|.nodes[]|select(.id==$id)|.name' <<<"$topo")"
+    wpctl list video sources | awk -F '\t' -v n="$stage_name" '$2==n && $4=="*"{ok=1} END{exit !ok}' || { wrap_line 'Camera device stage did not become default.' >&2; return 1; }
+    current="$stage_name"
     mapfile -t node_ids < <(jq -r --arg k "$device_key" '.[]|select(.key==$k)|.nodes[].id' <<<"$topo")
     mapfile -t node_names < <(jq -r --arg k "$device_key" '.[]|select(.key==$k)|.nodes[].name' <<<"$topo")
     mapfile -t node_labels < <(jq -r --arg k "$device_key" '.[]|select(.key==$k)|.nodes[].label' <<<"$topo")
     while :; do
       current_node_label=''; for i in "${!node_names[@]}"; do [[ "${node_names[i]}" == "$current" ]] && current_node_label="${node_labels[i]}"; done
-      choose_index "$device_label | Camera endpoint" "Current${current_node_label:+ ($(compact_item_label "$current_node_label"))}" "${node_labels[@]}" || return 1
+      choose_index "$device_label | Camera endpoint" "Current${current_node_label:+ ($(compact_item_label "$current_node_label"))}" "${node_labels[@]}" || { [[ "$original_camera_id" =~ ^[0-9]+$ ]] && wpctl set-default "$original_camera_id" >/dev/null 2>&1; return 1; }
       if ((number==0)); then
         if [[ -z "$current_node_label" ]]; then wrap_line 'No current endpoint belongs to this camera. Select again.'; continue; fi
         for i in "${!node_names[@]}"; do [[ "${node_names[i]}" == "$current" ]] && node_id="${node_ids[i]}" && node_name="${node_names[i]}" && node_label="${node_labels[i]}"; done
@@ -319,7 +330,7 @@ camera_picker() {
     # Revalidate against a fresh graph, then set and confirm the default.
     fresh="$(camera_topology)" || return 1
     jq -e --arg k "$device_key" --argjson id "$node_id" --arg n "$node_name" '.[]|select(.key==$k)|.nodes[]|select(.id==$id and .name==$n)' <<<"$fresh" >/dev/null || { wrap_line 'Camera topology changed; reopen Media Control.'; return 1; }
-    old_camera_id="$(jq -r --arg n "$current" '.[] | .nodes[] | select(.name==$n) | .id' <<<"$topo" | head -n 1)"
+    old_camera_id="$(jq -r --arg n "$original_camera" '.[] | .nodes[] | select(.name==$n) | .id' <<<"$topo" | head -n 1)"
     wpctl set-default "$node_id" || return 1
     if ! wpctl list video sources | awk -F '\t' -v n="$node_name" '$2==n && $4=="*"{ok=1} END{exit !ok}'; then
         [[ "$old_camera_id" =~ ^[0-9]+$ ]] && wpctl set-default "$old_camera_id" || true
@@ -329,8 +340,16 @@ camera_picker() {
         [[ "$old_camera_id" =~ ^[0-9]+$ ]] && wpctl set-default "$old_camera_id" || true
         return 1
     fi
+    camera_clients="$(jq -c '.previousClients // []' <<<"$camera_status")"
+    if [[ -s "$camera_last" ]]; then camera_saved="$(cat "$camera_last")"; else camera_saved='{}'; fi
+    if ! jq -n --argjson old "$camera_saved" --arg k "$device_key" --arg n "$node_name" '$old + {($k):$n}' >"$camera_last.tmp" || ! mv -- "$camera_last.tmp" "$camera_last"; then
+        rm -f -- "$camera_last.tmp"
+        wrap_line 'Could not save camera endpoint; restoring previous camera.' >&2
+        return 1
+    fi
+    camera_committed=1
     wrap_line "Camera selected: $device_label${node_label:+ | $node_label}"
-}
+)
 ARGS=(-t warning -y overlay -m 'Media control')
 ARGS+=( -z 'Audio services' "printf '%s\n' audio-services > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
 ARGS+=( -z 'CamillaDSP filters' "printf '%s\n' select-filter > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
@@ -351,7 +370,11 @@ wait "$SWAYNAG_PID" 2>/dev/null || true
 selected="$(cat "$CARD_SELECTION_FILE")"
 case "$selected" in
  select-output)
-    python3 "$TOPOLOGY_SCRIPT" --begin-output-preview >>"$ACTION_LOG" 2>&1 || { tail -n 10 "$ACTION_LOG" >&2; exit 1; }
+    if ! preview_error="$(MEDIA_CONTROL_PICKER_PID=$$ MEDIA_CONTROL_PICKER_START="$(process_start "$$")" python3 "$TOPOLOGY_SCRIPT" --begin-output-preview 2>&1 >/dev/null)"; then
+        printf '%s\n' "${preview_error##*$'\n'}" >&2
+        exit 1
+    fi
+    export MEDIA_CONTROL_PICKER_PID=$$
     OUTPUT_PREVIEW_ACTIVE=1
     TOPOLOGY_JSON="$(output_topology)" || { wrap_line 'Output topology unavailable.' >&2; exit 1; }
     mapfile -t CARDS < <(jq -r '.cards[] | [.name,.label] | @tsv' <<<"$TOPOLOGY_JSON")
@@ -439,12 +462,42 @@ def pick(label,rows,current=None):
             if 1<=number<=len(rows) and not blocked(rows[number-1]):return rows[number-1]
         print("Select an available number.")
 
-backend._pick_input=pick
+def staged_pick(label,rows,current=None):
+    selected=pick(label,rows,current)
+    if label=='Audio input | Device':
+        saved_playback=backend.saved_output_route()
+        if saved_playback.get('card')==selected['name'] and not backend.STOPPED.exists():
+            live_playback=backend._find_card(backend.audio_topology(),selected['name'])
+            backend.MEDIA_TRANSACTION.input_playback_before={
+                'profile':live_playback['activeProfile'],
+                'routes':list(live_playback['activeRoutes']),
+                'monitor':backend.alive(backend.rpid(backend.LOCALMONPID))}
+        backend.MEDIA_TRANSACTION.input_original=backend._input_card(selected['name'])
+        backend.MEDIA_TRANSACTION.input_ports=backend._input_stage_port_snapshot(selected['name'])
+        backend.MEDIA_TRANSACTION.input_default=backend.run([backend.exe('pactl'),'get-default-source'],False,5,backend.media_env()).stdout.strip()
+        backend.MEDIA_TRANSACTION.input_stream_origins=backend.input_stream_origins()
+        backend._input_stage_card=selected['name']
+    elif label=='Audio input | Profile':
+        backend._input_stage(backend._input_stage_card,selected['index'])
+    elif label=='Audio input | Route':
+        backend._input_stage(backend._input_stage_card,backend._input_stage_profile,selected['index'])
+    if label=='Audio input | Profile':backend._input_stage_profile=selected['index']
+    return selected
+backend._pick_input=staged_pick
 from contextlib import nullcontext
 backend.media_change=nullcontext
-try:print(json.dumps(backend.select_input_interactive(),ensure_ascii=False))
-except KeyboardInterrupt:sys.exit(130)
-except Exception as error:print(str(error),file=sys.stderr);sys.exit(1)
+try:
+    def finalize():
+        if not backend.STOPPED.exists():backend.normalize_audio_volumes()
+    result=backend.select_input_interactive(finalize=finalize)
+    print(json.dumps(result,ensure_ascii=False))
+except KeyboardInterrupt:
+    sys.exit(130)
+except Exception as error:
+    print(str(error),file=sys.stderr)
+    sys.exit(1)
+finally:
+    backend.pause_for_normalization()
 ' "$TOPOLOGY_SCRIPT" || exit $?
     exit 0 ;;
  select-camera)
@@ -477,14 +530,9 @@ except Exception as error:print(str(error),file=sys.stderr);sys.exit(1)
     mapfile -t filters < <(jq -r '.[] | select((ascii_downcase|contains("cmf"))|not)' <<<"$profiles")
     ((${#filters[@]})) || { echo 'No listening filters found.' >&2; exit 1; }
     filter_device_label() {
-        local filter="$1" room_label="$2" key
-        key="${filter,,}"
-        case "$key" in
-            *cloud3*) printf 'HyperX Cloud III | %s\n' "$room_label" ;;
-            *earpods*) printf 'Apple EarPods | %s\n' "$room_label" ;;
-            *filterless*) printf '%s\n' "$room_label" ;;
-            *) printf '%s\n' "$room_label" ;;
-        esac
+        local filter="$1" room_label="$2" group
+        group="$(jq -r --arg f "$filter" '.[$f].group // "Other"' <<<"$info")"
+        [[ "$group" == Other ]] && printf '%s\n' "$room_label" || printf '%s | %s\n' "$group" "$room_label"
     }
     labels=()
     for filter in "${filters[@]}"; do
@@ -522,36 +570,12 @@ TOPOLOGY_JSON="$(output_topology)" || { echo "Start audio services before choosi
 # Reuse the active profile if usable, otherwise the remembered usable profile,
 # then the first exposed usable profile. The paired controller owns pause and
 # normalization for this stage, including when the web host is not running.
-device_profile="$(jq -r --arg n "$card" '
-  .cards[] | select(.name==$n) |
-  (.activeProfile | tostring) as $active |
-  [.profiles[] | select(.available != "no" and .available != "false" and
-    (.name | ascii_downcase) != "off") | .index | tostring] as $usable |
-  if ($usable | index($active)) != null then $active else empty end
-' <<<"$TOPOLOGY_JSON")"
-remembered_profile="$(python3 "$TOPOLOGY_SCRIPT" --remembered-profile "$card" 2>/dev/null || true)"
-if [[ -z "$device_profile" ]]; then
-    device_profile="$(jq -r --arg n "$card" --arg p "$remembered_profile" '
-      .cards[] | select(.name==$n) | .profiles[] |
-      select((.index | tostring)==$p and .available != "no" and
-        .available != "false" and (.name | ascii_downcase) != "off") |
-      .index
-    ' <<<"$TOPOLOGY_JSON" | head -n 1)"
-fi
-if [[ -z "$device_profile" ]]; then
-    device_profile="$(jq -r --arg n "$card" '
-      .cards[] | select(.name==$n) | .profiles[] |
-      select(.available != "no" and .available != "false" and
-        (.name | ascii_downcase) != "off") | .index
-    ' <<<"$TOPOLOGY_JSON" | head -n 1)"
-fi
-[[ -n "$device_profile" ]] || { wrap_line 'No usable playback profile for this device.' >&2; exit 1; }
-TOPOLOGY_JSON="$(python3 "$TOPOLOGY_SCRIPT" --apply-output-profile "$card" "$device_profile")" || {
+TOPOLOGY_JSON="$(python3 "$TOPOLOGY_SCRIPT" --apply-output-device "$card")" || {
     wrap_line 'Playback device could not be applied.' >&2; exit 1;
 }
 active="$(jq -r --arg n "$card" '.cards[]|select(.name==$n)|.activeProfile // empty' <<<"$TOPOLOGY_JSON")"
 mapfile -t profiles < <(jq -r --arg n "$card" '.cards[]|select(.name==$n)|.profiles[]|.index' <<<"$TOPOLOGY_JSON")
-last_profile="$(python3 "$TOPOLOGY_SCRIPT" --remembered-profile "$card" 2>/dev/null || true)"
+last_profile="$(jq -r '.stageSelection.profile // empty' <<<"$TOPOLOGY_JSON")"
 printf '%s\n' "${profiles[@]}" | grep -Fqx -- "$last_profile" || last_profile="$active"
 printf '%s\n' "${profiles[@]}" | grep -Fqx -- "$last_profile" || last_profile=''
 last_profile_label="$(jq -r --arg n "$card" --arg p "$last_profile" '.cards[]|select(.name==$n)|.profiles[]|select((.index|tostring)==$p)|.label' <<<"$TOPOLOGY_JSON")"
@@ -574,8 +598,7 @@ TOPOLOGY_JSON="$(python3 "$TOPOLOGY_SCRIPT" --apply-output-profile "$card" "$pro
 active="$(jq -r --arg n "$card" '.cards[]|select(.name==$n)|.activeProfile // empty' <<<"$TOPOLOGY_JSON")"
 mapfile -t routes < <(jq -r --arg n "$card" '.cards[]|select(.name==$n)|.routes[].index' <<<"$TOPOLOGY_JSON")
 route=''
-remembered_sink="$(python3 "$TOPOLOGY_SCRIPT" --remembered-sink "$card" "$profile" 2>/dev/null || true)"
-last_route="$(python3 "$TOPOLOGY_SCRIPT" --remembered-port "$card" "$profile" "$remembered_sink" 2>/dev/null || true)"
+last_route="$(jq -r '.stageSelection.port // empty' <<<"$TOPOLOGY_JSON")"
 printf '%s\n' "${routes[@]}" | grep -Fqx -- "$last_route" || last_route="$(jq -r --arg n "$card" '.cards[]|select(.name==$n)|.activeRoutes[0] // empty' <<<"$TOPOLOGY_JSON")"
 printf '%s\n' "${routes[@]}" | grep -Fqx -- "$last_route" || last_route=''
 last_route_label="$(jq -r --arg n "$card" --arg r "$last_route" '.cards[]|select(.name==$n)|.routes[]|select((.index|tostring)==$r)|.label' <<<"$TOPOLOGY_JSON")"
@@ -609,10 +632,9 @@ if [[ -n "$route" ]]; then
     TOPOLOGY_JSON="$(python3 "$TOPOLOGY_SCRIPT" --apply-output-route "$card" "$profile" "$route")" || { wrap_line 'Output route could not be applied.' >&2; exit 1; }
 fi
 # 0 keeps the last known still-exposed sink; numbered items are live sinks.
-saved="$(jq -r '.saved.sink // empty' <<<"$TOPOLOGY_JSON")"
 sink=''
 mapfile -t sinks < <(jq -r --arg n "$card" '.cards[]|select(.name==$n)|.sinks[].name' <<<"$TOPOLOGY_JSON")
-last_sink="$(python3 "$TOPOLOGY_SCRIPT" --remembered-sink "$card" "$profile" 2>/dev/null || true)"
+last_sink="$(jq -r '.stageSelection.sink // empty' <<<"$TOPOLOGY_JSON")"
 if [[ -z "$last_sink" && "$(jq -r '.saved.card // empty' <<<"$TOPOLOGY_JSON")" == "$card" ]]; then
     last_sink="$(jq -r '.saved.sink // empty' <<<"$TOPOLOGY_JSON")"
 fi

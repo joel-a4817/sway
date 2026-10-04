@@ -126,7 +126,7 @@ def pw_move_streams(sink):
         initial_links=[link for link in pw_objects('Link',graph)
                        if str((link.get('info') or {}).get('output-node-id'))==str(item['id'])]
         if not initial_links:
-            # A paused or idle stream may have no links until playback resumes.
+            # A paused or idle stream may have no links until the user plays audio.
             # The target metadata is set, but a link cannot be verified yet.
             continue
         deadline=time.monotonic()+3
@@ -196,7 +196,7 @@ def ensure():
         if not source.is_dir():continue
         for item in source.iterdir():
             if not item.is_file() or item.is_symlink():continue
-            if source==legacy and item.name not in ('master-volume','media-control.log','audio-switch.lock','audio-cards-last.txt','camilladsp-local.log'):continue
+            if source==legacy and item.name not in ('master-volume','media-control.log','media-control.lock','audio-cards-last.txt','camilladsp-local.log'):continue
             target=destination/item.name
             if not target.exists() and item.name!='mpv.sock':
                 try:shutil.move(str(item),str(target))
@@ -535,13 +535,20 @@ def media_change():
     if getattr(MEDIA_TRANSACTION,'active',False):
         yield
         return
+    global MASTER_RESTORING
     pause_for_normalization()
+    previous_restoring=MASTER_RESTORING
+    MASTER_RESTORING=True
     MEDIA_TRANSACTION.active=True
     try:
         yield
         if not STOPPED.exists():normalize_audio_volumes()
     finally:
-        MEDIA_TRANSACTION.active=False
+        try:pause_for_normalization()
+        finally:
+            MEDIA_TRANSACTION.stage_sink=None
+            MEDIA_TRANSACTION.active=False
+            MASTER_RESTORING=previous_restoring
 
 def media_transaction(function):
     @wraps(function)
@@ -645,10 +652,6 @@ def restart_camilla():
         if MODES[audio_mode()][2]:restore_selected_local_output()
         return {'profile':name,'pid':pid,'restarted':True}
 
-def alsa100():
-    r=run(['amixer','-c','Loopback','sset','PCM','0dB'],False)
-    if r.returncode:raise RuntimeError(r.stderr.strip() or r.stdout.strip() or 'Could not set Loopback PCM')
-
 # This is the single saved master shared by the server and Audio Control.
 def master_sink():
     if selected_filter()==NO_FILTER and audio_mode()=='laptop_laptop':
@@ -688,7 +691,7 @@ def master_volume():
                     return max(0.0,min(100.0,saved)) if saved is not None else value
                 if saved is None or abs(saved-value)>=.5:
                     atomic(MASTER_VOLUME,f'{value:.2f}%\n')
-                    sync_mpv_master(value)
+                    sync_mpv_for_audio_path(value)
             return value
     except (OSError,FileNotFoundError,subprocess.TimeoutExpired):pass
     try:return max(0.0,min(100.0,float(MASTER_VOLUME.read_text().strip().rstrip('%'))))
@@ -741,11 +744,11 @@ def camilla_command(command):
     if item.get('result')!='Ok':raise RuntimeError(f'CamillaDSP {name} failed: {item}')
     return item.get('value')
 
-def sync_mpv_master(value):
+def sync_mpv_for_audio_path(value):
     if not (alive(rpid(MPVPID),'mpv') and MPVSOCK.exists()):return
-    try:mpv_direct(['set_property','volume',100.0 if selected_filter()==NO_FILTER and not STOPPED.exists() else float(value)])
+    try:mpv_direct(['set_property','volume',float(value) if selected_filter()!=NO_FILTER and alive(rpid(CAMPID),'camilladsp') else 100.0])
     except (OSError,RuntimeError,ValueError) as error:
-        raise RuntimeError(f'Could not sync MPV to saved master: {error}') from error
+        raise RuntimeError(f'Could not sync MPV for active audio path: {error}') from error
 
 def watch_master_volume(stop):
     # Sway volume keys use pipewire directly, even when the web page is closed.
@@ -767,15 +770,25 @@ def apply_master_volume(value,normalize_sinks=True):
     if name=='@DEFAULT_SINK@':
         name=pw_default()
     if not name:raise RuntimeError('No playback sink for master volume')
+    # Keep the inactive path at unity, including slider updates. In filtered
+    # mode MPV bypasses the PipeWire sink, so its gain follows the saved master.
+    # In No filter MPV is unity and the physical sink carries the master.
+    inactive=saved_output_route().get('sink') if name=='camilladsp' else 'camilladsp'
+    if inactive and inactive!=name:
+        try:pw_sink(inactive)
+        except RuntimeError:inactive=None
+        if inactive:
+            result=run(['__wp_control__','set-sink-volume',inactive,'100%'],False,8,media_env())
+            if result.returncode:raise RuntimeError(f'Could not set {inactive} to 100%: {result.stderr.strip()}')
     if normalize_sinks:
         for sink in _pipewire_json('sinks'):
             target=str(sink.get('name') or '') if isinstance(sink,dict) else ''
-            if not target or target==name:continue
+            if not target or target==name or target==inactive:continue
             result=run(['__wp_control__','set-sink-volume',target,'100%'],False,8,media_env())
             if result.returncode:raise RuntimeError(f'Could not set {target} to 100%: {result.stderr.strip()}')
     result=run(['__wp_control__','set-sink-volume',name,f'{value:.2f}%'],False,8,media_env())
     if result.returncode:raise RuntimeError(f'Could not set {name} to {value:.2f}%: {result.stderr.strip()}')
-    sync_mpv_master(value)
+    sync_mpv_for_audio_path(value)
     if alive(rpid(CAMPID),'camilladsp'):
         if selected_filter()!=NO_FILTER:wait_for_camilla_config(profile(selected_filter()))
         try:camilla_command({'SetVolume':0.0})
@@ -835,7 +848,8 @@ def audio_start_change():
         yield
         if not STOPPED.exists():normalize_audio_volumes()
     finally:
-        MEDIA_TRANSACTION.starting=False
+        try:pause_for_normalization()
+        finally:MEDIA_TRANSACTION.starting=False
     # Stop and start deliberately leave playback paused.
 
 def normalize_with_media():
@@ -844,71 +858,142 @@ def normalize_with_media():
         if getattr(MEDIA_TRANSACTION,'active',False) or getattr(MEDIA_TRANSACTION,'starting',False):
             return {'deferred':'normalization belongs to active transaction'}
         with media_change():return {'normalized':True}
+def _alsa_raw_gain_rows(text):
+    # Raw card controls can expose gain stages absent from the simple mixer.
+    for block in re.split(r'(?=^numid=\d+,)',text,flags=re.M):
+        head=re.match(r'numid=(\d+),iface=([^,]+),name=([^\n]+)',block)
+        if not head:continue
+        type_row=re.search(r'type=(INTEGER|INTEGER64),access=([^,\n]+),values=(\d+),min=(-?\d+),max=(-?\d+)',block)
+        if not type_row or len(type_row.group(2))<2 or type_row.group(2)[1]!='w':continue
+        if not re.search(r'\| dB(?:scale|linear|minmax|range)',block,re.I):continue
+        yield head.group(1),head.group(2),head.group(3),int(type_row.group(3)),int(type_row.group(4)),int(type_row.group(5)),block
+
+def _alsa_zero_raw_value(card,numid):
+    # Ask ALSA itself to convert 0 dB for this card/control ID.
+    import ctypes,ctypes.util
+    candidates=[ctypes.util.find_library('asound'), 'libasound.so.2']
+    candidates.extend(str(x) for x in Path('/nix/store').glob('*-alsa-lib-*/lib/libasound.so.2'))
+    lib=None
+    for candidate in candidates:
+        if not candidate:continue
+        try:lib=ctypes.CDLL(candidate);break
+        except OSError:continue
+    if lib is None:raise RuntimeError('libasound is unavailable for ALSA dB conversion')
+    pointer=ctypes.c_void_p;number=ctypes.c_long
+    lib.snd_ctl_open.argtypes=[ctypes.POINTER(pointer),ctypes.c_char_p,ctypes.c_int]
+    lib.snd_ctl_open.restype=ctypes.c_int
+    lib.snd_ctl_close.argtypes=[pointer]
+    lib.snd_ctl_elem_id_malloc.argtypes=[ctypes.POINTER(pointer)]
+    lib.snd_ctl_elem_id_malloc.restype=ctypes.c_int
+    lib.snd_ctl_elem_id_free.argtypes=[pointer]
+    lib.snd_ctl_elem_id_set_numid.argtypes=[pointer,ctypes.c_uint]
+    lib.snd_ctl_convert_from_dB.argtypes=[pointer,pointer,number,ctypes.POINTER(number),ctypes.c_int]
+    lib.snd_ctl_convert_from_dB.restype=ctypes.c_int
+    lib.snd_ctl_convert_to_dB.argtypes=[pointer,pointer,number,ctypes.POINTER(number)]
+    lib.snd_ctl_convert_to_dB.restype=ctypes.c_int
+    ctl=pointer();ident=pointer()
+    if lib.snd_ctl_open(ctypes.byref(ctl),('hw:'+str(card)).encode(),0)<0:
+        raise RuntimeError('Cannot open ALSA card '+str(card))
+    try:
+        if lib.snd_ctl_elem_id_malloc(ctypes.byref(ident))<0:
+            raise RuntimeError('Cannot allocate ALSA control ID')
+        try:
+            lib.snd_ctl_elem_id_set_numid(ident,int(numid))
+            value=number()
+            if lib.snd_ctl_convert_from_dB(ctl,ident,0,ctypes.byref(value),0)<0:
+                raise RuntimeError('ALSA does not expose dB conversion')
+            measured=number()
+            if lib.snd_ctl_convert_to_dB(ctl,ident,value.value,ctypes.byref(measured))<0 or measured.value!=0:
+                raise RuntimeError('Exact 0 dB is not representable by this control')
+            return value.value
+        finally:lib.snd_ctl_elem_id_free(ident)
+    finally:lib.snd_ctl_close(ctl)
+
 def normalize_audio_volumes():
-    # Normalize live gain stages to 0 dB, then restore the saved master.
-    # Media pausing is handled by normalize_with_media, not this gain routine.
+    # Gain transaction only. Player pausing belongs to the caller.
     errors=[]
     try:cards=Path('/proc/asound/cards').read_text()
     except OSError as error:raise RuntimeError('Could not enumerate ALSA cards: '+str(error)) from error
-    for card in re.findall(r'^\s*(\d+)\s+\[',cards,re.M):
+    card_ids=re.findall(r'^\s*(\d+)\s+\[',cards,re.M)
+    if not card_ids:errors.append('No ALSA cards could be enumerated')
+    for card in card_ids:
         listing=run([exe('amixer'),'-c',card,'scontrols'],False,8)
         if listing.returncode:
-            errors.append(f'ALSA card {card}: {listing.stderr.strip() or "could not list controls"}')
+            errors.append(f'ALSA card {card}: {listing.stderr.strip() or "could not list simple controls"}')
+        else:
+            for name,index in re.findall(r"^Simple mixer control '([^']+)',(\d+)$",listing.stdout,re.M):
+                control=f'{name},{index}'
+                info=run([exe('amixer'),'-c',card,'sget',control],False,8)
+                if info.returncode:
+                    errors.append(f'ALSA card {card} {control}: could not inspect simple control')
+                    continue
+                for direction in ('playback','capture'):
+                    if not re.search(rf'^{direction} channels:',info.stdout,re.I|re.M):continue
+                    readings=[float(db) for line in info.stdout.splitlines() if direction in line.lower()
+                              for db in re.findall(r'\[([-+]?\d+(?:\.\d+)?)dB\]',line)]
+                    if not readings:continue
+                    result=run([exe('amixer'),'-c',card,'sset',control,direction,'0dB'],False,8)
+                    if result.returncode:
+                        errors.append(f'ALSA card {card} {control} {direction}: {result.stderr.strip() or "0dB unavailable"}')
+                        continue
+                    check=run([exe('amixer'),'-c',card,'sget',control],False,8)
+                    verified=[float(db) for line in check.stdout.splitlines() if direction in line.lower()
+                              for db in re.findall(r'\[([-+]?\d+(?:\.\d+)?)dB\]',line)] if not check.returncode else []
+                    if len(verified)!=len(readings) or any(db!=0.0 for db in verified):
+                        errors.append(f'ALSA card {card} {control} {direction}: 0dB not verified')
+        raw=run([exe('amixer'),'-c',card,'contents'],False,8)
+        if raw.returncode:
+            errors.append(f'ALSA card {card}: {raw.stderr.strip() or "could not list raw controls"}')
             continue
-        for name,index in re.findall(r"^Simple mixer control '([^']+)',(\d+)$",listing.stdout,re.M):
-            control=f'{name},{index}'
-            info=run([exe('amixer'),'-c',card,'sget',control],False,8)
-            if info.returncode:
-                errors.append(f'ALSA card {card} {control}: {info.stderr.strip() or "could not inspect control"}')
+        for numid,iface,name,count,minimum,maximum,block in _alsa_raw_gain_rows(raw.stdout):
+            ident='numid='+numid
+            # The simple mixer above already handles these same raw gains.
+            current=re.search(r'^\s*: values=([-\d,]+)',block,re.M)
+            if current is None:
+                errors.append(f'ALSA card {card} {ident} ({iface} {name}): raw gain unreadable')
                 continue
-            if not re.search(r'[-+]?\d+(?:\.\d+)?dB',info.stdout):continue
-            for direction in ('playback','capture'):
-                if not re.search(rf'^{direction} channels:',info.stdout,re.I|re.M):continue
-                result=run([exe('amixer'),'-c',card,'sset',control,direction,'0dB'],False,8)
-                if result.returncode:
-                    errors.append(f'ALSA card {card} {control} {direction}: {result.stderr.strip() or "0dB unavailable"}')
+            values=[int(v) for v in current.group(1).split(',')]
+            if len(values)!=count:
+                errors.append(f'ALSA card {card} {ident}: raw channel count mismatch')
+                continue
+            if maximum==minimum:continue
+            try:target=_alsa_zero_raw_value(card,numid)
+            except (OSError,ValueError,RuntimeError) as error:
+                errors.append(f'ALSA card {card} {ident} ({iface} {name}): {error}')
+                continue
+            if any(value!=target for value in values):
+                change=run([exe('amixer'),'-c',card,'cset',ident,','.join([str(target)]*count)],False,8)
+                if change.returncode:
+                    errors.append(f'ALSA card {card} {ident}: {change.stderr.strip() or "raw gain write failed"}')
                     continue
-                check=run([exe('amixer'),'-c',card,'sget',control],False,8)
-                if check.returncode:
-                    errors.append(f'ALSA card {card} {control} {direction}: could not verify gain')
-                    continue
-                readings=[db for line in check.stdout.splitlines() if direction in line.lower() for db in re.findall(r'\[([-+]?\d+(?:\.\d+)?)dB\]',line)]
-                if readings and any(abs(float(db))>0.11 for db in readings):
-                    errors.append(f'ALSA card {card} {control} {direction}: gain not at 0dB ({", ".join(readings)})')
+            check=run([exe('amixer'),'-c',card,'cget',ident],False,8)
+            found=re.search(r'^\s*: values=([-\d,]+)',check.stdout,re.M) if not check.returncode else None
+            if not found or [int(v) for v in found.group(1).split(',')]!=[target]*count:
+                errors.append(f'ALSA card {card} {ident}: raw 0dB not verified')
+    # Never restore the master if any ALSA gain failed verification.
+    if errors:raise RuntimeError('Audio normalization incomplete: '+'; '.join(errors[:8])+
+                                 (f'; {len(errors)-8} more' if len(errors)>8 else ''))
+    # The only PipeWire write in normalization is the saved master, last.
     try:
-        # During route changes the default sink may have just been recreated;
-        # restore the persisted master, not that sink's fresh 100% default.
-        try:value=float(MASTER_VOLUME.read_text().strip().rstrip('%'))
-        except (OSError,ValueError):value=master_volume()
-        # A route/profile switch may recreate sinks. Enumerate live objects now,
-        # not at startup. PipeWire stream gains are distinct from device gains.
-        for kind,command,key in (('sinks','set-sink-volume','name'),
-                                 ('sources','set-source-volume','name'),
-                                 ('sink-inputs','set-sink-input-volume','index'),
-                                 ('source-outputs','set-source-output-volume','index')):
-            for item in _pipewire_json(kind):
-                if not isinstance(item,dict):continue
-                target=item.get(key)
-                if target is None or target=='':continue
-                result=run(['__wp_control__',command,str(target),'0dB'],False,8,media_env())
-                if result.returncode:
-                    errors.append(f'{kind} {target}: {result.stderr.strip() or "0dB unavailable"}')
-                    continue
-        # Direct-ALSA MPV bypasses PipeWire; its gain is the same saved master.
-        sync_mpv_master(max(0.0,min(100.0,value)))
-        if alive(rpid(CAMPID),'camilladsp'):
-            if selected_filter()!=NO_FILTER:wait_for_camilla_config(profile(selected_filter()))
-            camilla_command({'SetVolume':0.0})
-        target=master_sink()
+        value=float(MASTER_VOLUME.read_text().strip().rstrip('%'))
+        if not math.isfinite(value) or not 0<=value<=100:raise ValueError('saved master outside 0-100%')
+        target=getattr(MEDIA_TRANSACTION,'stage_sink',None) or master_sink()
         if target=='@DEFAULT_SINK@':target=pw_default()
-        result=run([exe('wpctl'),'set-volume',str(pw_sink(target)['id']),f'{max(0.0,min(100.0,value)):.2f}%'],False,8,media_env())
+        inactive=saved_output_route().get('sink') if target=='camilladsp' else 'camilladsp'
+        if inactive and inactive!=target:
+            try:inactive_node=pw_sink(inactive)
+            except RuntimeError:inactive_node=None
+            if inactive_node is not None:
+                unity=run([exe('wpctl'),'set-volume',str(inactive_node['id']),'100%'],False,8,media_env())
+                if unity.returncode:raise RuntimeError(unity.stderr.strip() or 'Could not set inactive playback sink to unity')
+        result=run([exe('wpctl'),'set-volume',str(pw_sink(target)['id']),f'{value:.2f}%'],False,8,media_env())
         if result.returncode:raise RuntimeError(result.stderr.strip() or 'Could not restore saved master')
-    except (RuntimeError,OSError,ValueError,subprocess.TimeoutExpired) as error:errors.append(str(error))
-    if errors:
-        raise RuntimeError('Audio normalization incomplete: '+'; '.join(errors[:4])+
-                           (f'; {len(errors)-4} more' if len(errors)>4 else ''))
-    return {'masterVolume':master_volume()}
-
+        sync_mpv_for_audio_path(value)
+    except (RuntimeError,OSError,ValueError,subprocess.TimeoutExpired) as error:
+        errors.append('saved master: '+str(error))
+    if errors:raise RuntimeError('Audio normalization incomplete: '+'; '.join(errors[:8])+
+                                 (f'; {len(errors)-8} more' if len(errors)>8 else ''))
+    return {'masterVolume':value}
 def set_master_volume(value):
     global MASTER_WRITE_UNTIL
     try:value=float(value)
@@ -1027,7 +1112,7 @@ def restore_mpv_queue():
         paths.append(path)
     if not paths:return
     # Build the exact saved ordering, including a shuffled queue. Keep playback
-    # paused on restart; do not unexpectedly resume audio after a reboot.
+    # paused on restart; do not start audio after a reboot.
     mpv_direct(['set_property','pause',True])
     # One loadlist transaction preserves queue order without per-track IPC.
     if all('\n' not in path and '\r' not in path for path in paths):
@@ -1051,7 +1136,7 @@ def stop_mpv():
 def ensure_mpv():
     if alive(rpid(MPVPID),'mpv') and MPVSOCK.exists():return
     stop_mpv();log=MPVLOG.open('ab',buffering=0)
-    cmd=[exe('mpv'),'--idle=yes','--no-video','--no-terminal','--keep-open=no','--ao=alsa','--audio-device=alsa/camilladsp_input','--audio-samplerate=96000','--audio-channels=stereo','--audio-format=s32',f'--input-ipc-server={MPVSOCK}',f'--volume={(100.0 if selected_filter()==NO_FILTER and not STOPPED.exists() else master_volume()):.2f}','--volume-max=100']
+    cmd=[exe('mpv'),'--idle=yes','--no-video','--no-terminal','--keep-open=no','--ao=alsa','--audio-device=alsa/camilladsp_input','--audio-samplerate=96000','--audio-channels=stereo','--audio-format=s32',f'--input-ipc-server={MPVSOCK}',f'--volume={(master_volume() if selected_filter()!=NO_FILTER and alive(rpid(CAMPID),'camilladsp') else 100.0):.2f}','--volume-max=100']
     try:q=subprocess.Popen(cmd,stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
     finally:log.close()
     MPVPID.write_text(f'{q.pid}\n');deadline=time.monotonic()+5
@@ -1059,7 +1144,7 @@ def ensure_mpv():
         if MPVSOCK.exists() and q.poll() is None:
             try:restore_mpv_queue()
             except (OSError,ValueError,RuntimeError):pass
-            sync_mpv_master(master_volume())
+            sync_mpv_for_audio_path(master_volume())
             return
         if q.poll() is not None:break
         time.sleep(.05)
@@ -1539,7 +1624,7 @@ def sonobus_matches(policy):
 def restart_sonobus(password=None,policy=None,normalize=False):
     global SONOBUS_PROCESS
     with LOCK:
-        stop_sonobus();alsa100();applied=configure_sonobus(policy)
+        stop_sonobus();applied=configure_sonobus(policy)
         state=groups_state();item=state['profiles'][state['active']]
         # Keep the regular SonoBus application running detached from the web
         # request. Do not add -q/--headless: this build only behaves correctly
@@ -1741,7 +1826,7 @@ def _route_choice(card,value,profile_index=None):
     if row is None:raise ValueError('Route is unavailable for this profile')
     return row
 
-def set_output_profile(card,profile,normalize=False,topology=None):
+def set_output_profile(card,profile,topology=None):
     topology=topology or audio_topology();item=_find_card(topology,card)
     choice=_profile_choice(item,profile)
     if item['activeProfile']!=choice['index']:
@@ -1927,32 +2012,193 @@ def verify_preserved_output(route):
                for link in pw_objects('Link',graph)):return
     raise RuntimeError('Local playback monitor is not linked to the saved sink')
 
-def select_input_interactive():
+def _input_stage_port_snapshot(card):
+    result={}
+    for source in _input_card(card)['sources']:
+        if not _input_selectable_source(source):continue
+        try:result[source['name']]=_input_ports(source['name'])[1]
+        except (OSError,RuntimeError,ValueError):pass
+    return result
+
+def _input_selectable_source(row):
+    label=str(row.get('label') or '')
+    name=str(row.get('name') or '')
+    return bool(name) and not name.endswith('.monitor') and not label.startswith(('[MONITOR]', '[INTERNAL]', '[LOOPBACK]', '[VIRTUAL]', '[UNAVAILABLE]'))
+
+def _input_stage(card, profile=None, route=None):
+    current=_input_card(card)
+    if not card.startswith('virtual:') and current['profiles']:
+        choices=[row for row in current['profiles'] if _available_option(row) and row['name'].strip().lower()!='off']
+        if not choices:raise RuntimeError('No usable input profile')
+        saved=_read_json(SWITCH_STATE/'input-last-choices.json',{})
+        previous=saved.get(card,{}) if isinstance(saved,dict) else {}
+        if not isinstance(previous,dict):previous={}
+        wanted=profile if profile is not None else previous.get('profile')
+        chosen=(next((row for row in choices if str(row['index'])==str(wanted)),None)
+                or next((row for row in choices if row['index']==current['activeProfile']),None)
+                or choices[0])
+        if chosen['index']!=current['activeProfile']:
+            _input_set_profile(card,chosen['index'])
+        current=_input_card(card)
+        profile=chosen['index']
+    else:
+        previous={}
+        profile=current['activeProfile']
+    routes=[row for row in current['routes'] if _available_option(row) and
+            (not row['profiles'] or profile is None or str(profile) in {str(x) for x in row['profiles']})]
+    if routes:
+        wanted=route if route is not None else previous.get('route')
+        chosen=(next((row for row in routes if str(row['index'])==str(wanted)),None)
+                or next((row for row in routes if row['index'] in current['activeRoutes']),None)
+                or routes[0])
+        if chosen['index'] not in current['activeRoutes']:
+            _input_set_route(card,chosen['index'])
+        route=chosen['index']
+    else:route=None
+    current=_input_card(card)
+    sources=[row for row in current['sources'] if _input_selectable_source(row)]
+    if route is not None:
+        selected_route=next(row for row in routes if row['index']==route)
+        if selected_route['devices']:
+            devices={str(x) for x in selected_route['devices']}
+            sources=[row for row in sources if row['profileDevice'] is None or str(row['profileDevice']) in devices]
+    if not sources:raise RuntimeError('Input profile/route exposes no source')
+    preferred=(previous.get('source'),run([exe('pactl'),'get-default-source'],False,5,media_env()).stdout.strip())
+    source=next((row for name in preferred for row in sources if row['name']==name),None) or sources[0]
+    ports,active_port=_input_ports(source['name'])
+    valid=[row for row in ports if _available_option(row)]
+    wanted=previous.get('port')
+    port=(next((row for row in valid if row['name']==wanted),None)
+          or next((row for row in valid if row['name']==active_port),None)
+          or (valid[0] if valid else None))
+    if port and port['name']!=active_port:
+        result=run([exe('pactl'),'set-source-port',source['name'],port['name']],False,8,media_env())
+        if result.returncode:raise RuntimeError(result.stderr.strip() or 'Could not apply input port')
+        if _input_ports(source['name'])[1]!=port['name']:raise RuntimeError('Input port did not become active')
+    graph=pw_graph()
+    node=next((x for x in pw_objects('Node',graph) if pw_props(x).get('node.name')==source['name']
+               and pw_props(x).get('media.class')=='Audio/Source'),None)
+    command=([exe('wpctl'),'set-default',str(node['id'])] if node else
+             [exe('pactl'),'set-default-source',source['name']])
+    result=run(command,False,8,media_env())
+    if result.returncode:raise RuntimeError(result.stderr.strip() or 'Could not apply input source')
+    if run([exe('pactl'),'get-default-source'],False,5,media_env()).stdout.strip()!=source['name']:
+        raise RuntimeError('Input source did not become default')
+    return {'profile':profile,'route':route,'source':source['name'],'port':port['name'] if port else ''}
+
+def restore_exact_device_routes(card, expected, direction):
+    """Restore routes by their PipeWire profile-device slot, without resetting a shared card."""
+    reader=_input_card if direction=='input' else lambda name:_find_card(audio_topology(),name)
+    setter=_input_set_route if direction=='input' else set_output_route
+    expected=set(expected)
+    current=reader(card)
+    available={r['index']:r for r in current['routes']}
+    if not expected.issubset(available):
+        raise RuntimeError('Original '+direction+' route disappeared on '+card)
+    if not expected and current['activeRoutes']:
+        graph=pw_graph()
+        device=next((row for row in pw_objects('Device',graph)
+                     if pw_props(row).get('device.name')==card),None)
+        if device is None:raise RuntimeError('Device disappeared during empty-route rollback: '+card)
+        enum=[row for row in _param_rows(device,'EnumRoute') if isinstance(row,dict)
+              and str(row.get('direction')).lower()==('input' if direction=='input' else 'output')]
+        for active_index in list(current['activeRoutes']):
+            active=next((row for row in enum if row.get('index')==active_index),None)
+            slots=set(active.get('devices') or []) if active else set()
+            off=[row for row in enum if isinstance(row.get('index'),int)
+                 and str(row.get('name','')).strip().lower() in ('off','[in] off','[out] off')
+                 and slots and slots.intersection(row.get('devices') or [])]
+            if len(off)==1:
+                node=(_input_route_node(card,{'devices':list(slots),'index':off[0]['index']})
+                      if direction=='input' else _route_node(card,{'devices':list(slots),'index':off[0]['index']}))
+                result=run([exe('wpctl'),'set-route',str(node),str(off[0]['index'])],False,12,media_env())
+                if result.returncode:raise RuntimeError(result.stderr.strip() or 'Off route rejected')
+                current=reader(card)
+        if current['activeRoutes']:
+            raise RuntimeError('Original empty '+direction+' route set not restored on '+card+
+                               '; active='+str(current['activeRoutes']))
+    # A route belongs to one or more profile-device slots. Setting the original
+    # route on that slot replaces the staged route without changing the profile.
+    for extra in set(current['activeRoutes'])-expected:
+        row=available.get(extra)
+        slots=set(row.get('devices') or []) if row else set()
+        replacements=[index for index in expected
+                      if slots and slots.intersection(available[index].get('devices') or [])]
+        if len(replacements)!=1:
+            raise RuntimeError('Cannot safely replace extra '+direction+' route '+str(extra)+
+                               ' on '+card+'; original route for its device slot is ambiguous')
+        replacement=available[replacements[0]]
+        node=(_input_route_node(card,replacement) if direction=='input' else _route_node(card,replacement))
+        result=run([exe('wpctl'),'set-route',str(node),str(replacements[0])],False,12,media_env())
+        if result.returncode:raise RuntimeError(result.stderr.strip() or 'Route replacement rejected')
+    for index in expected-set(reader(card)['activeRoutes']):setter(card,index)
+    actual=set(reader(card)['activeRoutes'])
+    if actual!=expected:
+        raise RuntimeError('Original '+direction+' routes not restored on '+card+
+                           '; extra='+str(sorted(actual-expected))+', missing='+str(sorted(expected-actual)))
+
+def input_stream_origins():
+    """Capture recording targets before any profile, route or default changes."""
+    sources=run([exe('pactl'),'-f','json','list','sources'],False,8,media_env())
+    streams=run([exe('pactl'),'-f','json','list','source-outputs'],False,8,media_env())
+    if sources.returncode or streams.returncode:
+        raise RuntimeError('Cannot snapshot recording streams before input selection')
+    names={str(row.get('index')):row.get('name') for row in json.loads(sources.stdout)}
+    origins={}
+    for row in json.loads(streams.stdout):
+        index=row.get('index')
+        if not isinstance(index,int):continue
+        name=names.get(str(row.get('source')))
+        if not name:raise RuntimeError('Cannot identify original source for recording stream '+str(index))
+        origins[index]=name
+    graph=pw_graph();native={}
+    for node in pw_objects('Node',graph):
+        if pw_props(node).get('media.class')!='Stream/Input/Audio':continue
+        targets={str((link.get('info') or {}).get('output-node-id')) for link in pw_objects('Link',graph)
+                 if str((link.get('info') or {}).get('input-node-id'))==str(node['id'])}
+        if len(targets)>1:raise RuntimeError('Recording stream has multiple original source targets: '+str(node['id']))
+        if targets:native[node['id']]=next(iter(targets))
+    return origins,native
+
+def select_input_interactive(finalize=None):
     with LOCK:
         card=_pick_input('Audio input | Device',input_topology())['name']
         original=_input_card(card)
-        old_source=run([exe('pactl'),'get-default-source'],False,5,media_env()).stdout.strip()
+        old_source=getattr(MEDIA_TRANSACTION,'input_default',None) or run([exe('pactl'),'get-default-source'],False,5,media_env()).stdout.strip()
         saved_output=saved_output_route()
-        prior_streams={}
+        playback_before=getattr(MEDIA_TRANSACTION,'input_playback_before',None)
+        if playback_before is None and saved_output.get('card')==card and not STOPPED.exists():
+            live_playback=_find_card(audio_topology(),card)
+            playback_before={'profile':live_playback['activeProfile'],'routes':list(live_playback['activeRoutes']),
+                             'monitor':alive(rpid(LOCALMONPID))}
+        prior_streams,prior_native=getattr(MEDIA_TRANSACTION,'input_stream_origins',None) or input_stream_origins()
         moved=[];native_moved=[];success=False
         old_port=None;chosen_source=None
+        stage_original=getattr(MEDIA_TRANSACTION,'input_original',None)
+        stage_ports=getattr(MEDIA_TRANSACTION,'input_ports',{})
+        if stage_original is not None:original=stage_original
         try:
-            profile=(_pick_input('Audio input | Profile',original['profiles'],original['activeProfile'])
-                     if original['profiles'] else {'index':original['activeProfile'],'name':'current'})
-            if profile['index'] is not None and original['activeProfile']!=profile['index'] and not card.startswith('virtual:'):
+            if stage_original is not None:
+                _input_stage(card)
+            live=_input_card(card)
+            profile=(_pick_input('Audio input | Profile',live['profiles'],live['activeProfile'])
+                     if live['profiles'] else {'index':live['activeProfile'],'name':'current'})
+            if profile['index'] is not None and _input_card(card)['activeProfile']!=profile['index'] and not card.startswith('virtual:'):
                 with media_change():_input_set_profile(card,profile['index'])
             current=_input_card(card)
-            routes=[r for r in current['routes'] if not r['profiles'] or profile['index'] is None or str(profile['index']) in {str(x) for x in r['profiles']}]
+            routes=[r for r in current['routes'] if _available_option(r) and (not r['profiles'] or profile['index'] is None or str(profile['index']) in {str(x) for x in r['profiles']})]
             route=_pick_input('Audio input | Route',routes,current['activeRoutes'][0] if current['activeRoutes'] else None) if routes else None
-            if route and route['index'] not in current['activeRoutes']:
+            if route and route['index'] not in _input_card(card)['activeRoutes']:
                 with media_change():_input_set_route(card,route['index'])
             current=_input_card(card)
             if saved_output.get('card')==card:verify_preserved_output(saved_output)
-            candidates=current['sources']
+            candidates=[row for row in current['sources'] if _input_selectable_source(row)]
             if route and route['devices']:
                 candidates=[x for x in candidates if x['profileDevice'] is None or str(x['profileDevice']) in {str(v) for v in route['devices']}]
-            source=_pick_input('Audio input | Source',candidates)
+            source=_pick_input('Audio input | Source',candidates,old_source)
             chosen_source=source['name']
+            if not any(row['name']==chosen_source for row in _input_card(card)['sources']):
+                raise RuntimeError('Selected source disappeared before port selection')
             ports,old_port=_input_ports(chosen_source)
             port=_pick_input('Audio input | Port',ports,old_port) if ports else None
             with media_change():
@@ -1971,14 +2217,10 @@ def select_input_interactive():
                     raise RuntimeError('Input default not confirmed')
                 r=run([exe('pactl'),'-f','json','list','source-outputs'],False,8,media_env())
                 if r.returncode:raise RuntimeError('Cannot enumerate recording streams')
-                original_sources=run([exe('pactl'),'-f','json','list','sources'],False,8,media_env())
-                if original_sources.returncode:raise RuntimeError('Cannot map original recording sources')
-                names={str(x.get('index')):x.get('name') for x in json.loads(original_sources.stdout)}
                 for item in json.loads(r.stdout):
-                    index=item.get('index');old=names.get(str(item.get('source')))
+                    index=item.get('index')
                     if not isinstance(index,int):continue
-                    if not old:raise RuntimeError('Cannot identify original source for recording stream '+str(index))
-                    prior_streams[index]=old
+                    if index not in prior_streams:raise RuntimeError('Recording stream appeared after input snapshot: '+str(index))
                     r=run([exe('pactl'),'move-source-output',str(index),chosen_source],False,8,media_env())
                     if r.returncode:raise RuntimeError('Recording stream '+str(index)+' could not be moved')
                     moved.append(index)
@@ -2011,7 +2253,8 @@ def select_input_interactive():
                     sources={str((x.get('info') or {}).get('output-node-id')) for x in links}
                     if sources=={str(node['id'])}:continue
                     if len(sources)!=1:raise RuntimeError('Recording stream '+str(sid)+' has multiple source targets')
-                    old_node=next(iter(sources))
+                    old_node=prior_native.get(sid)
+                    if old_node is None:raise RuntimeError('Recording stream appeared after input snapshot: '+str(sid))
                     result=run([exe('pw-metadata'),'-n','default',str(sid),'target.node',str(node['id']),'Spa:Id'],False,8,media_env())
                     if result.returncode:raise RuntimeError('Recording stream '+str(sid)+' cannot be retargeted')
                     native_moved.append((sid,old_node))
@@ -2026,39 +2269,113 @@ def select_input_interactive():
                         time.sleep(.1)
                     else:raise RuntimeError('Recording stream '+str(sid)+' link not confirmed')
             if saved_output.get('card')==card:verify_preserved_output(saved_output)
+            choices=_read_json(SWITCH_STATE/'input-last-choices.json',{})
+            if not isinstance(choices,dict):choices={}
+            choices[card]={'profile':profile['index'],'route':route['index'] if route else None,'source':chosen_source,'port':port['name'] if port else ''}
+            if finalize is not None:finalize()
+            _write_json(SWITCH_STATE/'input-last-choices.json',choices)
             success=True
             return {'device':card,'profile':profile['index'],'route':route['index'] if route else None,
                     'source':chosen_source,'port':port['name'] if port else None}
         finally:
             if not success:
                 failures=[]
-                for sid,old_node in reversed(native_moved):
-                    r=run([exe('pw-metadata'),'-n','default',str(sid),'target.node',old_node,'Spa:Id'],False,8,media_env())
-                    if r.returncode:failures.append('native recording stream '+str(sid))
-                if not card.startswith('virtual:') and original['activeProfile'] is not None and _input_card(card)['activeProfile']!=original['activeProfile']:
-                    try:
-                        graph=pw_graph();dev=next(d for d in pw_objects('Device',graph) if pw_props(d).get('device.name')==card)
-                        result=run([exe('wpctl'),'set-profile',str(dev['id']),str(original['activeProfile'])],False,12,media_env())
-                        if result.returncode:raise RuntimeError(result.stderr.strip() or 'Could not restore profile')
-                    except (RuntimeError,StopIteration) as error:failures.append(str(error))
-                for index in original['activeRoutes']:
-                    try:
-                        if index not in _input_card(card)['activeRoutes']:_input_set_route(card,index)
-                    except RuntimeError as error:failures.append(str(error))
+                def rollback_step(label,action):
+                    try:action()
+                    except Exception as error:failures.append(label+': '+str(error))
+                def restore_native(sid,old_node):
+                    r=run([exe('pw-metadata'),'-n','default',str(sid),'target.node',str(old_node),'Spa:Id'],False,8,media_env())
+                    if r.returncode:raise RuntimeError(r.stderr.strip() or 'retarget rejected')
+                def restore_profile():
+                    if card.startswith('virtual:') or original['activeProfile'] is None:return
+                    if _input_card(card)['activeProfile']==original['activeProfile']:return
+                    graph=pw_graph()
+                    dev=next((d for d in pw_objects('Device',graph) if pw_props(d).get('device.name')==card),None)
+                    if dev is None:raise RuntimeError('input device disappeared')
+                    result=run([exe('wpctl'),'set-profile',str(dev['id']),str(original['activeProfile'])],False,12,media_env())
+                    if result.returncode:raise RuntimeError(result.stderr.strip() or 'profile restore rejected')
+                    if _input_card(card)['activeProfile']!=original['activeProfile']:
+                        raise RuntimeError('original profile not confirmed')
+                rollback_step('input profile',restore_profile)
+                rollback_step('input route set',lambda:restore_exact_device_routes(card,original['activeRoutes'],'input'))
+                def restore_native_checked(sid,old_node):
+                    graph=pw_graph()
+                    if not any(str(n['id'])==str(old_node) for n in pw_objects('Node',graph)):
+                        raise RuntimeError('original source node no longer exists after profile restore')
+                    restore_native(sid,old_node)
+                    deadline=time.monotonic()+3
+                    while time.monotonic()<deadline:
+                        graph=pw_graph()
+                        targets={str((link.get('info') or {}).get('output-node-id'))
+                                 for link in pw_objects('Link',graph)
+                                 if str((link.get('info') or {}).get('input-node-id'))==str(sid)}
+                        if targets=={str(old_node)}:return
+                        time.sleep(.1)
+                    raise RuntimeError('original capture link not confirmed')
+                for sid,old_node in reversed(list(prior_native.items())):
+                    rollback_step('native recording stream '+str(sid),
+                                  lambda sid=sid,old_node=old_node:restore_native_checked(sid,old_node))
+                def restore_pulse(index,source):
+                    r=run([exe('pactl'),'move-source-output',str(index),str(source)],False,8,media_env())
+                    if r.returncode:raise RuntimeError(r.stderr.strip() or 'stream move rejected')
                 for index,source in prior_streams.items():
-                    if index in moved and source is not None:
-                        r=run([exe('pactl'),'move-source-output',str(index),str(source)],False,8,media_env())
-                        if r.returncode:failures.append('recording stream '+str(index))
-                if old_source and run([exe('pactl'),'get-default-source'],False,5,media_env()).stdout.strip()!=old_source:
+                    if source is not None:
+                        rollback_step('recording stream '+str(index),lambda index=index,source=source:restore_pulse(index,source))
+                def restore_default():
+                    if not old_source:return
+                    current=run([exe('pactl'),'get-default-source'],False,5,media_env())
+                    if current.returncode:raise RuntimeError('cannot read default source')
+                    if current.stdout.strip()==old_source:return
                     r=run([exe('pactl'),'set-default-source',old_source],False,8,media_env())
-                    if r.returncode:failures.append('default source')
-                if old_port and chosen_source and any(pw_props(n).get('node.name')==chosen_source for n in pw_objects('Node',pw_graph())):
-                    r=run([exe('pactl'),'set-source-port',chosen_source,old_port],False,8,media_env())
-                    if r.returncode:failures.append('input port')
-                if saved_output.get('card')==card:
-                    try:verify_preserved_output(saved_output)
-                    except RuntimeError as error:failures.append('playback: '+str(error))
+                    if r.returncode:raise RuntimeError(r.stderr.strip() or 'default source restore rejected')
+                rollback_step('default source',restore_default)
+                def restore_port(source,port):
+                    r=run([exe('pactl'),'set-source-port',source,port],False,8,media_env())
+                    if r.returncode:raise RuntimeError(r.stderr.strip() or 'port restore rejected')
+                for staged_source,staged_port in stage_ports.items():
+                    if staged_port:
+                        rollback_step('staged input port '+staged_source,
+                                      lambda source=staged_source,port=staged_port:restore_port(source,port))
+                if old_port and chosen_source and chosen_source not in stage_ports:
+                    rollback_step('input port '+chosen_source,
+                                  lambda:restore_port(chosen_source,old_port))
+                if playback_before is not None:
+                    def restore_playback():
+                        live=_find_card(audio_topology(),card)
+                        old_profile=playback_before['profile']
+                        if old_profile is not None and live['activeProfile']!=old_profile:
+                            set_output_profile(card,old_profile)
+                        restore_exact_device_routes(card,playback_before['routes'],'output')
+                        if playback_before['monitor']:
+                            restored=choose_output_route(dict(saved_output,_remembered=True))
+                            if restored['sink']!=saved_output['sink']:
+                                raise RuntimeError('Previous playback sink unavailable')
+                            start_local_monitor(restored,resolved=True,persist=False)
+                        verify_preserved_output(saved_output)
+                    rollback_step('playback',restore_playback)
                 if failures:raise RuntimeError('Input rollback incomplete: '+', '.join(failures))
+
+def restore_camera_clients(snapshot):
+    failures=[]
+    for sid,old in reversed(snapshot):
+        result=run([exe('pw-metadata'),'-n','default',str(sid),'target.node',str(old),'Spa:Id'],False,8,media_env())
+        if result.returncode:
+            failures.append(str(sid)+': '+(result.stderr.strip() or 'retarget failed'))
+            continue
+        deadline=time.monotonic()+3
+        while time.monotonic()<deadline:
+            graph=pw_graph()
+            if not any(str(n['id'])==str(sid) for n in pw_objects('Node',graph)):
+                failures.append(str(sid)+': client disappeared before rollback confirmation')
+                break
+            targets={str((link.get('info') or {}).get('output-node-id'))
+                     for link in pw_objects('Link',graph)
+                     if str((link.get('info') or {}).get('input-node-id'))==str(sid)}
+            if targets=={str(old)}:break
+            time.sleep(.1)
+        else:failures.append(str(sid)+': original camera link not restored')
+    if failures:raise RuntimeError('Camera clients not restored: '+', '.join(failures))
+    return {'restored':True}
 
 def camera_selection_status(node_id):
     graph=pw_graph()
@@ -2094,7 +2411,7 @@ def camera_selection_status(node_id):
                 time.sleep(.1)
             else:failures.append(str(sid)+' (link not confirmed)')
         if failures:raise RuntimeError('Camera clients not switched: '+', '.join(failures))
-        return {'selected':str(pw_props(selected).get('node.name'))}
+        return {'selected':str(pw_props(selected).get('node.name')),'previousClients':prior}
     except Exception as error:
         rollback=[]
         for sid,old in reversed(prior):
@@ -2114,26 +2431,90 @@ def camera_selection_status(node_id):
         raise
 
 OUTPUT_PREVIEW=SWITCH_STATE/'output-selector-preview.json'
+WEB_PREVIEW_LEASE=45
 
-def begin_output_preview():
-    with LOCK:
-        if OUTPUT_PREVIEW.exists():
-            raise RuntimeError('Another output selection is pending; cancel it first')
-        top=audio_topology()
-        _write_json(OUTPUT_PREVIEW,{'cards':{c['name']:{'profile':c['activeProfile'],
-                        'routes':list(c['activeRoutes'])} for c in top['cards'] if not c['internal']},
-                        'mode':audio_mode(),'output':saved_output_route(),
-                        'localMonitor':alive(rpid(LOCALMONPID))})
-        return output_state()
+def _preview_owner_alive(snapshot):
+    if snapshot.get('owner')!='cli':return True
+    try:
+        pid=int(snapshot['ownerPid']);start=int(snapshot['ownerStart'])
+        fields=Path(f'/proc/{pid}/stat').read_text().rsplit(') ',1)[1].split()
+        return fields[0]!='Z' and int(fields[19])==start
+    except (OSError,ValueError,KeyError,IndexError,TypeError):return False
 
-def cancel_output_preview():
+def _recover_stale_cli_preview():
+    snapshot=_read_json(OUTPUT_PREVIEW,None)
+    if not isinstance(snapshot,dict):return
+    if snapshot.get('owner')=='cli' and not _preview_owner_alive(snapshot):
+        cancel_output_preview('cli',recover=True)
+    elif snapshot.get('owner')=='web' and time.time()-float(snapshot.get('renewed',0))>WEB_PREVIEW_LEASE:
+        cancel_output_preview('web',recover=True)
+
+def watch_output_preview(stop):
+    while not stop.wait(5):
+        try:
+            with LOCK:_recover_stale_cli_preview()
+        except (OSError,ValueError,RuntimeError) as error:
+            print('Output preview recovery: '+str(error),flush=True)
+
+def renew_output_preview(token):
     with LOCK:
         snapshot=_read_json(OUTPUT_PREVIEW,None)
+        if not isinstance(snapshot,dict) or snapshot.get('owner')!='web' or snapshot.get('token')!=token:
+            raise RuntimeError('This browser does not own the output selection')
+        if time.time()-float(snapshot.get('renewed',0))>WEB_PREVIEW_LEASE:
+            _recover_stale_cli_preview()
+            raise RuntimeError('Output selection expired; reopen the picker')
+        snapshot['renewed']=time.time()
+        _write_json(OUTPUT_PREVIEW,snapshot)
+        return {'renewed':True}
+
+def _require_output_preview(origin,token=None):
+    snapshot=_read_json(OUTPUT_PREVIEW,None)
+    if not isinstance(snapshot,dict) or snapshot.get('owner')!=origin:
+        raise RuntimeError('Begin an output selection in this picker first')
+    if origin=='web' and (not token or snapshot.get('token')!=token):
+        raise RuntimeError('This browser does not own the output selection')
+    if origin=='web' and time.time()-float(snapshot.get('renewed',0))>WEB_PREVIEW_LEASE:
+        _recover_stale_cli_preview()
+        raise RuntimeError('Output selection expired; reopen the picker')
+    if origin=='cli' and (not _preview_owner_alive(snapshot) or
+                          str(snapshot.get('ownerPid'))!=str(token)):
+        raise RuntimeError('Media Control picker is no longer running')
+    return snapshot
+
+def begin_output_preview(origin='web',owner_pid=None,owner_start=None):
+    with LOCK:
+        _recover_stale_cli_preview()
+        if OUTPUT_PREVIEW.exists():
+            raise RuntimeError('Another output selection is pending; cancel it first')
+        if origin=='cli' and (not owner_pid or not owner_start):raise ValueError('Missing CLI picker identity')
+        top=audio_topology()
+        token=uuid.uuid4().hex if origin=='web' else None
+        inputs={c['name']:list(c['activeRoutes']) for c in input_topology()}
+        pulse_origins,native_origins=input_stream_origins()
+        _write_json(OUTPUT_PREVIEW,{'owner':origin,'ownerPid':owner_pid,'ownerStart':owner_start,'token':token,'renewed':time.time(),'cards':{c['name']:{'profile':c['activeProfile'],
+                        'routes':list(c['activeRoutes'])} for c in top['cards'] if not c['internal']},
+                        'inputs':inputs,'pulseOrigins':pulse_origins,'nativeOrigins':native_origins,
+                        'mode':audio_mode(),'output':saved_output_route(),
+                        'localMonitor':alive(rpid(LOCALMONPID))})
+        try:
+            state=output_state()
+        except Exception:
+            OUTPUT_PREVIEW.unlink(missing_ok=True)
+            raise
+        if token:state['previewToken']=token
+        return state
+def cancel_output_preview(origin='web',token=None,recover=False):
+    with LOCK:
+        snapshot=_read_json(OUTPUT_PREVIEW,None)
+        if isinstance(snapshot,dict) and not recover:_require_output_preview(origin,token)
+        if isinstance(snapshot,dict) and recover and snapshot.get('owner')!=origin:
+            raise RuntimeError('Another output picker owns this selection')
         if not isinstance(snapshot,dict):return output_state()
         if all((lambda live,old:live['activeProfile']==old['profile'] and
                 set(old['routes'])==set(live['activeRoutes']))(
                 next((c for c in audio_topology()['cards'] if c['name']==name),{'activeProfile':None,'activeRoutes':[]}),prior)
-               for name,prior in snapshot.get('cards',{}).items()):
+               for name,prior in snapshot.get('cards',{}).items()) and not snapshot.get('staged'):
             OUTPUT_PREVIEW.unlink(missing_ok=True)
             return output_state()
         failures=[]
@@ -2146,16 +2527,23 @@ def cancel_output_preview():
                     else:
                         result=run([exe('wpctl'),'set-profile',str(current['index']),str(prior['profile'])],False,12,media_env())
                         if result.returncode:raise RuntimeError(result.stderr.strip() or 'Could not restore original profile')
-                for route in prior['routes']:
-                    current=_find_card(audio_topology(),card)
-                    if route not in current['activeRoutes']:
-                        set_output_route(card,route)
+                restore_exact_device_routes(card,prior['routes'],'output')
+                if card in snapshot.get('inputs',{}):
+                    restore_exact_device_routes(card,snapshot['inputs'][card],'input')
             except (RuntimeError,ValueError,OSError) as error:failures.append(card+': '+str(error))
+        for sid,source in (snapshot.get('pulseOrigins',{}) if snapshot.get('staged') else {}).items():
+            result=run([exe('pactl'),'move-source-output',str(sid),str(source)],False,8,media_env())
+            if result.returncode:failures.append('recording stream '+str(sid)+': '+result.stderr.strip())
+        for sid,target in (snapshot.get('nativeOrigins',{}) if snapshot.get('staged') else {}).items():
+            result=run([exe('pw-metadata'),'-n','default',str(sid),'target.node',str(target),'Spa:Id'],False,8,media_env())
+            if result.returncode:failures.append('native recording stream '+str(sid)+': '+result.stderr.strip())
         old=snapshot.get('output') or {}
+        if snapshot.get('staged') and not snapshot.get('localMonitor'):
+            stop_local_monitor()
         if snapshot.get('localMonitor') and old.get('sink') and not STOPPED.exists():
             try:
                 current=saved_output_route()
-                if current.get('sink')!=old['sink'] or not alive(rpid(LOCALMONPID)):
+                if current.get('sink')!=old['sink'] or not alive(rpid(LOCALMONPID)) or snapshot.get('staged'):
                     selected=choose_output_route(dict(old,_remembered=True))
                     if selected['sink']!=old['sink']:raise RuntimeError('Saved sink is unavailable')
                     start_local_monitor(selected,resolved=True)
@@ -2164,35 +2552,80 @@ def cancel_output_preview():
         OUTPUT_PREVIEW.unlink(missing_ok=True)
         return output_state()
 
-def _stage_local_route(card, profile, route=None, mode=None):
-    if not OUTPUT_PREVIEW.exists():begin_output_preview()
+def _stage_local_route(card, profile, route=None, mode=None,origin='web',token=None):
+    preview=_require_output_preview(origin,token)
     current=_find_card(audio_topology(),card)
     chosen=_profile_choice(current,profile)
+    original=(preview.get('cards') or {}).get(card)
+    if original is None:raise RuntimeError('Playback card was not in the preview snapshot')
     if current['activeProfile']!=chosen['index']:
-        set_output_profile(card,profile,topology={'cards':[current]})
+        set_output_profile(card,chosen['index'])
     current=_find_card(audio_topology(),card)
+    remembered=remembered_output(card,str(chosen['index']))
+    compatible=[r for r in current['routes'] if r['available'] not in ('no','false','unavailable')
+                and (not r['profiles'] or chosen['index'] in r['profiles'])]
     if route not in (None,''):
         selected_route=_route_choice(current,route,chosen['index'])
-        if selected_route['index'] not in current['activeRoutes']:
-            set_output_route(card,route)
-        current=_find_card(audio_topology(),card)
     else:
-        available=[row for row in current['routes'] if row['index'] in current['activeRoutes']
-                   and row['available'] not in ('no','false','unavailable')
-                   and (not row['profiles'] or chosen['index'] in row['profiles'])]
-        remembered=remembered_output(card,str(chosen['index']))
-        selected_route=next((row for row in available if str(row['index'])==str(remembered.get('port'))),None)
-        if selected_route is None and len(available)==1:selected_route=available[0]
-        if selected_route is None and not current['routes']:selected_route=None
-    return output_state()
+        selected_route=(next((r for r in compatible if str(r['index'])==str(remembered.get('port'))),None)
+                        or next((r for r in compatible if r['index'] in current['activeRoutes']),None)
+                        or (compatible[0] if compatible else None))
+    if current['routes'] and selected_route is None:raise RuntimeError('No usable route for selected profile')
+    if selected_route and selected_route['index'] not in current['activeRoutes']:
+        set_output_route(card,selected_route['index'])
+    current=_find_card(audio_topology(),card)
+    devices={str(x) for x in selected_route['devices']} if selected_route else set()
+    sinks=[row for row in current['sinks'] if not row['internal'] and
+           (not devices or row['profileDevice'] is None or str(row['profileDevice']) in devices)]
+    if not sinks:raise RuntimeError('Selected profile and route expose no physical playback sink')
+    saved=saved_output_route()
+    preferred=(remembered.get('sink'),saved.get('sink') if saved.get('card')==card else None)
+    sink=next((row for name in preferred for row in sinks if row['name']==name),None)
+    if sink is None:
+        # Stage a usable sink without hiding the other live sinks from the Sink menu.
+        graph=pw_graph()
+        priorities={pw_props(node).get('node.name'):pw_props(node).get('priority.session')
+                    for node in pw_objects('Node',graph)}
+        def priority(row):
+            try:return int(priorities.get(row['name']) or 0)
+            except (ValueError,TypeError):return 0
+        sink=max(sinks,key=priority)
+    selected={'card':card,'profile':str(chosen['index']),'port':str(selected_route['index']) if selected_route else '',
+              'sink':sink['name'],'label':sink['label'],'sinkCard':card,'sinkProfile':str(chosen['index'])}
+    # Preview uses the full live route but must not overwrite committed choices.
+    if not STOPPED.exists() and MODES[mode or audio_mode()][2]:
+        start_local_monitor(selected,resolved=True,persist=False)
+    master=master_sink()
+    MEDIA_TRANSACTION.stage_sink=(selected['sink'] if master=='@DEFAULT_SINK@' or (selected_filter()==NO_FILTER and (mode or audio_mode())=='laptop_laptop') else master)
+    snapshot=_read_json(OUTPUT_PREVIEW,{})
+    snapshot['staged']=True
+    if origin=='web':snapshot['renewed']=time.time()
+    _write_json(OUTPUT_PREVIEW,snapshot)
+    result=output_state()
+    result['stageSelection']=selected
+    return result
 
-def apply_output_profile_stage(card,profile,mode=None):
+def select_output_device_stage(card,origin='web',token=None):
+    # Both UIs commit the same usable profile at Device Select, before Profile UI.
     with LOCK, (audio_start_change() if STOPPED.exists() else media_change()):
-        return _stage_local_route(card,profile,mode=mode)
+        item=_find_card(audio_topology(),card)
+        usable=[row for row in item['profiles'] if row['available'] not in ('no','false')
+                and row['name'].strip().lower()!='off']
+        if not usable:raise RuntimeError('No usable playback profile for this device')
+        active=next((row for row in usable if row['index']==item['activeProfile']),None)
+        remembered=remembered_card_profile(card)
+        chosen=(next((row for row in usable if str(row['index'])==remembered),None)
+                or active or usable[0])
+        result=_stage_local_route(card,chosen['index'],origin=origin,token=token)
+        result['deviceStageProfile']=chosen['index']
+        return result
+def apply_output_profile_stage(card,profile,mode=None,origin='web',token=None):
+    with LOCK, (audio_start_change() if STOPPED.exists() else media_change()):
+        return _stage_local_route(card,profile,mode=mode,origin=origin,token=token)
 
-def apply_output_route_stage(card,profile,route,mode=None):
+def apply_output_route_stage(card,profile,route,mode=None,origin='web',token=None):
     with LOCK, (audio_start_change() if STOPPED.exists() else media_change()):
-        return _stage_local_route(card,profile,route,mode=mode)
+        return _stage_local_route(card,profile,route,mode=mode,origin=origin,token=token)
 
 def choose_output_route(requested=None):
     topology=audio_topology();cards=topology['cards']
@@ -2235,12 +2668,13 @@ def choose_output_route(requested=None):
             'label':selected['label'],'sinkCard':owner['name'],
             'sinkProfile':str(owner['activeProfile'])}
 
-def activate_output(request,mode='laptop_laptop',password=None):
+def activate_output(request,mode='laptop_laptop',password=None,origin='web',token=None):
     if not isinstance(request,dict):raise ValueError('Invalid output request')
     card=str(request.get('card') or '');profile=request.get('profile');route=request.get('port')
     if not card or profile is None or not request.get('sink'):
         raise ValueError('Select an exposed playback device, profile and sink')
     with LOCK, (audio_start_change() if STOPPED.exists() else media_change()):
+        preview=_require_output_preview(origin,token)
         if STOPPED.exists():
             for unit in ('pipewire.socket','pipewire-pulse.socket','wireplumber.service'):
                 user_service('start',unit)
@@ -2310,7 +2744,7 @@ def activate_output(request,mode='laptop_laptop',password=None):
                     raise RuntimeError('Selected route did not expose one unambiguous playback sink')
                 time.sleep(.1)
             selected=choose_output_route({'card':card,'sink':target,'port':str(route or '')})
-            result=apply_mode(mode,password=password,output=selected,output_resolved=True,normalize=False)
+            result=apply_mode(mode,password=password,output=selected,output_resolved=True)
             # A live playback link can still be silent when the chosen sink is
             # muted. Unmute only the explicitly selected sink, at commit time.
             chosen_node=pw_sink(target)
@@ -2336,10 +2770,7 @@ def activate_output(request,mode='laptop_laptop',password=None):
                 current=_find_card(audio_topology(),card)
                 if old_profile is not None and current['activeProfile']!=old_profile:
                     set_output_profile(card,old_profile)
-                for old_route in old_routes:
-                    current=_find_card(audio_topology(),card)
-                    if any(row['index']==old_route for row in current['routes']):
-                        set_output_route(card,old_route)
+                restore_exact_device_routes(card,old_routes,'output')
                 if previous_output.get('sink') and MODES[previous_mode][2] and not STOPPED.exists():
                     restored=choose_output_route(dict(previous_output,_remembered=True))
                     if selected_filter()==NO_FILTER and previous_mode=='laptop_laptop':direct_no_filter(restored)
@@ -2376,7 +2807,7 @@ def output_state():
     topology['remembered']=choices if isinstance(choices,dict) else {}
     topology['rememberedProfiles']=_read_json(CARD_CHOICES,{})
     return topology
-def start_local_monitor(route=None,resolved=False):
+def start_local_monitor(route=None,resolved=False,persist=True):
     selected=route if resolved else choose_output_route(route)
     sink=selected['sink'];pw_sink(sink)
     stop_local_monitor()
@@ -2399,7 +2830,8 @@ def start_local_monitor(route=None,resolved=False):
             links=[x for x in pw_objects('Link',graph) if str((x.get('info') or {}).get('output-node-id'))==str(stream['id'])]
             target=pw_sink(sink,graph)
             if any(str((x.get('info') or {}).get('input-node-id'))==str(target['id']) for x in links):
-                _write_json(LOCALSINK,selected);remember_output(selected)
+                if persist:
+                    _write_json(LOCALSINK,selected);remember_output(selected)
                 return {'pid':process.pid,**selected}
         time.sleep(.1)
     stop_local_monitor()
@@ -2408,7 +2840,7 @@ def mode_state():
     if STOPPED.exists():
         return {'mode':'stopped','label':'No source selected','source':'',
             'localWanted':False,'sonobusWanted':False,'camilla':False,
-            'sonobus':False,'localMonitor':False,'systemAudio':False,
+            'sonobus':False,'localMonitor':False,'systemAudio':False,'engineRunning':False,'engineLabel':'Audio stopped',
             'airplay':False,'localOutput':saved_output_route(),
             'localOutputLabel':'','sonobusPolicy':{}}
     name=audio_mode();label,source,local,sono=MODES[name];policy=MODE_POLICIES[name]
@@ -2418,12 +2850,12 @@ def mode_state():
     selected={key:str(route.get(key) or '') for key in ('card','profile','sink','port')}
     return {
         'mode':name,'label':label,'source':source,'localWanted':local,'sonobusWanted':sono,
-        'camilla':alive(rpid(CAMPID),'camilladsp'),'sonobus':bool(sonopids()),'localMonitor':alive(local_pid),
+        'camilla':alive(rpid(CAMPID),'camilladsp'),'engineRunning':(alive(rpid(BYPASSPID)) if selected_filter()==NO_FILTER else alive(rpid(CAMPID),'camilladsp')),'engineLabel':('No filter bridge' if selected_filter()==NO_FILTER else 'CamillaDSP'),'sonobus':bool(sonopids()),'localMonitor':alive(local_pid),
         'systemAudio':run(['systemctl','--user','is-active',SYSTEM_AUDIO_SERVICE],False,5).stdout.strip()=='active',
         'airplay':run(['systemctl','is-active','shairport-sync.service'],False,5).stdout.strip()=='active',
         'localOutput':selected,'localOutputLabel':(route.get('label') or 'Not selected'),'sonobusPolicy':policy,
     }
-def apply_mode(name,password=None,restore_camilla=True,output=None,normalize=True,output_resolved=False):
+def apply_mode(name,password=None,restore_camilla=True,output=None,output_resolved=False):
     if name not in MODES:raise ValueError('Invalid audio mode')
     label,source,local,sono=MODES[name];policy=MODE_POLICIES[name]
     if STOPPED.exists():
@@ -2455,8 +2887,6 @@ def apply_mode(name,password=None,restore_camilla=True,output=None,normalize=Tru
     if local:
         selected=output if output_resolved else choose_output_route(output)
         if direct:direct_no_filter(selected)
-        current=saved_output_route()
-        wanted={key:selected[key] for key in ('card','profile','sink','port')}
         start_local_monitor(selected,resolved=True)
     elif alive(rpid(LOCALMONPID)):stop_local_monitor()
     if sono:
@@ -2482,7 +2912,7 @@ def set_mode(name,password=None,output=None):
         selected=choose_output_route(output) if MODES[name][2] else None
         if was_stopped and alive(rpid(CAMPID),'camilladsp'):
             stop_local_monitor();stop_camilla(include_stale=True)
-        return apply_mode(name,password,output=selected,output_resolved=selected is not None,normalize=False)
+        return apply_mode(name,password,output=selected,output_resolved=selected is not None)
 def mpv(command):
     with PLAYERLOCK:
         for attempt in range(2):
@@ -2757,7 +3187,7 @@ def volatile_state():
         'player':player_state(),'groups':groups_state(),
     }
 
-PAGE='<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>CamillaDSP Studio</title><style>\n:root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display",sans-serif;--v:#865dff;--b:#3f8eff;--g:#35d6a0}*{box-sizing:border-box}body{margin:0;min-height:100svh;padding:22px 16px 36px;color:#fff;background:radial-gradient(900px 520px at 50% -150px,#6542a8,#211a38 44%,#070910);background-attachment:fixed}main{max-width:540px;margin:auto}.hidden{display:none!important}.hero,.card{border:1px solid #ffffff22;background:linear-gradient(145deg,#ffffff1c,#ffffff0d);box-shadow:inset 0 1px #ffffff22,0 20px 50px #0005;backdrop-filter:blur(22px)}.hero{padding:25px 22px;border-radius:29px}.card{padding:18px;border-radius:24px;margin:14px 0}.card+.grid{margin-top:14px}.eyebrow,.label,.section-title{color:#bcb7cb;text-transform:uppercase;letter-spacing:.1em;font-size:12px;font-weight:800}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--g);box-shadow:0 0 15px var(--g);margin-right:8px}h1{margin:10px 0 5px;font-size:32px;letter-spacing:-.04em}.subtitle,.details,.meta{color:#b9b4c5;font-size:13px}.section-title{margin:27px 3px 10px}.title{font-size:20px;font-weight:800;margin-top:6px;overflow-wrap:anywhere}.grid{display:grid;gap:10px}.two{grid-template-columns:1fr 1fr}.three{grid-template-columns:1fr 1.2fr 1fr}.pc-transport{margin-bottom:18px}.pc-library-actions{margin-top:18px}.wide{grid-column:1/-1}button,input{font:inherit}button{border:0;color:#fff;cursor:pointer}.action,.item,.transport,.back{width:100%;transition:transform .12s,filter .15s}.action:active,.item:active,.transport:active,.back:active{transform:scale(.96);filter:brightness(1.15)}.action{min-height:54px;border-radius:18px;background:#ffffff1b;font-weight:780}.primary{background:linear-gradient(135deg,var(--b),var(--v))}.green{background:linear-gradient(135deg,#24ae7c,#287d95)}.danger{background:linear-gradient(135deg,#e64e74,#8e2b4b)}.active{outline:2px solid #a783ff;background:linear-gradient(135deg,#4e82ff66,#8552ff77)!important}.search{width:100%;min-height:49px;border:1px solid #ffffff22;border-radius:17px;padding:12px 15px;color:#fff;background:#ffffff12;outline:0}.search:focus{border-color:#9b7aff;box-shadow:0 0 0 4px #825dff2e}.list{display:grid;gap:10px;margin-top:10px}.cover-art{width:48px;height:48px;flex:none;object-fit:cover;border-radius:11px;background:#ffffff18}.cover-art.large{width:100%;max-width:220px;height:auto;aspect-ratio:1;display:block;margin:0 auto 16px;border-radius:20px}.cover-fallback{display:grid;place-items:center;color:#c3b6f3;font-size:24px}.cover-fallback.large{display:grid;font-size:68px}.item-cover{display:flex;align-items:center;gap:12px;min-width:0}.item-cover .copy{min-width:0;flex:1;overflow-wrap:anywhere;font-size:16px;line-height:1.3}.item-cover .name{font-size:16px;line-height:1.3;font-weight:780}.item-cover .meta{font-size:13px;line-height:1.35;font-weight:400}.item{text-align:left;min-height:64px;padding:13px 15px;border-radius:19px;background:#ffffff16}.name{display:block;font-weight:780}.meta{display:block;margin-top:4px}.playlist-row{position:relative}\n.playlist-open{display:block;padding-right:120px;min-height:76px}\n.playlist-controls{position:absolute;right:12px;top:50%;transform:translateY(-50%);display:flex;gap:8px;z-index:1}\n.playlist-icon{display:grid;place-items:center;width:44px;height:44px;border:1px solid #ffffff38;border-radius:14px;background:#242036e8;box-shadow:0 4px 14px #0005}\n.playlist-icon:hover{background:#564282}\n.playlist-icon:active{transform:scale(.94)}\n.playlist-icon .media-icon{width:20px;height:20px}\n.playlist-icon.busy{font-size:20px}.header{display:grid;grid-template-columns:72px 1fr 72px;align-items:center}.header h1{text-align:center;font-size:23px}.back{min-height:43px;border-radius:15px;background:#ffffff18}.range{--fill:0%;width:100%;height:36px;background:transparent;appearance:none}.range::-webkit-slider-runnable-track{height:6px;border-radius:99px;background:linear-gradient(to right,#fff var(--fill),#ffffff2d var(--fill))}.range::-webkit-slider-thumb{appearance:none;width:21px;height:21px;margin-top:-7.5px;border-radius:50%;background:#fff;box-shadow:0 3px 10px #0008}.times{display:flex;justify-content:space-between;color:#aaa5b5;font-size:12px}.range-row{display:grid;grid-template-columns:24px 1fr 24px;align-items:center;gap:7px}.transport{display:grid;place-items:center;min-height:78px;border-radius:999px;background:#ffffff19}.transport.main{min-height:98px;background:linear-gradient(145deg,#9e68ff,#583ad2)}.media-icon{display:block;width:34px;height:34px;fill:none;stroke:#fff;stroke-width:2.15;stroke-linecap:round;stroke-linejoin:round;pointer-events:none}.transport.main .media-icon{width:42px;height:42px}.icon-fill{fill:#fff;stroke:#fff}.range{touch-action:none}.range.dragging::-webkit-slider-thumb{transform:scale(1.08)}.source-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}\n\n/* Final interaction and consistency pass */\nbutton{position:relative;overflow:hidden;-webkit-user-select:none;user-select:none;touch-action:manipulation}\nbutton:focus-visible,.search:focus-visible,.range:focus-visible{outline:2px solid #b79cff;outline-offset:3px}\nbutton:disabled{opacity:.58;cursor:default}\n.action,.item,.transport,.back{will-change:transform}\n.action.busy::after,.item.busy::after{content:"";position:absolute;inset:0;background:linear-gradient(105deg,transparent 25%,#ffffff2e 50%,transparent 75%);animation:ui-shine .8s linear infinite}\n@keyframes ui-shine{from{transform:translateX(-100%)}to{transform:translateX(100%)}}\n.transport{transition:transform .12s ease,filter .15s ease,box-shadow .2s ease}\n.transport.main.playing{box-shadow:0 18px 42px #6b45dd77,inset 0 1px #ffffff35}\n.media-icon{transition:transform .16s ease}.transport:active .media-icon{transform:scale(.9)}\n.range{cursor:pointer}.range.dragging::-webkit-slider-thumb{transform:scale(1.1)}\n.range::-webkit-slider-runnable-track{transition:background .08s linear}\n.mode-active{outline:2px solid #72e5bc;background:linear-gradient(135deg,#24ae7c,#287d95)!important}\n#repeat.active,#shuffle.active{outline:2px solid #a783ff;background:linear-gradient(135deg,#4e82ff66,#8552ff77)!important}\n.output-modal{position:fixed;inset:0;z-index:50;display:grid;place-items:end center;padding:18px;background:#05060bbb;backdrop-filter:blur(12px)}.output-sheet{width:min(100%,540px);max-height:82svh;overflow:auto;padding:20px;border:1px solid #ffffff2b;border-radius:26px;background:linear-gradient(145deg,#272139,#11131c);box-shadow:0 28px 80px #000b}.output-options{display:grid;gap:10px;margin:16px 0}.output-choice{display:grid;grid-template-columns:24px 1fr;gap:10px;align-items:center;padding:14px;border-radius:18px;background:#ffffff12}.output-options option:disabled{color:#999;opacity:.5}.output-choice input{width:20px;height:20px;accent-color:#865dff}.output-choice strong,.output-choice span{display:block}.output-choice span{margin-top:3px;color:#aaa5b5;font-size:11px;overflow-wrap:anywhere}.modal-actions{display:grid;grid-template-columns:1fr;gap:10px}\n\n@media (prefers-reduced-motion:reduce){*{animation-duration:.001ms!important;transition-duration:.001ms!important;scroll-behavior:auto!important}}\n\n/* Page rhythm and accessible navigation. */\n#profiles>.hero{margin-bottom:20px}\n#profiles>.action{display:block;margin:14px 0 20px}\n#profiles>.grid{margin-top:12px}\n#profiles>.section-title{margin-top:26px;margin-bottom:12px}\n#groups-page .header,#listening-page .header,#songs .header,#playlist .header,#pc .header{margin-bottom:18px}\n#groups-page .card{display:grid;gap:12px}\n#groups-page .card .search,#groups-page .card .action{margin:0}\n#groups-page .card label{display:flex;align-items:center;gap:9px}\n.card>.details{margin-top:6px}\n#pc .card>.label{margin-bottom:8px}\n#listening-page .search{margin-bottom:16px}\n#song-search,#playlist-search{display:block;margin:0 0 16px}\n#song-list,#playlist-songs{margin-top:0}\n.system-media-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}\n.card .range{display:block;margin-top:12px}\n.card .times{margin-top:2px}\n.card .range-row{margin:14px 0 16px}\n.card .grid{margin-top:14px}\n.range-row{grid-template-columns:24px minmax(0,1fr) 24px;gap:10px}\n.volume-icon{display:grid;place-items:center;color:#d6d3de;pointer-events:none}\n.volume-icon svg{display:block;width:20px;height:20px}\n.local-now-header{display:flex;align-items:center;gap:14px;min-width:0;margin:10px 0 16px}\n.local-now-copy{flex:1;min-width:0}\n.local-now-copy .details{margin-top:6px;overflow-wrap:anywhere}\n.local-now-artwork{flex:0 0 72px;width:72px;height:72px;position:relative;display:grid;place-items:center;overflow:hidden;border-radius:15px;background:linear-gradient(145deg,#433b68,#222d42);color:#c8c1e9;font-size:32px;line-height:1}\n.local-now-artwork::before{content:\'♫\'}\n.local-now-artwork img{position:absolute;inset:0;display:block;width:100%;height:100%;object-fit:cover}\n.back-to-top{position:fixed;z-index:40;top:max(14px,env(safe-area-inset-top));left:50%;transform:translateX(-50%);width:auto;min-height:44px;padding:9px 17px;border:1px solid #ffffff38;border-radius:999px;background:#262039f2;box-shadow:0 8px 28px #0009;white-space:nowrap;font-size:14px;font-weight:750;backdrop-filter:blur(14px)}\n.back-to-top:active{transform:translateX(-50%) scale(.96)}\n\n/* Playlist actions: clear affordance without changing the page layout. */\n.playlist-row{border-radius:19px;transition:background .16s ease}\n.playlist-row:hover{background:#ffffff08}\n.playlist-icon{transition:background .16s ease,border-color .16s ease,transform .12s ease}\n.playlist-icon:hover{border-color:#aa90ff;background:#493572}\n#shuffle:disabled{opacity:.42;cursor:not-allowed}\n#shuffle:not(:disabled){background:linear-gradient(135deg,#6252a7,#373b77)}\n\n/* Unified indigo, blue and mint palette. */\n:root{--v:#8574f5;--b:#6c9cff;--g:#55d9ae}\nbody{background:radial-gradient(900px 520px at 50% -150px,#514784,#1d2039 48%,#0b101b)}\n.hero,.card{border-color:#a8b7ef25;background:linear-gradient(145deg,#b8c8ff18,#a8b8ee0a)}\n.action:not(.primary):not(.green):not(.danger):not(.active){background:#a8b7ef1b}\n#shuffle:not(:disabled){background:linear-gradient(135deg,#6257ae,#465b99)}\n.playlist-icon{background:#242941e8;border-color:#b7c7ff38}\n.playlist-icon:hover{background:#414a77;border-color:#9caeff}\n.output-sheet{background:linear-gradient(145deg,#252b47,#111827)}\n\n/* Shared home palette and compact destination layout. */\n:root{--v:#8574f5;--b:#6c9cff;--g:#55d9ae}\n#profiles{max-width:480px;margin-inline:auto}\n#profiles>.hero{padding:17px 18px;border-radius:23px;margin-bottom:12px}\n#profiles>.hero h1{font-size:27px;margin:6px 0 3px}\n#profiles>.card{padding:16px;margin:10px 0;border-radius:21px}\n#profiles>.section-title{margin:18px 3px 8px}\n#profiles>.action{min-height:48px;margin:10px 0 12px;border-radius:16px}\n#profiles .source-grid{grid-template-columns:repeat(3,minmax(0,1fr));gap:9px;margin-top:8px}\n#profiles .source-grid .source-heading{grid-column:1/-1;color:#bcb7cb;font-size:11px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;margin:9px 2px 0}\n#profiles .source-grid .action{min-height:50px;padding:8px 5px;border-radius:15px;font-size:14px;line-height:1.2}\n#profiles .card .grid{margin-top:10px}\n#profiles .transport{min-height:64px}\n#profiles .transport.main{min-height:80px}\n#profiles .pc-transport{margin-bottom:12px}\n.output-options .hidden{display:none!important}</style></head><body><main>\n<section id="profiles"><div class="hero"><div class="eyebrow"><span class="dot"></span><span id="engine-status">Audio engine offline</span></div><h1>CamillaDSP Studio</h1><div class="subtitle">System audio, AirPlay and PC Music through CamillaDSP and SonoBus.</div></div><div class="section-title">System media</div><div class="card"><div class="system-media-heading"><div class="label">Active desktop player</div></div><div id="system-title" class="title">No system media</div><div id="system-details" class="details"></div><input id="system-seek" class="range" type="range" aria-label="System media playback position" min="0" max="1" step=".1"><div class="times"><span id="system-elapsed">0:00</span><span id="system-duration">0:00</span></div><div class="range-row"><span class="volume-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 4V5L7 9H3z"/></svg></span><input id="system-volume" class="range" type="range" aria-label="Master volume" min="0" max="100" value="100"><span class="volume-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M2 9v6h4l5 4V5L6 9H2z"/><path d="M14 8.2a5 5 0 0 1 0 7.6l1.4 1.4a7 7 0 0 0 0-10.4L14 8.2z"/><path d="M17 5.3a9 9 0 0 1 0 13.4l1.4 1.4a11 11 0 0 0 0-16.2L17 5.3z"/></svg></span></div><div class="grid three"><button id="system-previous" class="transport" aria-label="Previous"><svg class="media-icon" viewBox="0 0 24 24"><path d="M6 5v14"></path><path d="M18 6.5 8.5 12 18 17.5z"></path></svg></button><button id="system-toggle" class="transport main" aria-label="Play"><svg class="media-icon" viewBox="0 0 24 24"><path id="system-play-shape" class="icon-fill" d="M8 5.5 19 12 8 18.5z"></path></svg></button><button id="system-next" class="transport" aria-label="Next"><svg class="media-icon" viewBox="0 0 24 24"><path d="M18 5v14"></path><path d="M6 6.5 15.5 12 6 17.5z"></path></svg></button></div></div><button id="open-pc" class="action green">Local Music Library</button><button id="away-display-toggle" class="action" type="button" aria-pressed="false" style="margin-top:10px">Away and display off</button><div class="section-title">Audio source</div><div class="card"><div id="source-title" class="title">Loading…</div><div id="source-details" class="details"></div><div id="mode-grid" class="source-grid"></div></div><div class="section-title">SonoBus Group</div><div class="card"><div class="label">Selected group</div><div id="sonobus-group" class="title">Loading…</div><div id="sonobus-status" class="details">Checking SonoBus…</div></div><button id="open-groups" class="action">Manage SonoBus Group</button><div class="section-title">Active profile</div><div class="card"><div id="active-profile" class="title">Loading…</div><div id="active-state" class="details"></div></div><button id="open-listening" class="action">Select Listening Profile</button><div class="section-title" id="restart-heading">Restart services</div><div class="grid two" aria-labelledby="restart-heading"><button id="restart-camilla" class="action">Restart CamillaDSP</button><button id="restart-sonobus" class="action">Restart SonoBus</button><button id="restart-airplay" class="action">Restart AirPlay</button><button id="restart-vnc" class="action">Restart VNC</button></div><button id="audio-toggle" class="action danger" type="button" style="margin-top:16px;min-height:64px">Stop all audio</button></section>\n<section id="groups-page" class="hidden"><div class="header"><button data-back="profiles" class="back">Back</button><h1>SonoBus Group</h1><div></div></div><div class="card"><select id="group-select" class="search"></select><input id="group-key" class="search" placeholder="Profile name"><input id="group-name" class="search" placeholder="Group name"><input id="group-user" class="search" placeholder="Username"><input id="group-server" class="search" value="aoo.sonobus.net:10998" placeholder="Connection server"><label class="details"><input id="group-required" type="checkbox"> Password required</label><input id="group-password" class="search" type="password" placeholder="Password (never saved)"><button id="save-group" class="action primary">Save Group Profile</button></div></section>\n<section id="listening-page" class="hidden"><div class="header"><button data-back="profiles" class="back">Back</button><h1>Listening Profiles</h1><div></div></div><div class="section-title">Listening profiles</div><input id="profile-search" class="search" placeholder="Search profiles"><div id="profile-list"></div></section>\n<section id="pc" class="hidden"><div class="header"><button id="pc-back" class="back">Back</button><h1>PC Music</h1><div></div></div><div class="card"><div class="label">Now playing</div><div class="local-now-header"><span id="now-cover" class="local-now-artwork" aria-hidden="true"></span><div class="local-now-copy"><div id="now-title" class="title">Nothing playing</div><div id="now-details" class="details"></div></div></div><input id="seek" class="range" type="range" aria-label="Local music playback position" min="0" max="1" step=".1"><div class="times"><span id="elapsed">0:00</span><span id="duration">0:00</span></div><div class="range-row"><span class="volume-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 4V5L7 9H3z"/></svg></span><input id="volume" class="range" type="range" aria-label="Master volume" min="0" max="100" value="100"><span class="volume-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M2 9v6h4l5 4V5L6 9H2z"/><path d="M14 8.2a5 5 0 0 1 0 7.6l1.4 1.4a7 7 0 0 0 0-10.4L14 8.2z"/><path d="M17 5.3a9 9 0 0 1 0 13.4l1.4 1.4a11 11 0 0 0 0-16.2L17 5.3z"/></svg></span></div><div class="grid two"><button id="repeat" class="action">Repeat Off</button><button id="shuffle" class="action" title="Update the saved shuffled playlist without changing what is playing">Shuffle for next play</button></div></div><div class="grid three pc-transport"><button data-cmd="previous" class="transport" aria-label="Previous"><svg class="media-icon" viewBox="0 0 24 24"><path d="M6 5v14"></path><path d="M18 6.5 8.5 12 18 17.5z"></path></svg></button><button data-cmd="toggle" class="transport main" aria-label="Play"><svg class="media-icon" viewBox="0 0 24 24"><path id="local-play-shape" class="icon-fill" d="M8 5.5 19 12 8 18.5z"></path></svg></button><button data-cmd="next" class="transport" aria-label="Next"><svg class="media-icon" viewBox="0 0 24 24"><path d="M18 5v14"></path><path d="M6 6.5 15.5 12 6 17.5z"></path></svg></button></div><div class="grid pc-library-actions"><button id="all-songs" class="action primary">All Songs</button></div><div class="section-title">Playlists</div><div id="playlists" class="list"></div></section>\n<section id="songs" class="hidden"><div class="header"><button data-back="pc" class="back">Back</button><h1>All Songs</h1><div></div></div><input id="song-search" class="search" type="search" aria-label="Search all songs" placeholder="Search all songs"><div id="song-list" class="list"></div></section>\n<section id="playlist" class="hidden"><div class="header"><button data-back="pc" class="back">Back</button><h1 id="playlist-title">Playlist</h1><div></div></div><input id="playlist-search" class="search" type="search" aria-label="Search this playlist" placeholder="Search this playlist"><div id="playlist-songs" class="list"></div></section><button id="back-to-top" class="back-to-top hidden" type="button">Go back to top of page ↑</button><div id="output-modal" class="output-modal hidden"><div class="output-sheet"><div class="label">Laptop output</div><div id="output-mode-title" class="title">Choose output</div><div class="details">Select device, profile, route, then sink.</div><div class="output-options"><label class="details" id="output-card-step">Device<select id="output-card" class="search"></select></label><label class="details hidden" id="output-profile-step">Profile<select id="output-profile" class="search"></select></label><label class="details hidden" id="output-route-step">Route<select id="output-route" class="search"></select></label><label class="details hidden" id="output-sink-step">Sink<select id="output-sink" class="search"></select></label></div><div class="modal-actions"><button id="output-cancel" class="action">Back</button><button id="output-next" class="action primary">Select</button></div></div></div>\n</main><script>const $=selector=>document.querySelector(selector);\nconst screens=[\'profiles\',\'pc\',\'songs\',\'playlist\',\'groups-page\',\'listening-page\'].map(id=>$(\'#\'+id));\nlet all=[],inside=[],current=\'\';\n\nconst state={\n  system:{slider:$(\'#system-seek\'),elapsed:$(\'#system-elapsed\'),durationLabel:$(\'#system-duration\'),volume:$(\'#system-volume\'),duration:0,dragging:false,polling:false,repoll:false,clockPosition:0,clockAt:0,clockPlaying:false,lastAvailableAt:0,trackKey:\'\',skipPending:false,skipFrom:\'\',skipStarted:0,skipWarned:false,volumeHold:0,volumeTimer:null,volumePending:null},\n  local:{slider:$(\'#seek\'),elapsed:$(\'#elapsed\'),durationLabel:$(\'#duration\'),volume:$(\'#volume\'),duration:0,dragging:false,polling:false,volumeHold:0,volumeTimer:null,volumePending:null}\n};\n\nconst fmt=value=>{const v=Math.max(0,Number(value)||0);return Math.floor(v/60)+\':\'+String(Math.floor(v)%60).padStart(2,\'0\')};\nfunction show(id){screens.forEach(screen=>screen.classList.toggle(\'hidden\',screen.id!==id));scrollTo({top:0,behavior:\'smooth\'});updateBackToTop()}\nfunction updateBackToTop(){const visible=[\'songs\',\'playlist\'].some(id=>!$(\'#\'+id).classList.contains(\'hidden\'));$(\'#back-to-top\').classList.toggle(\'hidden\',!visible||window.scrollY<320)}\nwindow.addEventListener(\'scroll\',updateBackToTop,{passive:true});$(\'#back-to-top\').onclick=()=>window.scrollTo({top:0,behavior:\'smooth\'});$(\'#open-groups\').onclick=()=>show(\'groups-page\');$(\'#open-listening\').onclick=()=>show(\'listening-page\');\nfunction notificationBox(){const banners=[...document.querySelectorAll(\'#global-task-feedback\')];let banner=banners.shift()||null;banners.forEach(item=>item.remove());if(!banner){banner=document.createElement(\'div\');banner.id=\'global-task-feedback\';banner.setAttribute(\'role\',\'status\');banner.setAttribute(\'aria-live\',\'polite\');banner.style.cssText=\'position:fixed;left:12px;right:12px;top:12px;z-index:5000;box-sizing:border-box;padding:14px 64px 14px 18px;border-radius:14px;background:#152033;color:#eef5ff;border:1px solid #43638f;box-shadow:0 12px 32px rgba(0,0,0,.4);font-weight:700;text-align:center;\';const message=document.createElement(\'span\');message.className=\'task-feedback-message\';const close=document.createElement(\'button\');close.type=\'button\';close.className=\'task-feedback-close\';close.textContent=\'×\';close.setAttribute(\'aria-label\',\'Close notification\');close.style.cssText=\'position:absolute;right:8px;top:50%;transform:translateY(-50%);width:48px;height:48px;border:0;border-radius:12px;background:transparent;color:inherit;font-size:38px;font-weight:400;line-height:42px;cursor:pointer;\';close.addEventListener(\'click\',()=>{clearTimeout(showTaskFeedback.timer);banner.classList.add(\'hidden\')});banner.append(message,close);document.body.appendChild(banner)}return banner}function showTaskFeedback(message,kind=\'working\'){const banner=notificationBox(),messageNode=banner.querySelector(\'.task-feedback-message\');if(messageNode)messageNode.textContent=String(message||\'Working…\');banner.style.background=kind===\'done\'?\'#163d2b\':(kind===\'error\'?\'#4a2025\':\'#152033\');banner.style.borderColor=kind===\'done\'?\'#2f7654\':(kind===\'error\'?\'#a64b56\':\'#43638f\');banner.classList.remove(\'hidden\');clearTimeout(showTaskFeedback.timer);if(kind!==\'working\')showTaskFeedback.timer=setTimeout(()=>banner.classList.add(\'hidden\'),10000)}function note(message,error=false){if(error&&message)showTaskFeedback(message,\'error\')}\nasync function api(url,options={}){const response=await fetch(url,{cache:\'no-store\',...options});const data=await response.json().catch(()=>null);if(!data||typeof data!==\'object\'||Array.isArray(data))throw Error(\'Invalid server response\');if(!response.ok||data.ok===false)throw Error(data.error||\'Request failed\');return data}\nconst post=(url,data={})=>api(url,{method:\'POST\',headers:{\'Content-Type\':\'application/json\'},body:JSON.stringify(data)});\nfunction fill(element,value,maximum){const max=Number(maximum),v=Number(value);const percent=Number.isFinite(max)&&max>0&&Number.isFinite(v)?Math.max(0,Math.min(100,v/max*100)):0;element.style.setProperty(\'--fill\',percent+\'%\')}\nfunction renderTimeline(media,position,duration){\n  const total=Number.isFinite(Number(duration))?Math.max(0,Number(duration)):0;\n  const current=Number.isFinite(Number(position))?Math.max(0,Math.min(Number(position),total>0?total:Number(position))):0;\n  media.duration=total;\n  media.slider.max=String(total>0?total:1);\n  if(!media.dragging)media.slider.value=String(current);\n  const shown=media.dragging?Number(media.slider.value):current;\n  fill(media.slider,shown,total);\n  media.elapsed.textContent=fmt(shown);\n  media.durationLabel.textContent=fmt(total);\n}\n\nfunction renderActiveProfile(data){\n  const info=data.filters?.[data.active];\n  $(\'#active-profile\').textContent=data.active?(info?.group||\'Other\'):\'No profile\';\n  $(\'#active-state\').textContent=data.active?((info?.label||data.active)+\' · \'+(data.active===\'__no_filter__\'?\'Bypassed\':data.running?\'Running\':\'Stopped\')):\'Stopped\'\n}\nfunction renderSonobusStatus(mode,groups){\n  const selected=groups?.profiles?.[groups.active];\n  $(\'#sonobus-group\').textContent=selected?.group||\'No group selected\';\n  $(\'#sonobus-status\').textContent=(mode.sonobus?\'Process running\':\'Process stopped\')+\n    (selected?\' • Profile: \'+groups.active+\' • User: \'+selected.username:\'\')\n}\nasync function busy(button,work,label=\'Working…\',doneLabel=\'Done\',feedback=false){if(button.disabled)return;const original=button.innerHTML;button.disabled=true;button.classList.add(\'busy\');if(!button.classList.contains(\'transport\'))button.textContent=label;if(feedback)showTaskFeedback(label,\'working\');try{const result=await work();if(feedback&&doneLabel)showTaskFeedback(doneLabel,\'done\');return result}catch(error){showTaskFeedback(error?.message||String(error),\'error\');throw error}finally{button.disabled=false;button.classList.remove(\'busy\');button.innerHTML=original}}\nfunction setPlayIcon(shape,button,playing){if(!shape||!button)return;shape.setAttribute(\'d\',playing?\'M8 5h3v14H8z M14 5h3v14h-3z\':\'M8 5.5 19 12 8 18.5z\');button.setAttribute(\'aria-label\',playing?\'Pause\':\'Play\');button.classList.toggle(\'playing\',playing)}\n\nfunction setSystemAvailability(data){for(const id of [\'system-previous\',\'system-toggle\',\'system-next\'])$(\'#\'+id).disabled=!data.available;$(\'#system-seek\').disabled=!data.available||!data.seekable}\nfunction systemTrackKey(data){\n  if(!data||!data.available)return \'\';\n  return [data.player||\'\',data.trackId||\'\',data.title||\'\',data.artist||\'\',data.duration||\'\'].join(\'\\x1f\')\n}\nfunction resetSystemPosition(){\n  const media=state.system;\n  media.clockPlaying=false;media.clockAt=0;media.clockPosition=0;\n  media.dragging=false;media.slider.classList.remove(\'dragging\');\n  renderTimeline(media,0,0)\n}\nfunction systemPositionError(message){\n  const media=state.system;\n  if(!media.skipWarned){media.skipWarned=true;showTaskFeedback(message,\'error\')}\n}\nfunction renderSystem(data){\n  const media=state.system,now=performance.now();\n  if(!data||typeof data!==\'object\')return;\n  if(!data.available&&media.lastAvailableAt&&now-media.lastAvailableAt<1500){\n    if(media.skipPending)resetSystemPosition();\n    return\n  }\n  if(data.available)media.lastAvailableAt=now;\n  else media.lastAvailableAt=0;\n  $(\'#system-title\').textContent=data.title||\'No system media\';\n  $(\'#system-details\').textContent=[data.artist,data.player,data.status].filter(Boolean).join(\' • \');\n  const key=systemTrackKey(data),duration=Number(data.duration),position=data.position===null||data.position===undefined||data.position===\'\'?NaN:Number(data.position);\n  const valid=!!data.available&&Number.isFinite(duration)&&duration>0&&Number.isFinite(position)&&position>=0&&position<=duration+2;\n  if(media.skipPending){\n    // Ignore snapshots from the old track after the skip command.\n    const changed=key&&key!==media.skipFrom;\n    const restarted=key&&key===media.skipFrom&&valid&&position<=3;\n    if(!changed&&!restarted){\n      resetSystemPosition();\n      if(now-media.skipStarted>2000)systemPositionError(\'Could not confirm the new track position. Marker held at 0:00.\');\n      return\n    }\n    media.skipPending=false;media.skipWarned=false\n  }\n  media.trackKey=key;\n  if(!valid){\n    resetSystemPosition();\n    if(data.available)systemPositionError(\'System media position is unavailable or invalid. Marker held at 0:00.\');\n  }else{\n    media.skipWarned=false;\n    media.clockPosition=Math.min(position,duration);\n    media.clockAt=now;\n    media.clockPlaying=!!data.playing;\n    renderTimeline(media,media.clockPosition,duration)\n  }\n  setSystemAvailability(data);\n  if(media.volumePending!==null&&Number.isFinite(data.volume)&&Math.abs(data.volume-media.volumePending)<=1)media.volumePending=null;\n  if(media.volumePending===null&&now>=media.volumeHold&&document.activeElement!==media.volume&&Number.isFinite(data.volume)){\n    displayMasterVolume(data.volume)\n  }\n  setPlayIcon($(\'#system-play-shape\'),$(\'#system-toggle\'),!!data.playing)\n}\nfunction tickSystem(){\n  const media=state.system;\n  if(document.hidden||media.skipPending||!media.clockPlaying||media.dragging||!media.clockAt||media.duration<=0)return;\n  renderTimeline(media,Math.min(media.duration,media.clockPosition+(performance.now()-media.clockAt)/1000),media.duration)\n}\nasync function pollSystem(force=false){\n  const media=state.system;\n  if(media.polling){if(force)media.repoll=true;return}\n  media.polling=true;\n  try{renderSystem(await api(\'/api/system-media\'))}\n  catch(error){resetSystemPosition();systemPositionError(\'System media update failed: \'+(error?.message||String(error)))}\n  finally{media.polling=false;if(media.repoll){media.repoll=false;pollSystem()}}\n}\nasync function pollLocal(){const media=state.local;if(media.polling)return;media.polling=true;try{if(!$(\'#pc\').classList.contains(\'hidden\')){const data=await api(\'/api/player\');$(\'#now-title\').textContent=data.title||\'Nothing playing\';updateLocalNowArtwork(data.cover||\'\');$(\'#now-details\').textContent=[data.artist,data.album].filter(Boolean).join(\' • \')||(data.path||\'\');renderTimeline(media,data.currentTime,data.duration);if(media.volumePending!==null&&Number.isFinite(data.volume)&&Math.abs(data.volume-media.volumePending)<=1){media.volumePending=null}if(media.volumePending===null&&performance.now()>=media.volumeHold&&document.activeElement!==media.volume&&Number.isFinite(data.volume)){displayMasterVolume(data.volume)}$(\'#shuffle\').disabled=!data.canShuffleQueue;$(\'#repeat\').textContent=\'Repeat \'+({off:\'Off\',all:\'All\',one:\'1\'}[data.repeat]||\'Off\');$(\'#repeat\').classList.toggle(\'active\',data.repeat!==\'off\');setPlayIcon($(\'#local-play-shape\'),document.querySelector(\'[data-cmd="toggle"]\'),data.playing)}}catch(error){note(error.message,true)}finally{media.polling=false}}\n\nfunction bindSeek(media,url){\n  const slider=media.slider;\n  const begin=()=>{media.dragging=true;slider.classList.add(\'dragging\')};\n  const end=()=>{media.dragging=false;slider.classList.remove(\'dragging\')};\n  slider.addEventListener(\'pointerdown\',begin);\n  slider.addEventListener(\'pointercancel\',end);\n  slider.addEventListener(\'touchstart\',begin,{passive:true});\n  slider.oninput=()=>{media.dragging=true;const value=Number(slider.value);fill(slider,value,media.duration);media.elapsed.textContent=fmt(value)};\n  slider.onchange=async()=>{const target=Math.max(0,Number(slider.value)||0);end();try{await post(url,{seconds:target});if(media===state.system)await pollSystem(true)}catch(error){note(error.message,true);if(media===state.system)await pollSystem(true)}};\n}\nfunction displayMasterVolume(value,origin=null){\n  const v=Number(value);\n  if(!Number.isFinite(v))return;\n  for(const media of [state.system,state.local]){\n    if(media!==origin && (document.activeElement===media.volume || media.volumePending!==null))continue;\n    media.volume.value=String(v);fill(media.volume,v,100)\n  }\n}\nlet volumeWriteQueue=Promise.resolve();\nfunction bindVolume(media,url){\n  const control=media.volume;\n  const send=()=>{\n    const value=Math.max(0,Math.min(100,Number(control.value)||0));\n    for(const item of [state.system,state.local]){\n      item.volumeHold=performance.now()+1500;item.volumePending=value;\n    }\n    for(const item of [state.system,state.local]){item.volume.value=String(value);fill(item.volume,value,100)}\n    volumeWriteQueue=volumeWriteQueue.catch(()=>{}).then(()=>post(url,{volume:value}));\n    volumeWriteQueue.then(result=>{\n      const actual=Number(result.volume);\n      if(Number.isFinite(actual)){\n        for(const item of [state.system,state.local])item.volumePending=null;\n        displayMasterVolume(actual)\n      }\n    }).catch(error=>{\n      for(const item of [state.system,state.local])item.volumePending=null;\n      note(error.message,true);pollSystem(true);pollLocal()\n    })\n  };\n  control.oninput=()=>{\n    const value=Number(control.value);\n    media.volumeHold=performance.now()+1500;\n    for(const item of [state.system,state.local]){item.volume.value=String(value);fill(item.volume,value,100)}\n    clearTimeout(media.volumeTimer);media.volumeTimer=setTimeout(send,90)\n  };\n  control.onchange=()=>{clearTimeout(media.volumeTimer);send()}\n}\n\nfunction coverNode(url,large=false){const node=document.createElement(url?\'img\':\'div\');node.className=\'cover-art\'+(large?\' large\':\'\')+(url?\'\':\' cover-fallback\');if(url){node.src=url;node.loading=large?\'eager\':\'lazy\';node.alt=\'Album cover\';node.onerror=()=>{const fallback=coverNode(\'\',large);fallback.id=node.id;fallback.dataset.failedCover=url;node.replaceWith(fallback)}}else{node.textContent=\'♫\';node.setAttribute(\'aria-label\',\'No album art\')}return node}\nlet localNowArtworkURL=\'\';\nfunction updateLocalNowArtwork(url){const next=url||\'\';if(next===localNowArtworkURL)return;localNowArtworkURL=next;const tile=$(\'#now-cover\');tile.replaceChildren();if(!next)return;const image=document.createElement(\'img\');image.alt=\'\';image.decoding=\'async\';image.addEventListener(\'error\',()=>image.remove(),{once:true});image.src=next;tile.appendChild(image)}\nfunction updateCover(id,url){const current=$(\'#\'+id);if(!current)return;if(url&&((current.tagName===\'IMG\'&&current.getAttribute(\'src\')===url)||current.dataset.failedCover===url))return;if(!url&&current.classList.contains(\'cover-fallback\'))return;const next=coverNode(url,true);next.id=id;current.replaceWith(next)}\nfunction render(sel,data,query){const list=$(sel);list.replaceChildren();const term=query.toLowerCase();const filtered=data.filter(song=>!term||[song.title,song.artist,song.album,song.relative].join(\' \').toLowerCase().includes(term));if(!filtered.length){const empty=document.createElement(\'div\');empty.className=\'card details\';empty.textContent=query?\'No matches\':\'Nothing here yet\';list.append(empty);return}const fragment=document.createDocumentFragment();for(const song of filtered){const button=document.createElement(\'button\');button.className=\'item\';button.innerHTML=\'<span class="name"></span><span class="meta"></span>\';button.children[0].textContent=song.title;button.children[1].textContent=[song.artist,song.album].filter(Boolean).join(\' • \')||song.relative;const wrap=document.createElement(\'div\');wrap.className=\'item-cover\';const copy=document.createElement(\'div\');copy.className=\'copy\';copy.append(...button.children);wrap.append(coverNode(song.cover),copy);button.append(wrap);button.onclick=async()=>{try{await busy(button,()=>post(\'/api/play/song\',{path:song.path}),\'Playing…\');note(\'Playing \'+song.title);await refreshVolatile()}catch(error){note(error.message,true)}};fragment.append(button)}list.append(fragment)}\nconst MODE_LABELS={ipad_ipad:\'External\',laptop_laptop:\'Laptop\',ipad_laptop:\'Laptop\',ipad_both:\'Both\',laptop_ipad:\'External\',laptop_both:\'Both\'};const LOCAL_MODES=new Set([\'ipad_laptop\',\'ipad_both\',\'laptop_laptop\',\'laptop_both\']);let pendingMode=null,outputTopology=null,lastOutputRefresh=0,outputProfileBusy=false;const outputCard=$(\'#output-card\'),outputProfile=$(\'#output-profile\'),outputRoute=$(\'#output-route\'),outputSink=$(\'#output-sink\');function selectedCard(){return outputTopology?.cards.find(item=>item.name===outputCard.value)}\nfunction compactOutputLabel(value){\n  return String(value||\'\').replace(/^\\[UNAVAILABLE\\] /,\'[N/A] \')\n    .replace(/^\\[INTERNAL\\] /,\'[INT] \').trim();\n}\nfunction availableOption(row,profile){\n  return row.available!==\'no\'&&row.available!==\'false\'&&\n    ![\'off\',\'[out] off\'].includes(String(row.name||\'\').toLowerCase())&&\n    (!row.profiles?.length||row.profiles.map(String).includes(String(profile)));\n}\nfunction fillRoutes(preferred=\'\'){\n  const card=selectedCard(),profile=outputProfile.value,old=preferred||outputRoute.value;\n  outputRoute.replaceChildren();\n  for(const route of card?.routes||[]){\n    const blocked=!availableOption(route,profile);\n    const option=new Option((blocked?\'[UNAVAILABLE] \':\'\')+compactOutputLabel(route.label),String(route.index));\n    option.disabled=blocked;outputRoute.add(option);\n  }\n  const options=[...outputRoute.options],saved=outputTopology?.saved?.port;\n  const choice=[old,saved,...(card?.activeRoutes||[]).map(String)].find(value=>options.some(o=>o.value===value&&!o.disabled));\n  if(choice!==undefined)outputRoute.value=choice;\n  else outputRoute.selectedIndex=-1;\n  fillSinks();\n}\nfunction fillSinks(preferred=\'\'){\n  const card=selectedCard(),route=card?.routes.find(item=>String(item.index)===outputRoute.value);\n  const devices=(route?.devices||[]).map(String),prior=preferred||outputSink.value;\n  outputSink.replaceChildren();\n  if(!card)return;\n  for(const sink of card.sinks||[]){\n    const incompatible=!!sink.internal||\n      (devices.length>0&&sink.profileDevice!=null&&!devices.includes(String(sink.profileDevice)));\n    const option=new Option((incompatible&&!sink.internal?\'[UNAVAILABLE] \':\'\')+compactOutputLabel(sink.label),sink.name);\n    option.disabled=incompatible;outputSink.add(option);\n  }\n  const options=[...outputSink.options];\n  const choice=[prior,outputTopology?.saved?.sink].find(value=>options.some(o=>o.value===value&&!o.disabled));\n  if(choice!==undefined)outputSink.value=choice;\n  else outputSink.selectedIndex=options.findIndex(o=>!o.disabled);\n}\nfunction fillProfiles(preferred=\'\'){\n  const card=selectedCard(),old=preferred||outputProfile.value;outputProfile.replaceChildren();\n  for(const profile of card?.profiles||[]){\n    const blocked=!availableOption(profile);\n    const option=new Option((blocked?\'[UNAVAILABLE] \':\'\')+compactOutputLabel(profile.label),String(profile.index));\n    option.disabled=blocked;outputProfile.add(option);\n  }\n  const options=[...outputProfile.options];\n  const choice=[old,String(card?.activeProfile),outputTopology?.rememberedProfiles?.[card?.name]].find(value=>options.some(o=>o.value===value&&!o.disabled));\n  if(choice!==undefined)outputProfile.value=choice;else outputProfile.selectedIndex=-1;\n  fillRoutes();\n}\nfunction fillCards(preferred=\'\'){\n  const previous=preferred||outputCard.value;outputCard.replaceChildren();\n  for(const card of outputTopology?.cards||[]){\n    const option=new Option(compactOutputLabel(card.label),card.name);option.disabled=!!card.internal;outputCard.add(option);\n  }\n  const options=[...outputCard.options];\n  const choice=[previous,outputTopology?.saved?.card].find(value=>options.some(o=>o.value===value&&!o.disabled));\n  if(choice!==undefined)outputCard.value=choice;\n  else outputCard.selectedIndex=options.findIndex(o=>!o.disabled);\n  fillProfiles();\n}\nasync function refreshDevicePicker(cardName){\n  outputTopology=await api(\'/api/outputs\');lastOutputRefresh=performance.now();fillCards(cardName);\n}\n\nasync function applyMode(mode,output=null){const b=document.querySelector(`[data-mode="${mode}"]`);try{await busy(b,()=>post(\'/api/mode\',{mode,password:$(\'#group-password\').value,output}),\'Applying audio route…\',\'Audio route activated\',true);await refreshAll()}catch(error){note(error.message,true)}}\n\nlet outputStep=\'card\';\nconst outputSteps=[\'card\',\'profile\',\'route\',\'sink\'];\nfunction showOutputStep(step){\n  outputStep=step;\n  for(const name of outputSteps)$(\'#output-\'+name+\'-step\').classList.toggle(\'hidden\',name!==step);\n  $(\'#output-cancel\').textContent=\'Back\';$(\'#output-next\').textContent=step===\'sink\'?\'Select sink\':\'Select\';\n}\nfunction nextOutputStep(){\n  const card=selectedCard();\n  if(outputStep===\'card\')showOutputStep(\'profile\');\n  else if(outputStep===\'profile\')showOutputStep(card?.routes?.length?\'route\':\'sink\');\n  else if(outputStep===\'route\')showOutputStep(\'sink\');\n}\nasync function chooseOutput(mode){await post(\'/api/output-preview-cancel\');await post(\'/api/output-preview-begin\');pendingMode=mode;outputTopology=await api(\'/api/outputs\');lastOutputRefresh=performance.now();const saved=outputTopology.saved||{};fillCards(saved.card);if(!selectedCard())throw Error(\'No available playback cards\');showOutputStep(\'card\');$(\'#output-mode-title\').textContent=MODE_LABELS[mode];$(\'#output-modal\').classList.remove(\'hidden\')}\nasync function commitOutput(){\n  if(outputProfileBusy||!pendingMode)return;\n  const card=selectedCard(),profile=outputProfile.value;\n  if(!card||card.internal)throw Error(\'Choose an available playback device\');\n  if(!outputProfile.selectedOptions[0]||outputProfile.selectedOptions[0].disabled)throw Error(\'Select an available profile\');\n  if(card.routes.length&&(!outputRoute.selectedOptions[0]||outputRoute.selectedOptions[0].disabled))throw Error(\'Select an available route\');\n  if(!outputSink.value||!outputSink.selectedOptions[0]||outputSink.selectedOptions[0].disabled)throw Error(\'Select an exposed playback sink\');\n  const output={card:card.name,profile,sink:outputSink.value,port:outputRoute.value};\n  outputProfileBusy=true;\n  try{\n    showTaskFeedback(\'Applying playback sink\',\'working\');\n    await post(\'/api/output-activate\',{output,mode:pendingMode,password:$(\'#group-password\').value});\n    outputTopology=await api(\'/api/outputs\');lastOutputRefresh=performance.now();fillCards(card.name);\n    $(\'#output-modal\').classList.add(\'hidden\');pendingMode=null;showOutputStep(\'card\');showTaskFeedback(\'Playback sink applied\',\'done\');await refreshAll();\n  }catch(error){showTaskFeedback(error.message,\'error\');await refreshDevicePicker(card.name)}\n  finally{outputProfileBusy=false}\n}\noutputCard.onchange=()=>{if(!outputProfileBusy)fillProfiles()};\noutputProfile.onchange=()=>{if(!outputProfileBusy)fillRoutes()};\noutputRoute.onchange=()=>{if(!outputProfileBusy)fillSinks()};\noutputSink.onchange=()=>{};\nfor(const [source,items] of [[\'External\',[\'ipad_ipad\',\'ipad_laptop\',\'ipad_both\']],[\'Laptop\',[\'laptop_ipad\',\'laptop_laptop\',\'laptop_both\']]]){const heading=document.createElement(\'div\');heading.className=\'source-heading\';heading.textContent=\'Playing from \'+source;$(\'#mode-grid\').append(heading);for(const key of items){const b=document.createElement(\'button\');b.className=\'action\';b.dataset.mode=key;b.textContent=MODE_LABELS[key];b.onclick=async()=>{try{if(LOCAL_MODES.has(key))await chooseOutput(key);else await applyMode(key)}catch(error){note(error.message,true)}};$(\'#mode-grid\').append(b)}}$(\'#output-next\').onclick=async()=>{\n  if(outputProfileBusy)return;\n  const selector={card:outputCard,profile:outputProfile,route:outputRoute,sink:outputSink}[outputStep];\n  if(!selector?.value||!selector.selectedOptions[0]||selector.selectedOptions[0].disabled){\n    showTaskFeedback(\'Select an available option\',\'error\');return;\n  }\n  if(outputStep===\'sink\'){commitOutput().catch(error=>showTaskFeedback(error.message,\'error\'));return;}\n  outputProfileBusy=true;\n  try{\n    if(outputStep===\'card\'){\n      const card=selectedCard();\n      if(!card||card.internal)throw Error(\'Choose an available playback device\');\n      // Apply the selected card\'s chosen profile only after Select.\n      showOutputStep(\'profile\');\n    }else if(outputStep===\'profile\'){\n      const card=selectedCard(),profile=outputProfile.value;\n      outputTopology=await post(\'/api/output-profile-stage\',{card:card.name,profile,mode:pendingMode});\n      fillCards(card.name);outputProfile.value=profile;fillRoutes();\n      showOutputStep(selectedCard()?.routes?.length?\'route\':\'sink\');\n    }else if(outputStep===\'route\'){\n      const card=selectedCard(),profile=outputProfile.value,route=outputRoute.value;\n      outputTopology=await post(\'/api/output-route-stage\',{card:card.name,profile,route,mode:pendingMode});\n      fillCards(card.name);outputProfile.value=profile;fillRoutes(route);showOutputStep(\'sink\');\n    }\n  }catch(error){showTaskFeedback(error.message,\'error\')}\n  finally{outputProfileBusy=false}\n};\nasync function closeOutputPicker(){\n  if(outputProfileBusy)return;\n  outputProfileBusy=true;\n  try{await post(\'/api/output-preview-cancel\')}catch(error){\n    showTaskFeedback(\'Could not clear output selection: \'+error.message,\'error\');\n    outputProfileBusy=false;return;\n  }\n  $(\'#output-modal\').classList.add(\'hidden\');pendingMode=null;outputTopology=null;\n  showOutputStep(\'card\');outputProfileBusy=false;\n}\n$(\'#output-cancel\').onclick=()=>{closeOutputPicker()}\n;function loadGroups(data){const state=data.groups,select=$(\'#group-select\');select.replaceChildren(...Object.entries(state.profiles).map(([key,g])=>new Option(key+\' • \'+g.group,key,key===state.active,key===state.active)));const show=()=>{const key=select.value||state.active,g=state.profiles[key];if(!g)return;$(\'#group-key\').value=key;$(\'#group-name\').value=g.group;$(\'#group-user\').value=g.username;$(\'#group-server\').value=g.server;$(\'#group-required\').checked=!!g.passwordRequired};select.onchange=show;show()}$(\'#save-group\').onclick=async()=>{try{await busy($(\'#save-group\'),()=>post(\'/api/groups/save\',{key:$(\'#group-key\').value,group:$(\'#group-name\').value,username:$(\'#group-user\').value,server:$(\'#group-server\').value,passwordRequired:$(\'#group-required\').checked}),\'Saving group…\',null,false);await refreshAll();note(\'Group profile saved\')}catch(error){note(error.message,true)}};$(\'#open-pc\').onclick=async()=>{try{show(\'pc\');await refreshStatic()}catch(error){note(error.message,true)}};\n$(\'#away-display-toggle\').onclick=async()=>{try{await busy($(\'#away-display-toggle\'),()=>post(\'/api/away-display\'),\'Switching away/display…\',null,false);await refreshVolatile()}catch(error){note(error.message,true)}};\n$(\'#pc-back\').onclick=()=>show(\'profiles\');\n$(\'#all-songs\').onclick=async()=>{try{all=(await api(\'/api/songs\')).songs;show(\'songs\');render(\'#song-list\',all,\'\');}catch(error){note(error.message,true)}};\n$(\'#song-search\').oninput=()=>render(\'#song-list\',all,$(\'#song-search\').value);\n$(\'#playlist-search\').oninput=()=>render(\'#playlist-songs\',inside,$(\'#playlist-search\').value);\ndocument.querySelectorAll(\'[data-back]\').forEach(button=>button.onclick=()=>show(button.dataset.back));\ndocument.querySelectorAll(\'[data-cmd]\').forEach(button=>button.onclick=async()=>{try{await busy(button,()=>post(\'/api/player/command\',{command:button.dataset.cmd}),\'…\',null,false);await pollLocal()}catch(error){note(error.message,true)}});\n$(\'#repeat\').onclick=async()=>{try{const data=await api(\'/api/player\');await post(\'/api/player/repeat\',{mode:{off:\'all\',all:\'one\',one:\'off\'}[data.repeat]||\'off\'});await pollLocal()}catch(error){note(error.message,true)}};\n$(\'#shuffle\').onclick=async()=>{try{await busy($(\'#shuffle\'),()=>post(\'/api/player/shuffle\'),\'Updating saved shuffle…\',\'Saved shuffle updated for next play\',true)}catch(error){note(error.message,true)}};\nfor(const [id,command] of [[\'system-previous\',\'previous\'],[\'system-toggle\',\'toggle\'],[\'system-next\',\'next\']])$(\'#\'+id).onclick=async()=>{if(command!==\'toggle\'){const media=state.system;media.skipPending=true;media.skipFrom=media.trackKey;media.skipStarted=performance.now();media.skipWarned=false;resetSystemPosition()}else{state.system.skipPending=false}try{await busy($(\'#\'+id),()=>post(\'/api/system-media\',{command}),\'…\',null,false);await pollSystem(true)}catch(error){if(command!==\'toggle\')systemPositionError(\'System media skip failed: \'+(error?.message||String(error)));else note(error.message,true)}};\n$(\'#audio-toggle\').onclick=async()=>{try{await busy($(\'#audio-toggle\'),()=>post(\'/api/audio-toggle\'),\'Switching audio services…\',\'Audio services updated\',true);await refreshStatic()}catch(error){note(error.message,true)}};\n$(\'#restart-camilla\').onclick=()=>busy($(\'#restart-camilla\'),()=>post(\'/api/restart-camilladsp\'),\'Restarting CamillaDSP…\',\'CamillaDSP restarted\',true).then(refreshStatic).catch(error=>note(error.message,true));\n$(\'#restart-sonobus\').onclick=()=>busy($(\'#restart-sonobus\'),()=>post(\'/api/restart-sonobus\'),\'Restarting SonoBus…\',\'SonoBus restarted\',true).then(refreshVolatile).catch(error=>note(error.message,true));\n$(\'#restart-airplay\').onclick=()=>busy($(\'#restart-airplay\'),()=>post(\'/api/restart-airplay\'),\'Restarting AirPlay…\',\'AirPlay restarted\',true).then(refreshVolatile).catch(error=>note(error.message,true));\n$(\'#restart-vnc\').onclick=()=>busy($(\'#restart-vnc\'),()=>post(\'/api/restart-vnc\'),\'Restarting VNC…\',\'VNC restarted\').catch(error=>note(error.message,true));\n$(\'#profile-search\').oninput=()=>{if(profileSnapshot)renderProfileSnapshot(profileSnapshot);else refreshStatic()};\nbindSeek(state.local,\'/api/player/seek\');bindSeek(state.system,\'/api/system-media/seek\');bindVolume(state.local,\'/api/player/volume\');bindVolume(state.system,\'/api/system-volume\');\nlet staticRefreshRunning=false,volatileRefreshRunning=false,profileSnapshot=null;\nfunction renderProfileSnapshot(data){\n  const query=$(\'#profile-search\').value.toLowerCase(),root=$(\'#profile-list\');\n  renderActiveProfile(data);root.replaceChildren();\n  const groups=new Map();\n  for(const name of data.profiles||[]){\n    const info=data.filters?.[name]||{group:\'Other\',label:name};\n    if(![name,info.group,info.label].some(value=>value.toLowerCase().includes(query)))continue;\n    if(!groups.has(info.group))groups.set(info.group,[]);\n    groups.get(info.group).push({name,label:info.label});\n  }\n  for(const [group,items] of groups){\n    const heading=document.createElement(\'div\');heading.className=\'section-title\';heading.textContent=group;root.append(heading);\n    const list=document.createElement(\'div\');list.className=\'list\';\n    for(const {name,label} of items){\n      const button=document.createElement(\'button\');\n      button.className=\'item\'+(name===data.active?\' active\':\'\');\n      const title=document.createElement(\'span\');title.className=\'name\';title.textContent=label;\n      button.append(title);\n      button.onclick=async()=>{try{await busy(button,()=>post(\'/api/select\',{profile:name}),\'Switching profile…\',\'Profile activated\',true);await refreshStatic()}catch(error){note(error.message,true)}};\n      list.append(button);\n    }\n    root.append(list);\n  }\n}\nfunction playlistAction(playlist,shuffle){\n  const button=document.createElement(\'button\');button.type=\'button\';button.className=\'playlist-icon\';\n  button.setAttribute(\'aria-label\',(shuffle?\'Play saved shuffle of \':\'Play \')+playlist.name);\n  button.title=(shuffle?\'Play saved shuffle\':\'Play playlist\')+\' · \'+playlist.name;\n  button.innerHTML=shuffle\n    ? \'<svg class="media-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h3c5 0 7 10 12 10h3m-4-4 4 4-4 4M3 17h3c2 0 3-1 4-3m3-4c1-2 2-3 5-3h3m-4-4 4 4-4 4"/></svg>\'\n    : \'<svg class="media-icon" viewBox="0 0 24 24" aria-hidden="true"><path class="icon-fill" d="M8 5.5 19 12 8 18.5z"/></svg>\';\n  button.onclick=()=>busy(button,()=>post(\'/api/play/playlist\',{name:playlist.name,shuffle}),\'…\',null,false).then(refreshVolatile).catch(error=>note(error.message,true));\n  return button\n}\nfunction renderPlaylistSnapshot(playlists){\n  const list=$(\'#playlists\');list.replaceChildren();\n  for(const playlist of playlists){\n    const row=document.createElement(\'div\');row.className=\'playlist-row\';\n    const open=document.createElement(\'button\');open.className=\'item playlist-open\';open.dataset.playlistName=playlist.name;open.innerHTML=\'<span class="name"></span><span class="meta"></span>\';open.children[0].textContent=playlist.name;open.children[1].textContent=playlist.count+(playlist.count===1?\' song\':\' songs\');const wrap=document.createElement(\'div\');wrap.className=\'item-cover\';const copy=document.createElement(\'div\');copy.className=\'copy\';copy.append(...open.children);wrap.append(coverNode(playlist.cover),copy);open.append(wrap);\n    open.onclick=async()=>{current=playlist.name;inside=(await api(\'/api/playlist?name=\'+encodeURIComponent(playlist.name))).songs;$(\'#playlist-title\').textContent=playlist.name;show(\'playlist\');render(\'#playlist-songs\',inside,\'\')};\n    const controls=document.createElement(\'div\');controls.className=\'playlist-controls\';\n    const play=playlistAction(playlist,false),shuffle=playlistAction(playlist,true);\n    controls.append(play,shuffle);row.append(open,controls);list.append(row)\n  }\n}\nfunction updatePlaylistCover(player){if(!player?.playlist||!player.playing)return;for(const button of document.querySelectorAll(\'#playlists [data-playlist-name]\')){if(button.dataset.playlistName!==player.playlist)continue;const old=button.querySelector(\'.item-cover .cover-art\');if(!old)continue;const url=player.cover||\'\';if(url&&old.tagName===\'IMG\'&&old.getAttribute(\'src\')===url)return;if(!url&&old.classList.contains(\'cover-fallback\'))return;old.replaceWith(coverNode(url))}}\nfunction renderVolatile(data){\n  $(\'#audio-toggle\').textContent=data.mode.mode===\'stopped\'?\'Start all audio\':\'Stop all audio\';\n  if(data.awayDisplay){const button=$(\'#away-display-toggle\');button.textContent=data.awayDisplay.displayOff?\'Show lock screen\':data.awayDisplay.away?\'Unlock desktop\':\'Away and display off\';button.setAttribute(\'aria-pressed\',String(!!data.awayDisplay.active));button.classList.toggle(\'mode-active\',!!data.awayDisplay.active)}\n  if(data.profiles)renderActiveProfile(data.profiles);\n  renderSonobusStatus(data.mode,data.groups);\n  $(\'#engine-status\').textContent=data.mode.camilla?\'Audio engine online\':\'Audio engine offline\';$(\'.dot\').style.opacity=data.mode.camilla?\'1\':\'.25\';\n  $(\'#source-title\').textContent=({ipad_external:\'External\',laptop_external:\'Laptop\',ipad_ipad:\'External\',ipad_laptop:\'Laptop\',ipad_both:\'Both\',laptop_ipad:\'External\',laptop_laptop:\'Laptop\',laptop_both:\'Both\'})[data.mode.mode]||data.mode.label;$(\'#source-details\').textContent=\'CamillaDSP \'+(data.mode.camilla?\'running\':\'stopped\')+\' • SonoBus \'+(data.mode.sonobus?\'on\':\'off\')+\' • AirPlay \'+(data.mode.airplay?\'on\':\'off\')+(data.mode.localWanted?\' • Output \'+(data.mode.localOutputLabel||\'Not selected\'):\'\');\n  document.querySelectorAll(\'[data-mode]\').forEach(button=>button.classList.toggle(\'mode-active\',button.dataset.mode===data.mode.mode));\n  updatePlaylistCover(data.player);\n  const local=data.player,lm=state.local;$(\'#now-title\').textContent=local.title||\'Nothing playing\';updateLocalNowArtwork(local.cover||\'\');$(\'#now-details\').textContent=[local.artist,local.album].filter(Boolean).join(\' • \')||(local.path||\'\');renderTimeline(lm,local.currentTime,local.duration);if(lm.volumePending===null&&document.activeElement!==lm.volume){displayMasterVolume(local.volume)}$(\'#shuffle\').disabled=!local.canShuffleQueue;$(\'#repeat\').textContent=\'Repeat \'+({off:\'Off\',all:\'All\',one:\'1\'}[local.repeat]||\'Off\');$(\'#repeat\').classList.toggle(\'active\',local.repeat!==\'off\');setPlayIcon($(\'#local-play-shape\'),document.querySelector(\'[data-cmd="toggle"]\'),local.playing)\n}\nasync function refreshStatic(){if(staticRefreshRunning)return;staticRefreshRunning=true;try{const data=await api(\'/api/state\');profileSnapshot=data.profiles;renderProfileSnapshot(data.profiles);renderPlaylistSnapshot(data.playlists);loadGroups(data);renderVolatile(data);renderSystem(data.systemMedia);return data}catch(error){note(error.message,true)}finally{staticRefreshRunning=false}}\nasync function refreshOutputPicker(){return}\nasync function refreshVolatile(){if(volatileRefreshRunning||document.hidden)return;volatileRefreshRunning=true;try{renderVolatile(await api(\'/api/volatile\'));await refreshOutputPicker()}catch(error){console.warn(\'volatile refresh failed\',error)}finally{volatileRefreshRunning=false}}\nrefreshAll=async()=>refreshStatic();\nrefreshStatic();window.addEventListener(\'pageshow\',event=>{if(event.persisted){refreshStatic();refreshVolatile()}});document.addEventListener(\'visibilitychange\',()=>{if(!document.hidden){refreshStatic();refreshVolatile()}});setInterval(refreshVolatile,1000);setInterval(()=>{if(!document.hidden)pollSystem()},1000);setInterval(tickSystem,250);\n</script></body></html>'
+PAGE='<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>CamillaDSP Studio</title><style>\n:root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display",sans-serif;--v:#865dff;--b:#3f8eff;--g:#35d6a0}*{box-sizing:border-box}body{margin:0;min-height:100svh;padding:22px 16px 36px;color:#fff;background:radial-gradient(900px 520px at 50% -150px,#6542a8,#211a38 44%,#070910);background-attachment:fixed}main{max-width:540px;margin:auto}.hidden{display:none!important}.hero,.card{border:1px solid #ffffff22;background:linear-gradient(145deg,#ffffff1c,#ffffff0d);box-shadow:inset 0 1px #ffffff22,0 20px 50px #0005;backdrop-filter:blur(22px)}.hero{padding:25px 22px;border-radius:29px}.card{padding:18px;border-radius:24px;margin:14px 0}.card+.grid{margin-top:14px}.eyebrow,.label,.section-title{color:#bcb7cb;text-transform:uppercase;letter-spacing:.1em;font-size:12px;font-weight:800}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--g);box-shadow:0 0 15px var(--g);margin-right:8px}h1{margin:10px 0 5px;font-size:32px;letter-spacing:-.04em}.subtitle,.details,.meta{color:#b9b4c5;font-size:13px}.section-title{margin:27px 3px 10px}.title{font-size:20px;font-weight:800;margin-top:6px;overflow-wrap:anywhere}.grid{display:grid;gap:10px}.two{grid-template-columns:1fr 1fr}.three{grid-template-columns:1fr 1.2fr 1fr}.pc-transport{margin-bottom:18px}.pc-library-actions{margin-top:18px}.wide{grid-column:1/-1}button,input{font:inherit}button{border:0;color:#fff;cursor:pointer}.action,.item,.transport,.back{width:100%;transition:transform .12s,filter .15s}.action:active,.item:active,.transport:active,.back:active{transform:scale(.96);filter:brightness(1.15)}.action{min-height:54px;border-radius:18px;background:#ffffff1b;font-weight:780}.primary{background:linear-gradient(135deg,var(--b),var(--v))}.green{background:linear-gradient(135deg,#24ae7c,#287d95)}.danger{background:linear-gradient(135deg,#e64e74,#8e2b4b)}.active{outline:2px solid #a783ff;background:linear-gradient(135deg,#4e82ff66,#8552ff77)!important}.search{width:100%;min-height:49px;border:1px solid #ffffff22;border-radius:17px;padding:12px 15px;color:#fff;background:#ffffff12;outline:0}.search:focus{border-color:#9b7aff;box-shadow:0 0 0 4px #825dff2e}.list{display:grid;gap:10px;margin-top:10px}.cover-art{width:48px;height:48px;flex:none;object-fit:cover;border-radius:11px;background:#ffffff18}.cover-art.large{width:100%;max-width:220px;height:auto;aspect-ratio:1;display:block;margin:0 auto 16px;border-radius:20px}.cover-fallback{display:grid;place-items:center;color:#c3b6f3;font-size:24px}.cover-fallback.large{display:grid;font-size:68px}.item-cover{display:flex;align-items:center;gap:12px;min-width:0}.item-cover .copy{min-width:0;flex:1;overflow-wrap:anywhere;font-size:16px;line-height:1.3}.item-cover .name{font-size:16px;line-height:1.3;font-weight:780}.item-cover .meta{font-size:13px;line-height:1.35;font-weight:400}.item{text-align:left;min-height:64px;padding:13px 15px;border-radius:19px;background:#ffffff16}.name{display:block;font-weight:780}.meta{display:block;margin-top:4px}.playlist-row{position:relative}\n.playlist-open{display:block;padding-right:120px;min-height:76px}\n.playlist-controls{position:absolute;right:12px;top:50%;transform:translateY(-50%);display:flex;gap:8px;z-index:1}\n.playlist-icon{display:grid;place-items:center;width:44px;height:44px;border:1px solid #ffffff38;border-radius:14px;background:#242036e8;box-shadow:0 4px 14px #0005}\n.playlist-icon:hover{background:#564282}\n.playlist-icon:active{transform:scale(.94)}\n.playlist-icon .media-icon{width:20px;height:20px}\n.playlist-icon.busy{font-size:20px}.header{display:grid;grid-template-columns:72px 1fr 72px;align-items:center}.header h1{text-align:center;font-size:23px}.back{min-height:43px;border-radius:15px;background:#ffffff18}.range{--fill:0%;width:100%;height:36px;background:transparent;appearance:none}.range::-webkit-slider-runnable-track{height:6px;border-radius:99px;background:linear-gradient(to right,#fff var(--fill),#ffffff2d var(--fill))}.range::-webkit-slider-thumb{appearance:none;width:21px;height:21px;margin-top:-7.5px;border-radius:50%;background:#fff;box-shadow:0 3px 10px #0008}.times{display:flex;justify-content:space-between;color:#aaa5b5;font-size:12px}.range-row{display:grid;grid-template-columns:24px 1fr 24px;align-items:center;gap:7px}.transport{display:grid;place-items:center;min-height:78px;border-radius:999px;background:#ffffff19}.transport.main{min-height:98px;background:linear-gradient(145deg,#9e68ff,#583ad2)}.media-icon{display:block;width:34px;height:34px;fill:none;stroke:#fff;stroke-width:2.15;stroke-linecap:round;stroke-linejoin:round;pointer-events:none}.transport.main .media-icon{width:42px;height:42px}.icon-fill{fill:#fff;stroke:#fff}.range{touch-action:none}.range.dragging::-webkit-slider-thumb{transform:scale(1.08)}.source-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}\n\n/* Final interaction and consistency pass */\nbutton{position:relative;overflow:hidden;-webkit-user-select:none;user-select:none;touch-action:manipulation}\nbutton:focus-visible,.search:focus-visible,.range:focus-visible{outline:2px solid #b79cff;outline-offset:3px}\nbutton:disabled{opacity:.58;cursor:default}\n.action,.item,.transport,.back{will-change:transform}\n.action.busy::after,.item.busy::after{content:"";position:absolute;inset:0;background:linear-gradient(105deg,transparent 25%,#ffffff2e 50%,transparent 75%);animation:ui-shine .8s linear infinite}\n@keyframes ui-shine{from{transform:translateX(-100%)}to{transform:translateX(100%)}}\n.transport{transition:transform .12s ease,filter .15s ease,box-shadow .2s ease}\n.transport.main.playing{box-shadow:0 18px 42px #6b45dd77,inset 0 1px #ffffff35}\n.media-icon{transition:transform .16s ease}.transport:active .media-icon{transform:scale(.9)}\n.range{cursor:pointer}.range.dragging::-webkit-slider-thumb{transform:scale(1.1)}\n.range::-webkit-slider-runnable-track{transition:background .08s linear}\n.mode-active{outline:2px solid #72e5bc;background:linear-gradient(135deg,#24ae7c,#287d95)!important}\n#repeat.active,#shuffle.active{outline:2px solid #a783ff;background:linear-gradient(135deg,#4e82ff66,#8552ff77)!important}\n.output-modal{position:fixed;inset:0;z-index:50;display:grid;place-items:end center;padding:18px;background:#05060bbb;backdrop-filter:blur(12px)}.output-sheet{width:min(100%,540px);max-height:82svh;overflow:auto;padding:20px;border:1px solid #ffffff2b;border-radius:26px;background:linear-gradient(145deg,#272139,#11131c);box-shadow:0 28px 80px #000b}.output-options{display:grid;gap:10px;margin:16px 0}.output-choice{display:grid;grid-template-columns:24px 1fr;gap:10px;align-items:center;padding:14px;border-radius:18px;background:#ffffff12}.output-options option:disabled{color:#999;opacity:.5}.output-choice input{width:20px;height:20px;accent-color:#865dff}.output-choice strong,.output-choice span{display:block}.output-choice span{margin-top:3px;color:#aaa5b5;font-size:11px;overflow-wrap:anywhere}.modal-actions{display:grid;grid-template-columns:1fr;gap:10px}\n\n@media (prefers-reduced-motion:reduce){*{animation-duration:.001ms!important;transition-duration:.001ms!important;scroll-behavior:auto!important}}\n\n/* Page rhythm and accessible navigation. */\n#profiles>.hero{margin-bottom:20px}\n#profiles>.action{display:block;margin:14px 0 20px}\n#profiles>.grid{margin-top:12px}\n#profiles>.section-title{margin-top:26px;margin-bottom:12px}\n#groups-page .header,#listening-page .header,#songs .header,#playlist .header,#pc .header{margin-bottom:18px}\n#groups-page .card{display:grid;gap:12px}\n#groups-page .card .search,#groups-page .card .action{margin:0}\n#groups-page .card label{display:flex;align-items:center;gap:9px}\n.card>.details{margin-top:6px}\n#pc .card>.label{margin-bottom:8px}\n#listening-page .search{margin-bottom:16px}\n#song-search,#playlist-search{display:block;margin:0 0 16px}\n#song-list,#playlist-songs{margin-top:0}\n.system-media-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}\n.card .range{display:block;margin-top:12px}\n.card .times{margin-top:2px}\n.card .range-row{margin:14px 0 16px}\n.card .grid{margin-top:14px}\n.range-row{grid-template-columns:24px minmax(0,1fr) 24px;gap:10px}\n.volume-icon{display:grid;place-items:center;color:#d6d3de;pointer-events:none}\n.volume-icon svg{display:block;width:20px;height:20px}\n.local-now-header{display:flex;align-items:center;gap:14px;min-width:0;margin:10px 0 16px}\n.local-now-copy{flex:1;min-width:0}\n.local-now-copy .details{margin-top:6px;overflow-wrap:anywhere}\n.local-now-artwork{flex:0 0 72px;width:72px;height:72px;position:relative;display:grid;place-items:center;overflow:hidden;border-radius:15px;background:linear-gradient(145deg,#433b68,#222d42);color:#c8c1e9;font-size:32px;line-height:1}\n.local-now-artwork::before{content:\'♫\'}\n.local-now-artwork img{position:absolute;inset:0;display:block;width:100%;height:100%;object-fit:cover}\n.back-to-top{position:fixed;z-index:40;top:max(14px,env(safe-area-inset-top));left:50%;transform:translateX(-50%);width:auto;min-height:44px;padding:9px 17px;border:1px solid #ffffff38;border-radius:999px;background:#262039f2;box-shadow:0 8px 28px #0009;white-space:nowrap;font-size:14px;font-weight:750;backdrop-filter:blur(14px)}\n.back-to-top:active{transform:translateX(-50%) scale(.96)}\n\n/* Playlist actions: clear affordance without changing the page layout. */\n.playlist-row{border-radius:19px;transition:background .16s ease}\n.playlist-row:hover{background:#ffffff08}\n.playlist-icon{transition:background .16s ease,border-color .16s ease,transform .12s ease}\n.playlist-icon:hover{border-color:#aa90ff;background:#493572}\n#shuffle:disabled{opacity:.42;cursor:not-allowed}\n#shuffle:not(:disabled){background:linear-gradient(135deg,#6252a7,#373b77)}\n\n/* Unified indigo, blue and mint palette. */\n:root{--v:#8574f5;--b:#6c9cff;--g:#55d9ae}\nbody{background:radial-gradient(900px 520px at 50% -150px,#514784,#1d2039 48%,#0b101b)}\n.hero,.card{border-color:#a8b7ef25;background:linear-gradient(145deg,#b8c8ff18,#a8b8ee0a)}\n.action:not(.primary):not(.green):not(.danger):not(.active){background:#a8b7ef1b}\n#shuffle:not(:disabled){background:linear-gradient(135deg,#6257ae,#465b99)}\n.playlist-icon{background:#242941e8;border-color:#b7c7ff38}\n.playlist-icon:hover{background:#414a77;border-color:#9caeff}\n.output-sheet{background:linear-gradient(145deg,#252b47,#111827)}\n\n/* Shared home palette and compact destination layout. */\n:root{--v:#8574f5;--b:#6c9cff;--g:#55d9ae}\n#profiles{max-width:480px;margin-inline:auto}\n#profiles>.hero{padding:17px 18px;border-radius:23px;margin-bottom:12px}\n#profiles>.hero h1{font-size:27px;margin:6px 0 3px}\n#profiles>.card{padding:16px;margin:10px 0;border-radius:21px}\n#profiles>.section-title{margin:18px 3px 8px}\n#profiles>.action{min-height:48px;margin:10px 0 12px;border-radius:16px}\n#profiles .source-grid{grid-template-columns:repeat(3,minmax(0,1fr));gap:9px;margin-top:8px}\n#profiles .source-grid .source-heading{grid-column:1/-1;color:#bcb7cb;font-size:11px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;margin:9px 2px 0}\n#profiles .source-grid .action{min-height:50px;padding:8px 5px;border-radius:15px;font-size:14px;line-height:1.2}\n#profiles .card .grid{margin-top:10px}\n#profiles .transport{min-height:64px}\n#profiles .transport.main{min-height:80px}\n#profiles .pc-transport{margin-bottom:12px}\n.output-options .hidden{display:none!important}</style></head><body><main>\n<section id="profiles"><div class="hero"><div class="eyebrow"><span class="dot"></span><span id="engine-status">Audio engine offline</span></div><h1>CamillaDSP Studio</h1><div class="subtitle">System audio, AirPlay and PC Music through CamillaDSP and SonoBus.</div></div><div class="section-title">System media</div><div class="card"><div class="system-media-heading"><div class="label">Active desktop player</div></div><div id="system-title" class="title">No system media</div><div id="system-details" class="details"></div><input id="system-seek" class="range" type="range" aria-label="System media playback position" min="0" max="1" step=".1"><div class="times"><span id="system-elapsed">0:00</span><span id="system-duration">0:00</span></div><div class="range-row"><span class="volume-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 4V5L7 9H3z"/></svg></span><input id="system-volume" class="range" type="range" aria-label="Master volume" min="0" max="100" value="100"><span class="volume-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M2 9v6h4l5 4V5L6 9H2z"/><path d="M14 8.2a5 5 0 0 1 0 7.6l1.4 1.4a7 7 0 0 0 0-10.4L14 8.2z"/><path d="M17 5.3a9 9 0 0 1 0 13.4l1.4 1.4a11 11 0 0 0 0-16.2L17 5.3z"/></svg></span></div><div class="grid three"><button id="system-previous" class="transport" aria-label="Previous"><svg class="media-icon" viewBox="0 0 24 24"><path d="M6 5v14"></path><path d="M18 6.5 8.5 12 18 17.5z"></path></svg></button><button id="system-toggle" class="transport main" aria-label="Play"><svg class="media-icon" viewBox="0 0 24 24"><path id="system-play-shape" class="icon-fill" d="M8 5.5 19 12 8 18.5z"></path></svg></button><button id="system-next" class="transport" aria-label="Next"><svg class="media-icon" viewBox="0 0 24 24"><path d="M18 5v14"></path><path d="M6 6.5 15.5 12 6 17.5z"></path></svg></button></div></div><button id="open-pc" class="action green">Local Music Library</button><button id="away-display-toggle" class="action" type="button" aria-pressed="false" style="margin-top:10px">Away and display off</button><div class="section-title">Audio source</div><div class="card"><div id="source-title" class="title">Loading…</div><div id="source-details" class="details"></div><div id="mode-grid" class="source-grid"></div></div><div class="section-title">SonoBus Group</div><div class="card"><div class="label">Selected group</div><div id="sonobus-group" class="title">Loading…</div><div id="sonobus-status" class="details">Checking SonoBus…</div></div><button id="open-groups" class="action">Manage SonoBus Group</button><div class="section-title">Active profile</div><div class="card"><div id="active-profile" class="title">Loading…</div><div id="active-state" class="details"></div></div><button id="open-listening" class="action">Select Listening Profile</button><div class="section-title" id="restart-heading">Restart services</div><div class="grid two" aria-labelledby="restart-heading"><button id="restart-camilla" class="action">Restart CamillaDSP</button><button id="restart-sonobus" class="action">Restart SonoBus</button><button id="restart-airplay" class="action">Restart AirPlay</button><button id="restart-vnc" class="action">Restart VNC</button></div><button id="audio-toggle" class="action danger" type="button" style="margin-top:16px;min-height:64px">Stop all audio</button></section>\n<section id="groups-page" class="hidden"><div class="header"><button data-back="profiles" class="back">Back</button><h1>SonoBus Group</h1><div></div></div><div class="card"><select id="group-select" class="search"></select><input id="group-key" class="search" placeholder="Profile name"><input id="group-name" class="search" placeholder="Group name"><input id="group-user" class="search" placeholder="Username"><input id="group-server" class="search" value="aoo.sonobus.net:10998" placeholder="Connection server"><label class="details"><input id="group-required" type="checkbox"> Password required</label><input id="group-password" class="search" type="password" placeholder="Password (never saved)"><button id="save-group" class="action primary">Save Group Profile</button></div></section>\n<section id="listening-page" class="hidden"><div class="header"><button data-back="profiles" class="back">Back</button><h1>Listening Profiles</h1><div></div></div><div class="section-title">Listening profiles</div><input id="profile-search" class="search" placeholder="Search profiles"><div id="profile-list"></div></section>\n<section id="pc" class="hidden"><div class="header"><button id="pc-back" class="back">Back</button><h1>PC Music</h1><div></div></div><div class="card"><div class="label">Now playing</div><div class="local-now-header"><span id="now-cover" class="local-now-artwork" aria-hidden="true"></span><div class="local-now-copy"><div id="now-title" class="title">Nothing playing</div><div id="now-details" class="details"></div></div></div><input id="seek" class="range" type="range" aria-label="Local music playback position" min="0" max="1" step=".1"><div class="times"><span id="elapsed">0:00</span><span id="duration">0:00</span></div><div class="range-row"><span class="volume-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 4V5L7 9H3z"/></svg></span><input id="volume" class="range" type="range" aria-label="Master volume" min="0" max="100" value="100"><span class="volume-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M2 9v6h4l5 4V5L6 9H2z"/><path d="M14 8.2a5 5 0 0 1 0 7.6l1.4 1.4a7 7 0 0 0 0-10.4L14 8.2z"/><path d="M17 5.3a9 9 0 0 1 0 13.4l1.4 1.4a11 11 0 0 0 0-16.2L17 5.3z"/></svg></span></div><div class="grid two"><button id="repeat" class="action">Repeat Off</button><button id="shuffle" class="action" title="Update the saved shuffled playlist without changing what is playing">Shuffle for next play</button></div></div><div class="grid three pc-transport"><button data-cmd="previous" class="transport" aria-label="Previous"><svg class="media-icon" viewBox="0 0 24 24"><path d="M6 5v14"></path><path d="M18 6.5 8.5 12 18 17.5z"></path></svg></button><button data-cmd="toggle" class="transport main" aria-label="Play"><svg class="media-icon" viewBox="0 0 24 24"><path id="local-play-shape" class="icon-fill" d="M8 5.5 19 12 8 18.5z"></path></svg></button><button data-cmd="next" class="transport" aria-label="Next"><svg class="media-icon" viewBox="0 0 24 24"><path d="M18 5v14"></path><path d="M6 6.5 15.5 12 6 17.5z"></path></svg></button></div><div class="grid pc-library-actions"><button id="all-songs" class="action primary">All Songs</button></div><div class="section-title">Playlists</div><div id="playlists" class="list"></div></section>\n<section id="songs" class="hidden"><div class="header"><button data-back="pc" class="back">Back</button><h1>All Songs</h1><div></div></div><input id="song-search" class="search" type="search" aria-label="Search all songs" placeholder="Search all songs"><div id="song-list" class="list"></div></section>\n<section id="playlist" class="hidden"><div class="header"><button data-back="pc" class="back">Back</button><h1 id="playlist-title">Playlist</h1><div></div></div><input id="playlist-search" class="search" type="search" aria-label="Search this playlist" placeholder="Search this playlist"><div id="playlist-songs" class="list"></div></section><button id="back-to-top" class="back-to-top hidden" type="button">Go back to top of page ↑</button><div id="output-modal" class="output-modal hidden"><div class="output-sheet"><div class="label">Laptop output</div><div id="output-mode-title" class="title">Choose output</div><div class="details">Select device, profile, route, then sink.</div><div class="output-options"><label class="details" id="output-card-step">Device<select id="output-card" class="search"></select></label><label class="details hidden" id="output-profile-step">Profile<select id="output-profile" class="search"></select></label><label class="details hidden" id="output-route-step">Route<select id="output-route" class="search"></select></label><label class="details hidden" id="output-sink-step">Sink<select id="output-sink" class="search"></select></label></div><div class="modal-actions"><button id="output-cancel" class="action">Back</button><button id="output-next" class="action primary">Select</button></div></div></div>\n</main><script>const $=selector=>document.querySelector(selector);\nconst screens=[\'profiles\',\'pc\',\'songs\',\'playlist\',\'groups-page\',\'listening-page\'].map(id=>$(\'#\'+id));\nlet all=[],inside=[],current=\'\';\n\nconst state={\n  system:{slider:$(\'#system-seek\'),elapsed:$(\'#system-elapsed\'),durationLabel:$(\'#system-duration\'),volume:$(\'#system-volume\'),duration:0,dragging:false,polling:false,repoll:false,clockPosition:0,clockAt:0,clockPlaying:false,lastAvailableAt:0,trackKey:\'\',skipPending:false,skipFrom:\'\',skipStarted:0,skipWarned:false,volumeHold:0,volumeTimer:null,volumePending:null},\n  local:{slider:$(\'#seek\'),elapsed:$(\'#elapsed\'),durationLabel:$(\'#duration\'),volume:$(\'#volume\'),duration:0,dragging:false,polling:false,volumeHold:0,volumeTimer:null,volumePending:null}\n};\n\nconst fmt=value=>{const v=Math.max(0,Number(value)||0);return Math.floor(v/60)+\':\'+String(Math.floor(v)%60).padStart(2,\'0\')};\nfunction show(id){screens.forEach(screen=>screen.classList.toggle(\'hidden\',screen.id!==id));scrollTo({top:0,behavior:\'smooth\'});updateBackToTop()}\nfunction updateBackToTop(){const visible=[\'songs\',\'playlist\'].some(id=>!$(\'#\'+id).classList.contains(\'hidden\'));$(\'#back-to-top\').classList.toggle(\'hidden\',!visible||window.scrollY<320)}\nwindow.addEventListener(\'scroll\',updateBackToTop,{passive:true});$(\'#back-to-top\').onclick=()=>window.scrollTo({top:0,behavior:\'smooth\'});$(\'#open-groups\').onclick=()=>show(\'groups-page\');$(\'#open-listening\').onclick=()=>show(\'listening-page\');\nfunction notificationBox(){const banners=[...document.querySelectorAll(\'#global-task-feedback\')];let banner=banners.shift()||null;banners.forEach(item=>item.remove());if(!banner){banner=document.createElement(\'div\');banner.id=\'global-task-feedback\';banner.setAttribute(\'role\',\'status\');banner.setAttribute(\'aria-live\',\'polite\');banner.style.cssText=\'position:fixed;left:12px;right:12px;top:12px;z-index:5000;box-sizing:border-box;padding:14px 64px 14px 18px;border-radius:14px;background:#152033;color:#eef5ff;border:1px solid #43638f;box-shadow:0 12px 32px rgba(0,0,0,.4);font-weight:700;text-align:center;\';const message=document.createElement(\'span\');message.className=\'task-feedback-message\';const close=document.createElement(\'button\');close.type=\'button\';close.className=\'task-feedback-close\';close.textContent=\'×\';close.setAttribute(\'aria-label\',\'Close notification\');close.style.cssText=\'position:absolute;right:8px;top:50%;transform:translateY(-50%);width:48px;height:48px;border:0;border-radius:12px;background:transparent;color:inherit;font-size:38px;font-weight:400;line-height:42px;cursor:pointer;\';close.addEventListener(\'click\',()=>{clearTimeout(showTaskFeedback.timer);banner.classList.add(\'hidden\')});banner.append(message,close);document.body.appendChild(banner)}return banner}function showTaskFeedback(message,kind=\'working\'){const banner=notificationBox(),messageNode=banner.querySelector(\'.task-feedback-message\');if(messageNode)messageNode.textContent=String(message||\'Working…\');banner.style.background=kind===\'done\'?\'#163d2b\':(kind===\'error\'?\'#4a2025\':\'#152033\');banner.style.borderColor=kind===\'done\'?\'#2f7654\':(kind===\'error\'?\'#a64b56\':\'#43638f\');banner.classList.remove(\'hidden\');clearTimeout(showTaskFeedback.timer);if(kind!==\'working\')showTaskFeedback.timer=setTimeout(()=>banner.classList.add(\'hidden\'),10000)}function note(message,error=false){if(error&&message)showTaskFeedback(message,\'error\')}\nasync function api(url,options={}){const response=await fetch(url,{cache:\'no-store\',...options});const data=await response.json().catch(()=>null);if(!data||typeof data!==\'object\'||Array.isArray(data))throw Error(\'Invalid server response\');if(!response.ok||data.ok===false)throw Error(data.error||\'Request failed\');return data}\nconst post=(url,data={})=>api(url,{method:\'POST\',headers:{\'Content-Type\':\'application/json\'},body:JSON.stringify(data)});\nfunction fill(element,value,maximum){const max=Number(maximum),v=Number(value);const percent=Number.isFinite(max)&&max>0&&Number.isFinite(v)?Math.max(0,Math.min(100,v/max*100)):0;element.style.setProperty(\'--fill\',percent+\'%\')}\nfunction renderTimeline(media,position,duration){\n  const total=Number.isFinite(Number(duration))?Math.max(0,Number(duration)):0;\n  const current=Number.isFinite(Number(position))?Math.max(0,Math.min(Number(position),total>0?total:Number(position))):0;\n  media.duration=total;\n  media.slider.max=String(total>0?total:1);\n  if(!media.dragging)media.slider.value=String(current);\n  const shown=media.dragging?Number(media.slider.value):current;\n  fill(media.slider,shown,total);\n  media.elapsed.textContent=fmt(shown);\n  media.durationLabel.textContent=fmt(total);\n}\n\nfunction renderActiveProfile(data){\n  const info=data.filters?.[data.active];\n  $(\'#active-profile\').textContent=data.active?(info?.group||\'Other\'):\'No profile\';\n  $(\'#active-state\').textContent=data.active?((info?.label||data.active)+\' · \'+(data.active===\'__no_filter__\'?\'Bypassed\':data.running?\'Running\':\'Stopped\')):\'Stopped\'\n}\nfunction renderSonobusStatus(mode,groups){\n  const selected=groups?.profiles?.[groups.active];\n  $(\'#sonobus-group\').textContent=selected?.group||\'No group selected\';\n  $(\'#sonobus-status\').textContent=(mode.sonobus?\'Process running\':\'Process stopped\')+\n    (selected?\' • Profile: \'+groups.active+\' • User: \'+selected.username:\'\')\n}\nasync function busy(button,work,label=\'Working…\',doneLabel=\'Done\',feedback=false){if(button.disabled)return;const original=button.innerHTML;button.disabled=true;button.classList.add(\'busy\');if(!button.classList.contains(\'transport\'))button.textContent=label;if(feedback)showTaskFeedback(label,\'working\');try{const result=await work();if(feedback&&doneLabel)showTaskFeedback(doneLabel,\'done\');return result}catch(error){showTaskFeedback(error?.message||String(error),\'error\');throw error}finally{button.disabled=false;button.classList.remove(\'busy\');button.innerHTML=original}}\nfunction setPlayIcon(shape,button,playing){if(!shape||!button)return;shape.setAttribute(\'d\',playing?\'M8 5h3v14H8z M14 5h3v14h-3z\':\'M8 5.5 19 12 8 18.5z\');button.setAttribute(\'aria-label\',playing?\'Pause\':\'Play\');button.classList.toggle(\'playing\',playing)}\n\nfunction setSystemAvailability(data){for(const id of [\'system-previous\',\'system-toggle\',\'system-next\'])$(\'#\'+id).disabled=!data.available;$(\'#system-seek\').disabled=!data.available||!data.seekable}\nfunction systemTrackKey(data){\n  if(!data||!data.available)return \'\';\n  return [data.player||\'\',data.trackId||\'\',data.title||\'\',data.artist||\'\',data.duration||\'\'].join(\'\\x1f\')\n}\nfunction resetSystemPosition(){\n  const media=state.system;\n  media.clockPlaying=false;media.clockAt=0;media.clockPosition=0;\n  media.dragging=false;media.slider.classList.remove(\'dragging\');\n  renderTimeline(media,0,0)\n}\nfunction systemPositionError(message){\n  const media=state.system;\n  if(!media.skipWarned){media.skipWarned=true;showTaskFeedback(message,\'error\')}\n}\nfunction renderSystem(data){\n  const media=state.system,now=performance.now();\n  if(!data||typeof data!==\'object\')return;\n  if(!data.available&&media.lastAvailableAt&&now-media.lastAvailableAt<1500){\n    if(media.skipPending)resetSystemPosition();\n    return\n  }\n  if(data.available)media.lastAvailableAt=now;\n  else media.lastAvailableAt=0;\n  $(\'#system-title\').textContent=data.title||\'No system media\';\n  $(\'#system-details\').textContent=[data.artist,data.player,data.status].filter(Boolean).join(\' • \');\n  const key=systemTrackKey(data),duration=Number(data.duration),position=data.position===null||data.position===undefined||data.position===\'\'?NaN:Number(data.position);\n  const valid=!!data.available&&Number.isFinite(duration)&&duration>0&&Number.isFinite(position)&&position>=0&&position<=duration+2;\n  if(media.skipPending){\n    // Ignore snapshots from the old track after the skip command.\n    const changed=key&&key!==media.skipFrom;\n    const restarted=key&&key===media.skipFrom&&valid&&position<=3;\n    if(!changed&&!restarted){\n      resetSystemPosition();\n      if(now-media.skipStarted>2000)systemPositionError(\'Could not confirm the new track position. Marker held at 0:00.\');\n      return\n    }\n    media.skipPending=false;media.skipWarned=false\n  }\n  media.trackKey=key;\n  if(!valid){\n    resetSystemPosition();\n    if(data.available)systemPositionError(\'System media position is unavailable or invalid. Marker held at 0:00.\');\n  }else{\n    media.skipWarned=false;\n    media.clockPosition=Math.min(position,duration);\n    media.clockAt=now;\n    media.clockPlaying=!!data.playing;\n    renderTimeline(media,media.clockPosition,duration)\n  }\n  setSystemAvailability(data);\n  if(media.volumePending!==null&&Number.isFinite(data.volume)&&Math.abs(data.volume-media.volumePending)<=1)media.volumePending=null;\n  if(media.volumePending===null&&now>=media.volumeHold&&document.activeElement!==media.volume&&Number.isFinite(data.volume)){\n    displayMasterVolume(data.volume)\n  }\n  setPlayIcon($(\'#system-play-shape\'),$(\'#system-toggle\'),!!data.playing)\n}\nfunction tickSystem(){\n  const media=state.system;\n  if(document.hidden||media.skipPending||!media.clockPlaying||media.dragging||!media.clockAt||media.duration<=0)return;\n  renderTimeline(media,Math.min(media.duration,media.clockPosition+(performance.now()-media.clockAt)/1000),media.duration)\n}\nasync function pollSystem(force=false){\n  const media=state.system;\n  if(media.polling){if(force)media.repoll=true;return}\n  media.polling=true;\n  try{renderSystem(await api(\'/api/system-media\'))}\n  catch(error){resetSystemPosition();systemPositionError(\'System media update failed: \'+(error?.message||String(error)))}\n  finally{media.polling=false;if(media.repoll){media.repoll=false;pollSystem()}}\n}\nasync function pollLocal(){const media=state.local;if(media.polling)return;media.polling=true;try{if(!$(\'#pc\').classList.contains(\'hidden\')){const data=await api(\'/api/player\');$(\'#now-title\').textContent=data.title||\'Nothing playing\';updateLocalNowArtwork(data.cover||\'\');$(\'#now-details\').textContent=[data.artist,data.album].filter(Boolean).join(\' • \')||(data.path||\'\');renderTimeline(media,data.currentTime,data.duration);if(media.volumePending!==null&&Number.isFinite(data.volume)&&Math.abs(data.volume-media.volumePending)<=1){media.volumePending=null}if(media.volumePending===null&&performance.now()>=media.volumeHold&&document.activeElement!==media.volume&&Number.isFinite(data.volume)){displayMasterVolume(data.volume)}$(\'#shuffle\').disabled=!data.canShuffleQueue;$(\'#repeat\').textContent=\'Repeat \'+({off:\'Off\',all:\'All\',one:\'1\'}[data.repeat]||\'Off\');$(\'#repeat\').classList.toggle(\'active\',data.repeat!==\'off\');setPlayIcon($(\'#local-play-shape\'),document.querySelector(\'[data-cmd="toggle"]\'),data.playing)}}catch(error){note(error.message,true)}finally{media.polling=false}}\n\nfunction bindSeek(media,url){\n  const slider=media.slider;\n  const begin=()=>{media.dragging=true;slider.classList.add(\'dragging\')};\n  const end=()=>{media.dragging=false;slider.classList.remove(\'dragging\')};\n  slider.addEventListener(\'pointerdown\',begin);\n  slider.addEventListener(\'pointercancel\',end);\n  slider.addEventListener(\'touchstart\',begin,{passive:true});\n  slider.oninput=()=>{media.dragging=true;const value=Number(slider.value);fill(slider,value,media.duration);media.elapsed.textContent=fmt(value)};\n  slider.onchange=async()=>{const target=Math.max(0,Number(slider.value)||0);end();try{await post(url,{seconds:target});if(media===state.system)await pollSystem(true)}catch(error){note(error.message,true);if(media===state.system)await pollSystem(true)}};\n}\nfunction displayMasterVolume(value,origin=null){\n  const v=Number(value);\n  if(!Number.isFinite(v))return;\n  for(const media of [state.system,state.local]){\n    if(media!==origin && (document.activeElement===media.volume || media.volumePending!==null))continue;\n    media.volume.value=String(v);fill(media.volume,v,100)\n  }\n}\nlet volumeWriteQueue=Promise.resolve();\nfunction bindVolume(media,url){\n  const control=media.volume;\n  const send=()=>{\n    const value=Math.max(0,Math.min(100,Number(control.value)||0));\n    for(const item of [state.system,state.local]){\n      item.volumeHold=performance.now()+1500;item.volumePending=value;\n    }\n    for(const item of [state.system,state.local]){item.volume.value=String(value);fill(item.volume,value,100)}\n    volumeWriteQueue=volumeWriteQueue.catch(()=>{}).then(()=>post(url,{volume:value}));\n    volumeWriteQueue.then(result=>{\n      const actual=Number(result.volume);\n      if(Number.isFinite(actual)){\n        for(const item of [state.system,state.local])item.volumePending=null;\n        displayMasterVolume(actual)\n      }\n    }).catch(error=>{\n      for(const item of [state.system,state.local])item.volumePending=null;\n      note(error.message,true);pollSystem(true);pollLocal()\n    })\n  };\n  control.oninput=()=>{\n    const value=Number(control.value);\n    media.volumeHold=performance.now()+1500;\n    for(const item of [state.system,state.local]){item.volume.value=String(value);fill(item.volume,value,100)}\n    clearTimeout(media.volumeTimer);media.volumeTimer=setTimeout(send,90)\n  };\n  control.onchange=()=>{clearTimeout(media.volumeTimer);send()}\n}\n\nfunction coverNode(url,large=false){const node=document.createElement(url?\'img\':\'div\');node.className=\'cover-art\'+(large?\' large\':\'\')+(url?\'\':\' cover-fallback\');if(url){node.src=url;node.loading=large?\'eager\':\'lazy\';node.alt=\'Album cover\';node.onerror=()=>{const fallback=coverNode(\'\',large);fallback.id=node.id;fallback.dataset.failedCover=url;node.replaceWith(fallback)}}else{node.textContent=\'♫\';node.setAttribute(\'aria-label\',\'No album art\')}return node}\nlet localNowArtworkURL=\'\';\nfunction updateLocalNowArtwork(url){const next=url||\'\';if(next===localNowArtworkURL)return;localNowArtworkURL=next;const tile=$(\'#now-cover\');tile.replaceChildren();if(!next)return;const image=document.createElement(\'img\');image.alt=\'\';image.decoding=\'async\';image.addEventListener(\'error\',()=>image.remove(),{once:true});image.src=next;tile.appendChild(image)}\nfunction render(sel,data,query){const list=$(sel);list.replaceChildren();const term=query.toLowerCase();const filtered=data.filter(song=>!term||[song.title,song.artist,song.album,song.relative].join(\' \').toLowerCase().includes(term));if(!filtered.length){const empty=document.createElement(\'div\');empty.className=\'card details\';empty.textContent=query?\'No matches\':\'Nothing here yet\';list.append(empty);return}const fragment=document.createDocumentFragment();for(const song of filtered){const button=document.createElement(\'button\');button.className=\'item\';button.innerHTML=\'<span class="name"></span><span class="meta"></span>\';button.children[0].textContent=song.title;button.children[1].textContent=[song.artist,song.album].filter(Boolean).join(\' • \')||song.relative;const wrap=document.createElement(\'div\');wrap.className=\'item-cover\';const copy=document.createElement(\'div\');copy.className=\'copy\';copy.append(...button.children);wrap.append(coverNode(song.cover),copy);button.append(wrap);button.onclick=async()=>{try{await busy(button,()=>post(\'/api/play/song\',{path:song.path}),\'Playing…\');note(\'Playing \'+song.title);await refreshVolatile()}catch(error){note(error.message,true)}};fragment.append(button)}list.append(fragment)}\nconst MODE_LABELS={ipad_ipad:\'External\',laptop_laptop:\'Laptop\',ipad_laptop:\'Laptop\',ipad_both:\'Both\',laptop_ipad:\'External\',laptop_both:\'Both\'};const LOCAL_MODES=new Set([\'ipad_laptop\',\'ipad_both\',\'laptop_laptop\',\'laptop_both\']);let pendingMode=null,outputTopology=null,outputProfileBusy=false,outputPreviewToken=null;const outputCard=$(\'#output-card\'),outputProfile=$(\'#output-profile\'),outputRoute=$(\'#output-route\'),outputSink=$(\'#output-sink\');function selectedCard(){return outputTopology?.cards.find(item=>item.name===outputCard.value)}\nfunction compactOutputLabel(value){\n  return String(value||\'\').replace(/^\\[UNAVAILABLE\\] /,\'[N/A] \')\n    .replace(/^\\[INTERNAL\\] /,\'[INT] \').trim();\n}\nfunction availableOption(row,profile){\n  return row.available!==\'no\'&&row.available!==\'false\'&&\n    ![\'off\',\'[out] off\'].includes(String(row.name||\'\').toLowerCase())&&\n    (!row.profiles?.length||row.profiles.map(String).includes(String(profile)));\n}\nfunction fillRoutes(preferred=\'\'){\n  const card=selectedCard(),profile=outputProfile.value,old=preferred||outputRoute.value;\n  outputRoute.replaceChildren();\n  for(const route of card?.routes||[]){\n    const blocked=!availableOption(route,profile);\n    const option=new Option((blocked?\'[UNAVAILABLE] \':\'\')+compactOutputLabel(route.label),String(route.index));\n    option.disabled=blocked;outputRoute.add(option);\n  }\n  const options=[...outputRoute.options],saved=outputTopology?.saved?.port;\n  const choice=[old,saved,...(card?.activeRoutes||[]).map(String)].find(value=>options.some(o=>o.value===value&&!o.disabled));\n  if(choice!==undefined)outputRoute.value=choice;\n  else outputRoute.selectedIndex=-1;\n  fillSinks();\n}\nfunction fillSinks(preferred=\'\'){\n  const card=selectedCard(),route=card?.routes.find(item=>String(item.index)===outputRoute.value);\n  const devices=(route?.devices||[]).map(String),prior=preferred||outputSink.value;\n  outputSink.replaceChildren();\n  if(!card)return;\n  for(const sink of card.sinks||[]){\n    const incompatible=!!sink.internal||\n      (devices.length>0&&sink.profileDevice!=null&&!devices.includes(String(sink.profileDevice)));\n    const option=new Option((incompatible&&!sink.internal?\'[UNAVAILABLE] \':\'\')+compactOutputLabel(sink.label),sink.name);\n    option.disabled=incompatible;outputSink.add(option);\n  }\n  const options=[...outputSink.options];\n  const choice=[prior,outputTopology?.saved?.sink].find(value=>options.some(o=>o.value===value&&!o.disabled));\n  if(choice!==undefined)outputSink.value=choice;\n  else outputSink.selectedIndex=options.findIndex(o=>!o.disabled);\n}\nfunction fillProfiles(preferred=\'\'){\n  const card=selectedCard(),old=preferred||outputProfile.value;outputProfile.replaceChildren();\n  for(const profile of card?.profiles||[]){\n    const blocked=!availableOption(profile);\n    const option=new Option((blocked?\'[UNAVAILABLE] \':\'\')+compactOutputLabel(profile.label),String(profile.index));\n    option.disabled=blocked;outputProfile.add(option);\n  }\n  const options=[...outputProfile.options];\n  const choice=[old,String(card?.activeProfile),outputTopology?.rememberedProfiles?.[card?.name]].find(value=>options.some(o=>o.value===value&&!o.disabled));\n  if(choice!==undefined)outputProfile.value=choice;else outputProfile.selectedIndex=-1;\n  fillRoutes();\n}\nfunction fillCards(preferred=\'\'){\n  const previous=preferred||outputCard.value;outputCard.replaceChildren();\n  for(const card of outputTopology?.cards||[]){\n    const option=new Option(compactOutputLabel(card.label),card.name);option.disabled=!!card.internal;outputCard.add(option);\n  }\n  const options=[...outputCard.options];\n  const choice=[previous,outputTopology?.saved?.card].find(value=>options.some(o=>o.value===value&&!o.disabled));\n  if(choice!==undefined)outputCard.value=choice;\n  else outputCard.selectedIndex=options.findIndex(o=>!o.disabled);\n  fillProfiles();\n}\nasync function refreshDevicePicker(cardName){\n  outputTopology=await api(\'/api/outputs\');fillCards(cardName);\n}\n\nasync function applyMode(mode,output=null){const b=document.querySelector(`[data-mode="${mode}"]`);try{await busy(b,()=>post(\'/api/mode\',{mode,password:$(\'#group-password\').value,output}),\'Applying audio route…\',\'Audio route activated\',true);await refreshAll()}catch(error){note(error.message,true)}}\n\nlet outputStep=\'card\';\nconst outputSteps=[\'card\',\'profile\',\'route\',\'sink\'];\nfunction showOutputStep(step){\n  outputStep=step;\n  for(const name of outputSteps)$(\'#output-\'+name+\'-step\').classList.toggle(\'hidden\',name!==step);\n  $(\'#output-cancel\').textContent=\'Back\';$(\'#output-next\').textContent=step===\'sink\'?\'Select sink\':\'Select\';\n}\nasync function chooseOutput(mode){\n  const topology=await api(\'/api/outputs\');\n  if(!topology.cards?.some(card=>!card.internal))throw Error(\'No available playback cards\');\n  const preview=await post(\'/api/output-preview-begin\');\n  const token=preview.previewToken;\n  try{\n    outputPreviewToken=token;pendingMode=mode;outputTopology=topology;\n    fillCards(topology.saved?.card||\'\');\n    if(!selectedCard())throw Error(\'No available playback cards\');\n    showOutputStep(\'card\');$(\'#output-mode-title\').textContent=MODE_LABELS[mode];\n    $(\'#output-modal\').classList.remove(\'hidden\');\n  }catch(error){\n    try{await post(\'/api/output-preview-cancel\',{token})}\n    catch(rollback){throw Error(error.message+\'; preview rollback failed: \'+rollback.message)}\n    outputPreviewToken=null;pendingMode=null;outputTopology=null;throw error;\n  }\n}\nasync function commitOutput(){\n  if(outputProfileBusy||!pendingMode)return;\n  const card=selectedCard(),profile=outputProfile.value;\n  if(!card||card.internal)throw Error(\'Choose an available playback device\');\n  if(!outputProfile.selectedOptions[0]||outputProfile.selectedOptions[0].disabled)throw Error(\'Select an available profile\');\n  if(card.routes.length&&(!outputRoute.selectedOptions[0]||outputRoute.selectedOptions[0].disabled))throw Error(\'Select an available route\');\n  if(!outputSink.value||!outputSink.selectedOptions[0]||outputSink.selectedOptions[0].disabled)throw Error(\'Select an exposed playback sink\');\n  const output={card:card.name,profile,sink:outputSink.value,port:outputRoute.value};\n  outputProfileBusy=true;\n  try{\n    showTaskFeedback(\'Applying playback sink\',\'working\');\n    await post(\'/api/output-activate\',{output,mode:pendingMode,password:$(\'#group-password\').value,token:outputPreviewToken});\n    outputTopology=await api(\'/api/outputs\');fillCards(card.name);\n    $(\'#output-modal\').classList.add(\'hidden\');pendingMode=null;outputPreviewToken=null;showOutputStep(\'card\');showTaskFeedback(\'Playback sink applied\',\'done\');await refreshAll();\n  }catch(error){showTaskFeedback(error.message,\'error\');await refreshDevicePicker(card.name)}\n  finally{outputProfileBusy=false}\n}\noutputCard.onchange=()=>{if(!outputProfileBusy)fillProfiles()};\noutputProfile.onchange=()=>{if(!outputProfileBusy)fillRoutes()};\noutputRoute.onchange=()=>{if(!outputProfileBusy)fillSinks()};\nfor(const [source,items] of [[\'External\',[\'ipad_ipad\',\'ipad_laptop\',\'ipad_both\']],[\'Laptop\',[\'laptop_ipad\',\'laptop_laptop\',\'laptop_both\']]]){const heading=document.createElement(\'div\');heading.className=\'source-heading\';heading.textContent=\'Playing from \'+source;$(\'#mode-grid\').append(heading);for(const key of items){const b=document.createElement(\'button\');b.className=\'action\';b.dataset.mode=key;b.textContent=MODE_LABELS[key];b.onclick=async()=>{try{if(LOCAL_MODES.has(key))await chooseOutput(key);else await applyMode(key)}catch(error){note(error.message,true)}};$(\'#mode-grid\').append(b)}}$(\'#output-next\').onclick=async()=>{\n  if(outputProfileBusy)return;\n  const selector={card:outputCard,profile:outputProfile,route:outputRoute,sink:outputSink}[outputStep];\n  if(!selector?.value||!selector.selectedOptions[0]||selector.selectedOptions[0].disabled){\n    showTaskFeedback(\'Select an available option\',\'error\');return;\n  }\n  if(outputStep===\'sink\'){commitOutput().catch(error=>showTaskFeedback(error.message,\'error\'));return;}\n  outputProfileBusy=true;\n  try{\n    if(outputStep===\'card\'){\n      const card=selectedCard();\n      if(!card||card.internal)throw Error(\'Choose an available playback device\');\n      // Only Select triggers pause and normalization; changing the dropdown is read-only.\n      outputTopology=await post(\'/api/output-device-stage\',{card:card.name,token:outputPreviewToken});\n      fillCards(card.name);outputProfile.value=String(outputTopology.stageSelection.profile);fillRoutes(outputTopology.stageSelection.port);fillSinks(outputTopology.stageSelection.sink);showOutputStep(\'profile\');\n    }else if(outputStep===\'profile\'){\n      const card=selectedCard(),profile=outputProfile.value;\n      outputTopology=await post(\'/api/output-profile-stage\',{card:card.name,profile,mode:pendingMode,token:outputPreviewToken});\n      fillCards(card.name);outputProfile.value=profile;fillRoutes(outputTopology.stageSelection.port);fillSinks(outputTopology.stageSelection.sink);\n      \n      showOutputStep(selectedCard()?.routes?.length?\'route\':\'sink\');\n    }else if(outputStep===\'route\'){\n      const card=selectedCard(),profile=outputProfile.value,route=outputRoute.value;\n      outputTopology=await post(\'/api/output-route-stage\',{card:card.name,profile,route,mode:pendingMode,token:outputPreviewToken});\n      fillCards(card.name);outputProfile.value=profile;fillRoutes(route);fillSinks(outputTopology.stageSelection.sink);showOutputStep(\'sink\');\n    }\n  }catch(error){showTaskFeedback(error.message,\'error\')}\n  finally{outputProfileBusy=false}\n};\nasync function closeOutputPicker(){\n  if(outputProfileBusy)return;\n  outputProfileBusy=true;\n  try{await post(\'/api/output-preview-cancel\',{token:outputPreviewToken})}catch(error){\n    showTaskFeedback(\'Could not clear output selection: \'+error.message,\'error\');\n    outputProfileBusy=false;return;\n  }\n  $(\'#output-modal\').classList.add(\'hidden\');pendingMode=null;outputTopology=null;outputPreviewToken=null;\n  showOutputStep(\'card\');outputProfileBusy=false;\n}\n$(\'#output-cancel\').onclick=()=>{closeOutputPicker()}\n;function loadGroups(data){const state=data.groups,select=$(\'#group-select\');select.replaceChildren(...Object.entries(state.profiles).map(([key,g])=>new Option(key+\' • \'+g.group,key,key===state.active,key===state.active)));const show=()=>{const key=select.value||state.active,g=state.profiles[key];if(!g)return;$(\'#group-key\').value=key;$(\'#group-name\').value=g.group;$(\'#group-user\').value=g.username;$(\'#group-server\').value=g.server;$(\'#group-required\').checked=!!g.passwordRequired};select.onchange=show;show()}$(\'#save-group\').onclick=async()=>{try{await busy($(\'#save-group\'),()=>post(\'/api/groups/save\',{key:$(\'#group-key\').value,group:$(\'#group-name\').value,username:$(\'#group-user\').value,server:$(\'#group-server\').value,passwordRequired:$(\'#group-required\').checked}),\'Saving group…\',null,false);await refreshAll();note(\'Group profile saved\')}catch(error){note(error.message,true)}};$(\'#open-pc\').onclick=async()=>{try{show(\'pc\');await refreshStatic()}catch(error){note(error.message,true)}};\n$(\'#away-display-toggle\').onclick=async()=>{try{await busy($(\'#away-display-toggle\'),()=>post(\'/api/away-display\'),\'Switching away/display…\',null,false);await refreshVolatile()}catch(error){note(error.message,true)}};\n$(\'#pc-back\').onclick=()=>show(\'profiles\');\n$(\'#all-songs\').onclick=async()=>{try{all=(await api(\'/api/songs\')).songs;show(\'songs\');render(\'#song-list\',all,\'\');}catch(error){note(error.message,true)}};\n$(\'#song-search\').oninput=()=>render(\'#song-list\',all,$(\'#song-search\').value);\n$(\'#playlist-search\').oninput=()=>render(\'#playlist-songs\',inside,$(\'#playlist-search\').value);\ndocument.querySelectorAll(\'[data-back]\').forEach(button=>button.onclick=()=>show(button.dataset.back));\ndocument.querySelectorAll(\'[data-cmd]\').forEach(button=>button.onclick=async()=>{try{await busy(button,()=>post(\'/api/player/command\',{command:button.dataset.cmd}),\'…\',null,false);await pollLocal()}catch(error){note(error.message,true)}});\n$(\'#repeat\').onclick=async()=>{try{const data=await api(\'/api/player\');await post(\'/api/player/repeat\',{mode:{off:\'all\',all:\'one\',one:\'off\'}[data.repeat]||\'off\'});await pollLocal()}catch(error){note(error.message,true)}};\n$(\'#shuffle\').onclick=async()=>{try{await busy($(\'#shuffle\'),()=>post(\'/api/player/shuffle\'),\'Updating saved shuffle…\',\'Saved shuffle updated for next play\',true)}catch(error){note(error.message,true)}};\nfor(const [id,command] of [[\'system-previous\',\'previous\'],[\'system-toggle\',\'toggle\'],[\'system-next\',\'next\']])$(\'#\'+id).onclick=async()=>{if(command!==\'toggle\'){const media=state.system;media.skipPending=true;media.skipFrom=media.trackKey;media.skipStarted=performance.now();media.skipWarned=false;resetSystemPosition()}else{state.system.skipPending=false}try{await busy($(\'#\'+id),()=>post(\'/api/system-media\',{command}),\'…\',null,false);await pollSystem(true)}catch(error){if(command!==\'toggle\')systemPositionError(\'System media skip failed: \'+(error?.message||String(error)));else note(error.message,true)}};\n$(\'#audio-toggle\').onclick=async()=>{try{await busy($(\'#audio-toggle\'),()=>post(\'/api/audio-toggle\'),\'Switching audio services…\',\'Audio services updated\',true);await refreshStatic()}catch(error){note(error.message,true)}};\n$(\'#restart-camilla\').onclick=()=>busy($(\'#restart-camilla\'),()=>post(\'/api/restart-camilladsp\'),\'Restarting CamillaDSP…\',\'CamillaDSP restarted\',true).then(refreshStatic).catch(error=>note(error.message,true));\n$(\'#restart-sonobus\').onclick=()=>busy($(\'#restart-sonobus\'),()=>post(\'/api/restart-sonobus\'),\'Restarting SonoBus…\',\'SonoBus restarted\',true).then(refreshVolatile).catch(error=>note(error.message,true));\n$(\'#restart-airplay\').onclick=()=>busy($(\'#restart-airplay\'),()=>post(\'/api/restart-airplay\'),\'Restarting AirPlay…\',\'AirPlay restarted\',true).then(refreshVolatile).catch(error=>note(error.message,true));\n$(\'#restart-vnc\').onclick=()=>busy($(\'#restart-vnc\'),()=>post(\'/api/restart-vnc\'),\'Restarting VNC…\',\'VNC restarted\').catch(error=>note(error.message,true));\n$(\'#profile-search\').oninput=()=>{if(profileSnapshot)renderProfileSnapshot(profileSnapshot);else refreshStatic()};\nbindSeek(state.local,\'/api/player/seek\');bindSeek(state.system,\'/api/system-media/seek\');bindVolume(state.local,\'/api/player/volume\');bindVolume(state.system,\'/api/system-volume\');\nlet staticRefreshRunning=false,volatileRefreshRunning=false,profileSnapshot=null;\nfunction renderProfileSnapshot(data){\n  const query=$(\'#profile-search\').value.toLowerCase(),root=$(\'#profile-list\');\n  renderActiveProfile(data);root.replaceChildren();\n  const groups=new Map();\n  for(const name of data.profiles||[]){\n    const info=data.filters?.[name]||{group:\'Other\',label:name};\n    if(![name,info.group,info.label].some(value=>value.toLowerCase().includes(query)))continue;\n    if(!groups.has(info.group))groups.set(info.group,[]);\n    groups.get(info.group).push({name,label:info.label});\n  }\n  for(const [group,items] of groups){\n    const heading=document.createElement(\'div\');heading.className=\'section-title\';heading.textContent=group;root.append(heading);\n    const list=document.createElement(\'div\');list.className=\'list\';\n    for(const {name,label} of items){\n      const button=document.createElement(\'button\');\n      button.className=\'item\'+(name===data.active?\' active\':\'\');\n      const title=document.createElement(\'span\');title.className=\'name\';title.textContent=label;\n      button.append(title);\n      button.onclick=async()=>{try{await busy(button,()=>post(\'/api/select\',{profile:name}),\'Switching profile…\',\'Profile activated\',true);await refreshStatic()}catch(error){note(error.message,true)}};\n      list.append(button);\n    }\n    root.append(list);\n  }\n}\nfunction playlistAction(playlist,shuffle){\n  const button=document.createElement(\'button\');button.type=\'button\';button.className=\'playlist-icon\';\n  button.setAttribute(\'aria-label\',(shuffle?\'Play saved shuffle of \':\'Play \')+playlist.name);\n  button.title=(shuffle?\'Play saved shuffle\':\'Play playlist\')+\' · \'+playlist.name;\n  button.innerHTML=shuffle\n    ? \'<svg class="media-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h3c5 0 7 10 12 10h3m-4-4 4 4-4 4M3 17h3c2 0 3-1 4-3m3-4c1-2 2-3 5-3h3m-4-4 4 4-4 4"/></svg>\'\n    : \'<svg class="media-icon" viewBox="0 0 24 24" aria-hidden="true"><path class="icon-fill" d="M8 5.5 19 12 8 18.5z"/></svg>\';\n  button.onclick=()=>busy(button,()=>post(\'/api/play/playlist\',{name:playlist.name,shuffle}),\'…\',null,false).then(refreshVolatile).catch(error=>note(error.message,true));\n  return button\n}\nfunction renderPlaylistSnapshot(playlists){\n  const list=$(\'#playlists\');list.replaceChildren();\n  for(const playlist of playlists){\n    const row=document.createElement(\'div\');row.className=\'playlist-row\';\n    const open=document.createElement(\'button\');open.className=\'item playlist-open\';open.dataset.playlistName=playlist.name;open.innerHTML=\'<span class="name"></span><span class="meta"></span>\';open.children[0].textContent=playlist.name;open.children[1].textContent=playlist.count+(playlist.count===1?\' song\':\' songs\');const wrap=document.createElement(\'div\');wrap.className=\'item-cover\';const copy=document.createElement(\'div\');copy.className=\'copy\';copy.append(...open.children);wrap.append(coverNode(playlist.cover),copy);open.append(wrap);\n    open.onclick=async()=>{current=playlist.name;inside=(await api(\'/api/playlist?name=\'+encodeURIComponent(playlist.name))).songs;$(\'#playlist-title\').textContent=playlist.name;show(\'playlist\');render(\'#playlist-songs\',inside,\'\')};\n    const controls=document.createElement(\'div\');controls.className=\'playlist-controls\';\n    const play=playlistAction(playlist,false),shuffle=playlistAction(playlist,true);\n    controls.append(play,shuffle);row.append(open,controls);list.append(row)\n  }\n}\nfunction updatePlaylistCover(player){if(!player?.playlist||!player.playing)return;for(const button of document.querySelectorAll(\'#playlists [data-playlist-name]\')){if(button.dataset.playlistName!==player.playlist)continue;const old=button.querySelector(\'.item-cover .cover-art\');if(!old)continue;const url=player.cover||\'\';if(url&&old.tagName===\'IMG\'&&old.getAttribute(\'src\')===url)return;if(!url&&old.classList.contains(\'cover-fallback\'))return;old.replaceWith(coverNode(url))}}\nfunction renderVolatile(data){\n  $(\'#audio-toggle\').textContent=data.mode.mode===\'stopped\'?\'Start all audio\':\'Stop all audio\';\n  if(data.awayDisplay){const button=$(\'#away-display-toggle\');button.textContent=data.awayDisplay.displayOff?\'Show lock screen\':data.awayDisplay.away?\'Unlock desktop\':\'Away and display off\';button.setAttribute(\'aria-pressed\',String(!!data.awayDisplay.active));button.classList.toggle(\'mode-active\',!!data.awayDisplay.active)}\n  if(data.profiles)renderActiveProfile(data.profiles);\n  renderSonobusStatus(data.mode,data.groups);\n  $(\'#engine-status\').textContent=data.mode.engineRunning?\'Audio engine online (\'+data.mode.engineLabel+\')\':\'Audio engine offline (\'+data.mode.engineLabel+\')\';$(\'.dot\').style.opacity=data.mode.engineRunning?\'1\':\'.25\';\n  $(\'#source-title\').textContent=({ipad_external:\'External\',laptop_external:\'Laptop\',ipad_ipad:\'External\',ipad_laptop:\'Laptop\',ipad_both:\'Both\',laptop_ipad:\'External\',laptop_laptop:\'Laptop\',laptop_both:\'Both\'})[data.mode.mode]||data.mode.label;$(\'#source-details\').textContent=\'CamillaDSP \'+(data.mode.engineRunning?\'running\':\'stopped\')+\' • SonoBus \'+(data.mode.sonobus?\'on\':\'off\')+\' • AirPlay \'+(data.mode.airplay?\'on\':\'off\')+(data.mode.localWanted?\' • Output \'+(data.mode.localOutputLabel||\'Not selected\'):\'\');\n  document.querySelectorAll(\'[data-mode]\').forEach(button=>button.classList.toggle(\'mode-active\',button.dataset.mode===data.mode.mode));\n  updatePlaylistCover(data.player);\n  const local=data.player,lm=state.local;$(\'#now-title\').textContent=local.title||\'Nothing playing\';updateLocalNowArtwork(local.cover||\'\');$(\'#now-details\').textContent=[local.artist,local.album].filter(Boolean).join(\' • \')||(local.path||\'\');renderTimeline(lm,local.currentTime,local.duration);if(lm.volumePending===null&&document.activeElement!==lm.volume){displayMasterVolume(local.volume)}$(\'#shuffle\').disabled=!local.canShuffleQueue;$(\'#repeat\').textContent=\'Repeat \'+({off:\'Off\',all:\'All\',one:\'1\'}[local.repeat]||\'Off\');$(\'#repeat\').classList.toggle(\'active\',local.repeat!==\'off\');setPlayIcon($(\'#local-play-shape\'),document.querySelector(\'[data-cmd="toggle"]\'),local.playing)\n}\nasync function refreshStatic(){if(staticRefreshRunning)return;staticRefreshRunning=true;try{const data=await api(\'/api/state\');profileSnapshot=data.profiles;renderProfileSnapshot(data.profiles);renderPlaylistSnapshot(data.playlists);loadGroups(data);renderVolatile(data);renderSystem(data.systemMedia);return data}catch(error){note(error.message,true)}finally{staticRefreshRunning=false}}\nasync function refreshVolatile(){if(volatileRefreshRunning||document.hidden)return;volatileRefreshRunning=true;try{renderVolatile(await api(\'/api/volatile\'));}catch(error){console.warn(\'volatile refresh failed\',error)}finally{volatileRefreshRunning=false}}\nrefreshAll=async()=>refreshStatic();\nrefreshStatic();window.addEventListener(\'pageshow\',event=>{if(event.persisted){refreshStatic();refreshVolatile()}});document.addEventListener(\'visibilitychange\',()=>{if(!document.hidden){renewVisibleOutput();refreshStatic();refreshVolatile()}});async function renewVisibleOutput(){if(!outputPreviewToken||$(\'#output-modal\').classList.contains(\'hidden\'))return;try{await post(\'/api/output-preview-renew\',{token:outputPreviewToken})}catch(error){$(\'#output-modal\').classList.add(\'hidden\');pendingMode=null;outputTopology=null;outputPreviewToken=null;showOutputStep(\'card\');showTaskFeedback(\'Output selection expired; reopen it. \'+error.message,\'error\')}}setInterval(()=>{if(!document.hidden)renewVisibleOutput()},15000);setInterval(refreshVolatile,1000);setInterval(()=>{if(!document.hidden)pollSystem()},1000);setInterval(tickSystem,250);\n</script></body></html>'
 class H(BaseHTTPRequestHandler):
     def data(self,n,t,b):self.send_response(n);self.send_header('Content-Type',t);self.send_header('Content-Length',str(len(b)));self.send_header('Cache-Control','private, max-age=3600' if n==200 and t=='image/jpeg' else 'no-store');self.end_headers();self.wfile.write(b)
     def out(self,n,d):self.data(n,'application/json; charset=utf-8',json.dumps(d,separators=(',',':')).encode())
@@ -2800,10 +3230,12 @@ class H(BaseHTTPRequestHandler):
         try:
             d=self.body()
             if p=='/api/output-preview-begin':r=begin_output_preview()
-            elif p=='/api/output-preview-cancel':r=cancel_output_preview()
-            elif p=='/api/output-profile-stage':r=apply_output_profile_stage(d.get('card'),d.get('profile'),d.get('mode'))
-            elif p=='/api/output-route-stage':r=apply_output_route_stage(d.get('card'),d.get('profile'),d.get('route'),d.get('mode'))
-            elif p=='/api/output-activate':r=activate_output(d.get('output'),mode=d.get('mode'),password=d.get('password'))
+            elif p=='/api/output-preview-renew':r=renew_output_preview(d.get('token'))
+            elif p=='/api/output-preview-cancel':r=cancel_output_preview(token=d.get('token'))
+            elif p=='/api/output-device-stage':r=select_output_device_stage(d.get('card'),origin=('cli' if d.get('origin')=='cli' and self.client_address[0] in ('127.0.0.1','::1') else 'web'),token=d.get('token'))
+            elif p=='/api/output-profile-stage':r=apply_output_profile_stage(d.get('card'),d.get('profile'),d.get('mode'),origin=('cli' if d.get('origin')=='cli' and self.client_address[0] in ('127.0.0.1','::1') else 'web'),token=d.get('token'))
+            elif p=='/api/output-route-stage':r=apply_output_route_stage(d.get('card'),d.get('profile'),d.get('route'),d.get('mode'),origin=('cli' if d.get('origin')=='cli' and self.client_address[0] in ('127.0.0.1','::1') else 'web'),token=d.get('token'))
+            elif p=='/api/output-activate':r=activate_output(d.get('output'),mode=d.get('mode'),password=d.get('password'),origin=('cli' if d.get('origin')=='cli' and self.client_address[0] in ('127.0.0.1','::1') else 'web'),token=d.get('token'))
             elif p=='/api/away-display':r=toggle_away_display()
             elif p=='/api/mode':r=set_mode(d.get('mode'),d.get('password'),d.get('output'))
             elif p=='/api/groups/save':r=save_group(d)
@@ -2842,7 +3274,7 @@ def start_runtime(force=False):
     ensure()
     (STATE/'output-preview').unlink(missing_ok=True)
     if STOPPED.exists() and not force:
-        OUTPUT_PREVIEW.unlink(missing_ok=True)
+        if OUTPUT_PREVIEW.exists():_recover_stale_cli_preview()
         MODE.write_text('laptop_laptop\n')
         run(['systemctl','--user','stop',SYSTEM_AUDIO_SERVICE],False,10)
         run(['systemctl','stop','shairport-sync.service','nqptp.service'],False,10)
@@ -2853,8 +3285,7 @@ def start_runtime(force=False):
         if run([exe('wpctl'),'status'],False,3,media_env()).returncode==0:break
         time.sleep(.1)
     else:raise RuntimeError('PipeWire did not become ready')
-    if OUTPUT_PREVIEW.exists():cancel_output_preview()
-    alsa100()
+    if OUTPUT_PREVIEW.exists():_recover_stale_cli_preview()
     # Keep persisted master until the route has been restored; a newly
     # created default sink may temporarily report 100%.
     available=profiles()
@@ -2889,7 +3320,7 @@ def start_runtime(force=False):
         except (RuntimeError,ValueError,OSError) as error:
             print('Saved output pending: '+str(error),flush=True)
     try:
-        apply_mode(mode,restore_camilla=False,normalize=False,
+        apply_mode(mode,restore_camilla=False,
                    output=choose_output_route(dict(saved_route,_remembered=True)) if saved_route.get('card') else None)
     except RuntimeError as error:
         if not any(message in str(error) for message in ('exposes no available physical sink','Select a physical playback output','No physical playback device in PipeWire graph','Playback device unavailable:','Playback sink unavailable:')):raise
@@ -2970,7 +3401,7 @@ def cleanup():
     with LOCK:
         pause_for_audio_stop()
         try:
-            apply_mode('laptop_laptop',normalize=False)
+            apply_mode('laptop_laptop')
             normalize_audio_volumes()
         except Exception as error:
             print('Could not restore laptop audio during host shutdown: '+str(error),flush=True)
@@ -3059,12 +3490,10 @@ def main():
     LOCAL_ENGINE_OWNED=False
     watcher_stop=threading.Event()
     threading.Thread(target=watch_sonobus_workspace,args=(watcher_stop,),daemon=True).start()
-    if STOPPED.exists():
-        start_runtime()
-    else:
-        start_runtime()
-        normalize_audio_volumes()
+    start_runtime()
+    if not STOPPED.exists():normalize_audio_volumes()
     threading.Thread(target=watch_master_volume,args=(watcher_stop,),daemon=True).start()
+    threading.Thread(target=watch_output_preview,args=(watcher_stop,),daemon=True).start()
     server=S(('0.0.0.0',PORT),H);SERVERPID.write_text(str(me)+'\n');STOP_CAP.write_text(str(me)+'\n')
     fcntl.flock(startup_lock,fcntl.LOCK_UN)
     startup_lock.close()
@@ -3171,11 +3600,11 @@ def topology_cli():
             server=rpid(SERVERPID)
             if not alive(server) or server==os.getpid():
                 if STOPPED.exists():raise RuntimeError('Audio is stopped; start audio before selecting an output')
-                print(json.dumps(activate_output(request,mode='laptop_laptop'),ensure_ascii=False))
+                print(json.dumps(activate_output(request,mode='laptop_laptop',origin='cli',token=os.environ.get('MEDIA_CONTROL_PICKER_PID')),ensure_ascii=False))
                 return
             from urllib.request import Request,urlopen
             from urllib.error import HTTPError,URLError
-            payload=json.dumps({'output':request,'mode':'laptop_laptop'}).encode()
+            payload=json.dumps({'output':request,'mode':'laptop_laptop','origin':'cli','token':os.environ.get('MEDIA_CONTROL_PICKER_PID')}).encode()
             command=Request('http://127.0.0.1:'+str(PORT)+'/api/output-activate',data=payload,
                             headers={'Content-Type':'application/json'},method='POST')
             try:
@@ -3190,18 +3619,35 @@ def topology_cli():
             return
         if len(sys.argv)==4 and sys.argv[1]=='--output-route':
             raise ValueError('Choose profile and route together with --switch-output')
+        if len(sys.argv)==3 and sys.argv[1]=='--apply-output-device':
+            card=sys.argv[2]
+            if not alive(rpid(SERVERPID)):
+                print(json.dumps(select_output_device_stage(card,origin='cli',token=os.environ.get('MEDIA_CONTROL_PICKER_PID')),ensure_ascii=False));return
+            from urllib.request import Request,urlopen
+            from urllib.error import HTTPError
+            request=Request('http://127.0.0.1:'+str(PORT)+'/api/output-device-stage',
+                            data=json.dumps({'card':card,'origin':'cli','token':os.environ.get('MEDIA_CONTROL_PICKER_PID')}).encode(),
+                            headers={'Content-Type':'application/json'},method='POST')
+            try:
+                with urlopen(request,timeout=90) as response:data=json.load(response)
+            except HTTPError as error:
+                try:detail=json.load(error).get('error')
+                except (ValueError,TypeError):detail=None
+                raise RuntimeError(detail or 'Playback device stage failed') from error
+            if not data.get('ok'):raise RuntimeError(data.get('error') or 'Playback device stage failed')
+            print(json.dumps(data,ensure_ascii=False));return
         if (len(sys.argv)==4 and sys.argv[1]=='--apply-output-profile') or (len(sys.argv)==5 and sys.argv[1]=='--apply-output-route'):
             from urllib.request import Request,urlopen
             from urllib.error import HTTPError
             if not alive(rpid(SERVERPID)):
                 if STOPPED.exists():raise RuntimeError('Audio is stopped; start audio before selecting an output')
-                result=(apply_output_profile_stage(sys.argv[2],sys.argv[3],mode='laptop_laptop')
+                result=(apply_output_profile_stage(sys.argv[2],sys.argv[3],mode='laptop_laptop',origin='cli',token=os.environ.get('MEDIA_CONTROL_PICKER_PID'))
                         if sys.argv[1]=='--apply-output-profile' else
-                        apply_output_route_stage(sys.argv[2],sys.argv[3],sys.argv[4],mode='laptop_laptop'))
+                        apply_output_route_stage(sys.argv[2],sys.argv[3],sys.argv[4],mode='laptop_laptop',origin='cli',token=os.environ.get('MEDIA_CONTROL_PICKER_PID')))
                 print(json.dumps(result,ensure_ascii=False));return
             is_profile=sys.argv[1]=='--apply-output-profile'
             endpoint='/api/output-profile-stage' if is_profile else '/api/output-route-stage'
-            payload={'card':sys.argv[2],'profile':sys.argv[3],'mode':'laptop_laptop'}
+            payload={'card':sys.argv[2],'profile':sys.argv[3],'mode':'laptop_laptop','origin':'cli','token':os.environ.get('MEDIA_CONTROL_PICKER_PID')}
             if not is_profile:payload['route']=sys.argv[4]
             command=Request('http://127.0.0.1:'+str(PORT)+endpoint,
                             data=json.dumps(payload).encode(),
@@ -3215,11 +3661,13 @@ def topology_cli():
             if not data.get('ok'):raise RuntimeError(data.get('error') or 'Output stage failed')
             print(json.dumps(data,ensure_ascii=False));return
         if len(sys.argv)==2 and sys.argv[1]=='--begin-output-preview':
-            print(json.dumps(begin_output_preview(),ensure_ascii=False));return
+            print(json.dumps(begin_output_preview('cli',int(os.environ['MEDIA_CONTROL_PICKER_PID']),int(os.environ['MEDIA_CONTROL_PICKER_START'])),ensure_ascii=False));return
         if len(sys.argv)==2 and sys.argv[1]=='--cancel-output-preview':
-            print(json.dumps(cancel_output_preview(),ensure_ascii=False));return
+            print(json.dumps(cancel_output_preview('cli',token=os.environ.get('MEDIA_CONTROL_PICKER_PID')),ensure_ascii=False));return
         if len(sys.argv)==2 and sys.argv[1]=='--interactive-input':
             print(json.dumps(select_input_interactive(),ensure_ascii=False));return
+        if len(sys.argv)==3 and sys.argv[1]=='--camera-restore-clients':
+            print(json.dumps(restore_camera_clients(json.loads(sys.argv[2])),ensure_ascii=False));return
         if len(sys.argv)==3 and sys.argv[1]=='--camera-selection-status':
             print(json.dumps(camera_selection_status(int(sys.argv[2])),ensure_ascii=False));return
         if len(sys.argv)==2 and sys.argv[1]=='--output-topology':
