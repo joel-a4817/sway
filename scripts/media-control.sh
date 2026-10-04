@@ -132,6 +132,9 @@ handle_script_exit() {
     (( EXIT_HANDLER_RUNNING )) && return
     EXIT_HANDLER_RUNNING=1
     trap - EXIT INT TERM HUP QUIT
+    if [[ ${OUTPUT_PREVIEW_ACTIVE:-0} == 1 ]]; then
+        python3 "$TOPOLOGY_SCRIPT" --cancel-output-preview >>"$ACTION_LOG" 2>&1 || echo 'Output preview rollback failed; inspect the log.' >&2
+    fi
     if (( ! FINAL_PAUSE_REACHED && ! ${REPLACED:-0} )); then
         if (( status != 0 )); then
             echo; echo "Audio script exited unexpectedly."; echo "Exit status: $status"
@@ -193,7 +196,7 @@ wrap_prefixed_line() {
     columns="$(terminal_columns)"
     continuation="$(printf '%*s' "${#prefix}" '')"
     width=$((columns - ${#prefix}))
-    ((width >= 12)) || width=12
+    ((width >= 1)) || width=1
     while IFS= read -r line || [[ -n "$line" ]]; do
         if ((first)); then printf '%s%s\n' "$prefix" "$line"; first=0
         else printf '%s%s\n' "$continuation" "$line"; fi
@@ -206,24 +209,45 @@ compact_menu_label() {
     text="${text//Playback device/Device}"
     text="${text//Playback profile/Profile}"
     text="${text//Playback sink/Sink}"
-    text="${text//Capture device/Input}"
+    text="${text//Capture device/Device}"
     text="${text//Physical device/Device}"
     text="${text//Camera endpoint/Endpoint}"
-    text="${text//MONITOR - NOT SELECTABLE/MONITOR}"
     printf '%s' "$text"
 }
-print_menu_item() {
-    local label="$2" tag='' prefix
-    # Only presentation moves tags; original labels still govern validation.
+# Presentation only: one status tag, while original labels retain validation.
+compact_item_label() {
+    local label="$1" tag='' prefix
     case "$label" in
-        '[UNAVAILABLE] '*) tag='[N/A] '; label="${label#'[UNAVAILABLE] '}" ;;
-        '[INTERNAL] '*) tag='[INT] '; label="${label#'[INTERNAL] '}" ;;
-        '[MONITOR] '*) tag='[MONITOR] '; label="${label#'[MONITOR] '}" ;;
-        '[MONITOR - NOT SELECTABLE] '*) tag='[MONITOR] '; label="${label#'[MONITOR - NOT SELECTABLE] '}" ;;
-        '[LOOPBACK] '*) tag='[LOOPBACK] '; label="${label#'[LOOPBACK] '}" ;;
+        '[UNAVAILABLE] '*) tag='[N/A]'; label="${label#'[UNAVAILABLE] '}" ;;
+        '[INTERNAL] '*) tag='[INT]'; label="${label#'[INTERNAL] '}" ;;
+        '[MONITOR - NOT SELECTABLE] '*) tag='[MON]'; label="${label#'[MONITOR - NOT SELECTABLE] '}" ;;
+        '[MONITOR] '*) tag='[MON]'; label="${label#'[MONITOR] '}" ;;
+        '[LOOPBACK] '*) tag='[LOOP]'; label="${label#'[LOOPBACK] '}" ;;
+        '[VIRTUAL] '*) tag='[VIRT]'; label="${label#'[VIRTUAL] '}" ;;
     esac
-    prefix="${tag}[$1] "
-    wrap_prefixed_line "$prefix" "$label"
+    while :; do
+        case "$label" in
+            '[UNAVAILABLE] '*) label="${label#'[UNAVAILABLE] '}" ;;
+            '[INTERNAL] '*) label="${label#'[INTERNAL] '}" ;;
+            '[MONITOR] '*) label="${label#'[MONITOR] '}" ;;
+            '[MONITOR - NOT SELECTABLE] '*) label="${label#'[MONITOR - NOT SELECTABLE] '}" ;;
+            '[LOOPBACK] '*) label="${label#'[LOOPBACK] '}" ;;
+            '[VIRTUAL] '*) label="${label#'[VIRTUAL] '}" ;;
+            *) break ;;
+        esac
+    done
+    label="${label% (current)}"
+    label="${label/Monitor of /}"
+    [[ -n "$tag" ]] && printf '%s %s' "$tag" "$label" || printf '%s' "$label"
+}
+print_menu_item() {
+    local text tag='' label
+    text="$(compact_item_label "$2")"
+    case "$text" in
+        '[N/A] '*|'[INT] '*|'[MON] '*|'[LOOP] '*|'[VIRT] '*)
+            tag="${text%% *} "; text="${text#* }" ;;
+    esac
+    wrap_prefixed_line "${tag}[$1] " "$text"
 }
 choose_index() {
     local title="$1" answer i=0; shift
@@ -234,70 +258,20 @@ choose_index() {
         read -r -p 'Select: ' answer || return 1
         [[ "$answer" =~ ^[0-9]+$ && ${#answer} -le 9 ]] || { wrap_line 'Enter a listed number.'; continue; }
         number=$((10#$answer))
-        ((number < i)) && return 0
+        if ((number < i)); then
+            local choice="${@:$((number+1)):1}"
+            case "$choice" in
+                '[UNAVAILABLE] '*|'[INTERNAL] '*|'[MONITOR] '*|'[MONITOR - NOT SELECTABLE] '*|'[LOOPBACK] '*|'[VIRTUAL] '*)
+                    wrap_line 'That labeled item is not selectable. Select again.'; continue ;;
+            esac
+            return 0
+        fi
         wrap_line 'Enter a listed number.'
     done
 }
 # Capture control uses both PulseAudio compatibility data and PipeWire's graph.
 # pactl supplies readable audio source ports and movable recording streams;
 # pw-dump supplies physical camera/device relationships; wpctl commits defaults.
-audio_input_picker() {
-    local json current selected source_name source_label port_name port_label i
-    local -a source_names=() source_labels=() port_names=() port_labels=()
-    json="$(pactl -f json list sources)" || return 1
-    current="$(pactl get-default-source 2>/dev/null || true)"
-    mapfile -t source_names < <(jq -r '.[] | select((.name // "") != "") | .name' <<<"$json")
-    mapfile -t source_labels < <(jq -r '
-      .[] | select((.name // "") != "") |
-      (.properties // {}) as $p |
-      ((.monitor_of_sink != null and .monitor_of_sink != -1 and .monitor_of_sink != 4294967295) or
-       ($p["device.class"] == "monitor") or
-       ((.name // "") | endswith(".monitor"))) as $monitor |
-      (($p["alsa.driver_name"] == "snd_aloop") or
-       (($p["alsa.card_name"] // "" | ascii_downcase) == "loopback") or
-       ((.name // "") | startswith("alsa_input.platform-snd_aloop"))) as $loopback |
-      (if $monitor then "[MONITOR - NOT SELECTABLE] "
-       elif $loopback then "[LOOPBACK] " else "" end) + (.description // .name)' <<<"$json")
-    ((${#source_names[@]})) || { wrap_line 'No audio input sources are exposed.'; return 1; }
-    current_label=''
-    for i in "${!source_names[@]}"; do [[ "${source_names[i]}" == "$current" ]] && current_label="${source_labels[i]}"; done
-    while :; do
-    choose_index 'Audio inputs | Capture device' "Current input${current_label:+ ($current_label)}" "${source_labels[@]}" || return 1
-    if ((number==0)); then
-        [[ -n "$current_label" ]] || { wrap_line 'No current audio input is exposed; select a numbered input.'; continue; }
-        source_name="$current"; source_label="$current_label"
-    else
-        source_name="${source_names[number-1]}"; source_label="${source_labels[number-1]}"
-    fi
-    if [[ "$source_label" == '[MONITOR - NOT SELECTABLE] '* ]]; then
-        wrap_line 'A playback monitor is not a microphone input. Select another source.'
-        continue
-    fi
-    break
-    done
-    mapfile -t port_names < <(jq -r --arg n "$source_name" '.[]|select(.name==$n)|(.ports // [])[]|.name' <<<"$json")
-    mapfile -t port_labels < <(jq -r --arg n "$source_name" '.[]|select(.name==$n)|(.ports // [])[]|(if ((.availability // "unknown") == "not available") then "[UNAVAILABLE] " else "" end) + (.description // .name)' <<<"$json")
-    active_port="$(jq -r --arg n "$source_name" '.[]|select(.name==$n)|.active_port // empty' <<<"$json")"
-    while :; do
-        active_label=''; for i in "${!port_names[@]}"; do [[ "${port_names[i]}" == "$active_port" ]] && active_label="${port_labels[i]}"; done
-        if ((${#port_names[@]})); then
-            choose_index "$source_label | Input port" "Current port${active_label:+ ($active_label)}" "${port_labels[@]}" || return 1
-            if ((number==0)); then port_name="$active_port"; port_label="$active_label"; else port_name="${port_names[number-1]}"; port_label="${port_labels[number-1]}"; fi
-            availability="$(jq -r --arg n "$source_name" --arg p "$port_name" '.[]|select(.name==$n)|(.ports // [])[]|select(.name==$p)|(.availability // "unknown")' <<<"$json")"
-            if [[ "$availability" == 'not available' || -z "$port_name" ]]; then wrap_line 'That input port is unavailable. Select again.'; continue; fi
-            pactl set-source-port "$source_name" "$port_name" || { wrap_line 'That input port could not be selected. Select again.'; continue; }
-        else
-            port_name=''; port_label='No exposed input port'
-            wrap_line 'This input exposes no selectable port.'
-        fi
-        break
-    done
-    pactl set-default-source "$source_name" || return 1
-    # Move every currently movable PulseAudio-compatible recording stream.
-    while IFS=$'\t' read -r stream _; do [[ "$stream" =~ ^[0-9]+$ ]] && pactl move-source-output "$stream" "$source_name" 2>/dev/null || true; done < <(pactl list short source-outputs)
-    [[ "$(pactl get-default-source 2>/dev/null)" == "$source_name" ]] || { wrap_line 'Audio input change could not be confirmed.'; return 1; }
-    wrap_line "Audio input selected: $source_label${port_label:+ | $port_label}"
-}
 camera_topology() {
     pw-dump | python3 -c '
 import json,sys
@@ -325,7 +299,7 @@ camera_picker() {
       jq -e --arg k "${device_keys[i]}" --arg n "$current" '.[]|select(.key==$k)|.nodes[]|select(.name==$n)' <<<"$topo" >/dev/null && { current_device="${device_keys[i]}"; current_device_label="${device_labels[i]}"; }
     done
     while :; do
-    choose_index 'Cameras | Physical device' "Current camera${current_device_label:+ ($current_device_label)}" "${device_labels[@]}" || return 1
+    choose_index 'Cameras | Physical device' "Current${current_device_label:+ ($(compact_item_label "$current_device_label"))}" "${device_labels[@]}" || return 1
     if ((number==0)); then [[ -n "$current_device" ]] || { wrap_line 'No current camera is exposed; select a numbered camera.'; continue; }; device_key="$current_device"; device_label="$current_device_label"
     else device_key="${device_keys[number-1]}"; device_label="${device_labels[number-1]}"; fi
     break
@@ -335,7 +309,7 @@ camera_picker() {
     mapfile -t node_labels < <(jq -r --arg k "$device_key" '.[]|select(.key==$k)|.nodes[].label' <<<"$topo")
     while :; do
       current_node_label=''; for i in "${!node_names[@]}"; do [[ "${node_names[i]}" == "$current" ]] && current_node_label="${node_labels[i]}"; done
-      choose_index "$device_label | Camera endpoint" "Current endpoint${current_node_label:+ ($current_node_label)}" "${node_labels[@]}" || return 1
+      choose_index "$device_label | Camera endpoint" "Current${current_node_label:+ ($(compact_item_label "$current_node_label"))}" "${node_labels[@]}" || return 1
       if ((number==0)); then
         if [[ -z "$current_node_label" ]]; then wrap_line 'No current endpoint belongs to this camera. Select again.'; continue; fi
         for i in "${!node_names[@]}"; do [[ "${node_names[i]}" == "$current" ]] && node_id="${node_ids[i]}" && node_name="${node_names[i]}" && node_label="${node_labels[i]}"; done
@@ -345,8 +319,16 @@ camera_picker() {
     # Revalidate against a fresh graph, then set and confirm the default.
     fresh="$(camera_topology)" || return 1
     jq -e --arg k "$device_key" --argjson id "$node_id" --arg n "$node_name" '.[]|select(.key==$k)|.nodes[]|select(.id==$id and .name==$n)' <<<"$fresh" >/dev/null || { wrap_line 'Camera topology changed; reopen Media Control.'; return 1; }
+    old_camera_id="$(jq -r --arg n "$current" '.[] | .nodes[] | select(.name==$n) | .id' <<<"$topo" | head -n 1)"
     wpctl set-default "$node_id" || return 1
-    wpctl list video sources | awk -F '\t' -v n="$node_name" '$2==n && $4=="*"{ok=1} END{exit !ok}' || { wrap_line 'Camera default change could not be confirmed.'; return 1; }
+    if ! wpctl list video sources | awk -F '\t' -v n="$node_name" '$2==n && $4=="*"{ok=1} END{exit !ok}'; then
+        [[ "$old_camera_id" =~ ^[0-9]+$ ]] && wpctl set-default "$old_camera_id" || true
+        wrap_line 'Camera default change could not be confirmed.'; return 1
+    fi
+    if ! camera_status="$(python3 "$TOPOLOGY_SCRIPT" --camera-selection-status "$node_id")"; then
+        [[ "$old_camera_id" =~ ^[0-9]+$ ]] && wpctl set-default "$old_camera_id" || true
+        return 1
+    fi
     wrap_line "Camera selected: $device_label${node_label:+ | $node_label}"
 }
 ARGS=(-t warning -y overlay -m 'Media control')
@@ -369,6 +351,8 @@ wait "$SWAYNAG_PID" 2>/dev/null || true
 selected="$(cat "$CARD_SELECTION_FILE")"
 case "$selected" in
  select-output)
+    python3 "$TOPOLOGY_SCRIPT" --begin-output-preview >>"$ACTION_LOG" 2>&1 || { tail -n 10 "$ACTION_LOG" >&2; exit 1; }
+    OUTPUT_PREVIEW_ACTIVE=1
     TOPOLOGY_JSON="$(output_topology)" || { wrap_line 'Output topology unavailable.' >&2; exit 1; }
     mapfile -t CARDS < <(jq -r '.cards[] | [.name,.label] | @tsv' <<<"$TOPOLOGY_JSON")
     ((${#CARDS[@]})) || { wrap_line 'No playback devices currently exposed.' >&2; exit 1; }
@@ -383,7 +367,7 @@ case "$selected" in
         fi
     done
     while :; do
-        choose_index 'Audio outputs | Playback device' "Current output${current_card_label:+ ($current_card_label)}" "${labels[@]}" || exit 0
+        choose_index 'Audio outputs | Playback device' "Current${current_card_label:+ ($(compact_item_label "$current_card_label"))}" "${labels[@]}" || exit 0
         if ((number == 0)); then
             [[ -n "$current_card_index" ]] || { wrap_line 'No current output is exposed; select a numbered device.'; continue; }
             selected="$current_card_index"
@@ -393,7 +377,75 @@ case "$selected" in
     done
     ;;
  select-input)
-    audio_input_picker || exit $?
+    python3 -c '
+import importlib.util, json, sys
+spec=importlib.util.spec_from_file_location("media_control_backend",sys.argv[1])
+backend=importlib.util.module_from_spec(spec)
+spec.loader.exec_module(backend)
+def blocked(row):
+    text=str(row.get("label") or row.get("name") or "")
+    return (not backend._available_option(row) or
+            text.startswith(("[UNAVAILABLE] ","[INTERNAL] ","[MONITOR] ","[LOOPBACK] ","[VIRTUAL] ")))
+def display(row):
+    text=str(row.get("label") or row.get("name") or row.get("index") or "")
+    tags=("[UNAVAILABLE] ","[INTERNAL] ","[MONITOR - NOT SELECTABLE] ",
+          "[MONITOR] ","[LOOPBACK] ","[VIRTUAL] ")
+    tag=next((t for t in tags if text.startswith(t)),"")
+    if tag:text=text[len(tag):]
+    while any(text.startswith(t) for t in tags):
+        text=text[len(next(t for t in tags if text.startswith(t))):]
+    if text.startswith("Monitor of "):text=text[len("Monitor of "):]
+    status={"[UNAVAILABLE] ":"N/A","[INTERNAL] ":"INT",
+            "[MONITOR - NOT SELECTABLE] ":"MON","[MONITOR] ":"MON",
+            "[LOOPBACK] ":"LOOP","[VIRTUAL] ":"VIRT"}.get(tag)
+    if not status and not backend._available_option(row):status="N/A"
+    return ("["+status+"] " if status else "")+text
+def wrapped(prefix,text):
+    import shutil,textwrap
+    width=shutil.get_terminal_size(fallback=(80,24)).columns
+    available=max(1,width-len(prefix))
+    for line in str(text).splitlines() or [""]:
+        pieces=textwrap.wrap(line,width=available,break_long_words=True,
+                             break_on_hyphens=False,replace_whitespace=False,
+                             drop_whitespace=True) or [""]
+        for index,piece in enumerate(pieces):
+            print((prefix if index==0 else " "*len(prefix))+piece)
+def pick(label,rows,current=None):
+    if label=="Audio input | Device":
+        result=backend.run([backend.exe("pactl"),"get-default-source"],False,5,backend.media_env())
+        if result.returncode:raise RuntimeError("Cannot read current input source")
+        source=result.stdout.strip()
+        current=next((row["name"] for row in rows if any(
+            node["name"]==source for node in row["sources"])),None)
+    if not rows:raise RuntimeError("No "+label+" choices are exposed")
+    selected=next((row for row in rows if str(row.get("index",row.get("name")))==str(current)
+                   and not blocked(row)),None) if current is not None else None
+    print()
+    wrapped("",label)
+    if selected:
+        wrapped("[0] ","Current ("+display(selected)+")")
+    else:
+        wrapped("[N/A] [0] ","Current")
+    for number,row in enumerate(rows,1):
+        text=display(row)
+        tag=next((t for t in ("[N/A] ","[INT] ","[MON] ","[LOOP] ","[VIRT] ")
+                  if text.startswith(t)),"")
+        wrapped("{}[{}] ".format(tag,number),text[len(tag):])
+    while True:
+        answer=input("Select: ").strip()
+        if answer.isdecimal():
+            number=int(answer)
+            if number==0 and selected is not None:return selected
+            if 1<=number<=len(rows) and not blocked(rows[number-1]):return rows[number-1]
+        print("Select an available number.")
+
+backend._pick_input=pick
+from contextlib import nullcontext
+backend.media_change=nullcontext
+try:print(json.dumps(backend.select_input_interactive(),ensure_ascii=False))
+except KeyboardInterrupt:sys.exit(130)
+except Exception as error:print(str(error),file=sys.stderr);sys.exit(1)
+' "$TOPOLOGY_SCRIPT" || exit $?
     exit 0 ;;
  select-camera)
     camera_picker || exit $?
@@ -595,6 +647,7 @@ request="$(jq -nc --arg card "$card" --arg profile "$profile" --arg port "$route
 # The paired controller serializes pause -> output -> normalize; playback stays paused.
 flock -u 9
 run_quiet_action python3 "$TOPOLOGY_SCRIPT" --switch-output "$request" || exit $?
+OUTPUT_PREVIEW_ACTIVE=0
 result_line="Playback output applied: $card_label"
 [[ -n "${last_sink_label:-}" && "$sink" == "${last_sink:-}" ]] && result_line+=" / $last_sink_label"
 wrap_line "$result_line"
