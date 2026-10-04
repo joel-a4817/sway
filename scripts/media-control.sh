@@ -215,57 +215,97 @@ choose_index() {
         wrap_line 'Enter a listed number.'
     done
 }
-# Live capture nodes only. Never save transient PipeWire numeric IDs.
-wp_capture_rows() {
-    local media="$1" kind="$2" raw
-    raw="$(wpctl list "$media" "$kind")" || return 1
-    printf '%s\n' "$raw" | awk -F '\t' 'NF >= 3 && $1 ~ /^[0-9]+$/ { print $1 "\t" $2 "\t" $3 "\t" $4 }'
-}
-choose_capture() {
-    local media="$1" title="$3" saved_name="" line id name type marker
-    local -a ids=() names=() labels=() lines=()
-    local current="" i
-    local -r memory="$STATE_DIR/last-${media}-source.name"
-    local rows
-    rows="$(wp_capture_rows "$media" sources)" || return 1
-    mapfile -t lines <<< "$rows"
-    for line in "${lines[@]}"; do
-        IFS=$'\t' read -r id name type marker <<<"$line"
-        [[ "$type" == "$media/source" && "$id" =~ ^[0-9]+$ && -n "$name" ]] || continue
-        ids+=("$id"); names+=("$name"); labels+=("$name")
-        [[ "$marker" == '*' ]] && current="$name"
-    done
-    ((${#ids[@]})) || { wrap_line "No $title sources are currently exposed by wpctl."; return 1; }
-    if [[ -s "$memory" ]]; then IFS= read -r saved_name < "$memory" || true; fi
-    local preferred="${current:-}" preferred_id="" preferred_label=""
-    for i in "${!ids[@]}"; do
-        if [[ "${names[i]}" == "$preferred" ]]; then preferred_id="${ids[i]}"; preferred_label="${labels[i]}"; break; fi
-    done
-    local -a menu=("Currently selected source${preferred_label:+ ($preferred_label)}")
-    menu+=("${labels[@]}")
-    choose_index "$title source" "${menu[@]}" || return 1
-    if ((number == 0)); then
-        [[ -n "$preferred_id" ]] || { wrap_line 'No current default source is exposed; select a numbered source.'; return 1; }
-        id="$preferred_id"; name="$preferred"
+# Capture control uses both PulseAudio compatibility data and PipeWire's graph.
+# pactl supplies readable audio source ports and movable recording streams;
+# pw-dump supplies physical camera/device relationships; wpctl commits defaults.
+audio_input_picker() {
+    local json current selected source_name source_label port_name port_label i
+    local -a source_names=() source_labels=() port_names=() port_labels=()
+    json="$(pactl -f json list sources)" || return 1
+    current="$(pactl get-default-source 2>/dev/null || true)"
+    mapfile -t source_names < <(jq -r '.[] | select((.name // "") != "") | .name' <<<"$json")
+    mapfile -t source_labels < <(jq -r '.[] | select((.name // "") != "") | (.description // .name)' <<<"$json")
+    ((${#source_names[@]})) || { wrap_line 'No audio input sources are exposed.'; return 1; }
+    current_label=''
+    for i in "${!source_names[@]}"; do [[ "${source_names[i]}" == "$current" ]] && current_label="${source_labels[i]}"; done
+    choose_index 'Audio inputs | Capture device' "Currently selected input${current_label:+ ($current_label)}" "${source_labels[@]}" || return 1
+    if ((number==0)); then
+        [[ -n "$current_label" ]] || { wrap_line 'No current audio input is exposed; select a numbered input.'; return 1; }
+        source_name="$current"; source_label="$current_label"
     else
-        id="${ids[number-1]}"; name="${names[number-1]}"
+        source_name="${source_names[number-1]}"; source_label="${source_labels[number-1]}"
     fi
-    # Re-read the live graph: an ID can be reused or disappear while the menu is open.
-    local live
-    live="$(wpctl list "$media" sources)" || return 1
-    if ! printf '%s\n' "$live" | awk -F '\t' -v id="$id" -v name="$name" -v type="$media/source" '$1==id && $2==name && $3==type {found=1} END {exit !found}'; then
-        wrap_line 'Selected source changed while the menu was open. Reopen Audio Control.'; return 1
-    fi
-    wpctl set-default "$id" || return 1
-    # Confirm the chosen default without assuming a device-specific name.
-    live="$(wpctl list "$media" sources)" || return 1
-    if ! printf '%s\n' "$live" | awk -F '\t' -v name="$name" '$2==name && $4=="*" {found=1} END {exit !found}'; then
-        wrap_line 'Default source change could not be confirmed.'; return 1
-    fi
-    printf '%s\n' "$name" > "$memory"
-    wrap_line "$title source selected: $name"
+    mapfile -t port_names < <(jq -r --arg n "$source_name" '.[]|select(.name==$n)|(.ports // [])[]|.name' <<<"$json")
+    mapfile -t port_labels < <(jq -r --arg n "$source_name" '.[]|select(.name==$n)|(.ports // [])[]|(.description // .name) + (if ((.availability // "unknown") == "not available") then " (unavailable)" else "" end)' <<<"$json")
+    active_port="$(jq -r --arg n "$source_name" '.[]|select(.name==$n)|.active_port // empty' <<<"$json")"
+    while :; do
+        active_label=''; for i in "${!port_names[@]}"; do [[ "${port_names[i]}" == "$active_port" ]] && active_label="${port_labels[i]}"; done
+        if ((${#port_names[@]})); then
+            choose_index "$source_label | Input port" "Currently selected port${active_label:+ ($active_label)}" "${port_labels[@]}" || return 1
+            if ((number==0)); then port_name="$active_port"; port_label="$active_label"; else port_name="${port_names[number-1]}"; port_label="${port_labels[number-1]}"; fi
+            availability="$(jq -r --arg n "$source_name" --arg p "$port_name" '.[]|select(.name==$n)|(.ports // [])[]|select(.name==$p)|(.availability // "unknown")' <<<"$json")"
+            if [[ "$availability" == 'not available' || -z "$port_name" ]]; then wrap_line 'That input port is unavailable. Select again.'; continue; fi
+            pactl set-source-port "$source_name" "$port_name" || { wrap_line 'That input port could not be selected. Select again.'; continue; }
+        else
+            port_name=''; port_label='No exposed input port'
+            wrap_line 'This input exposes no selectable port.'
+        fi
+        break
+    done
+    pactl set-default-source "$source_name" || return 1
+    # Move every currently movable PulseAudio-compatible recording stream.
+    while IFS=$'\t' read -r stream _; do [[ "$stream" =~ ^[0-9]+$ ]] && pactl move-source-output "$stream" "$source_name" 2>/dev/null || true; done < <(pactl list short source-outputs)
+    [[ "$(pactl get-default-source 2>/dev/null)" == "$source_name" ]] || { wrap_line 'Audio input change could not be confirmed.'; return 1; }
+    wrap_line "Audio input selected: $source_label${port_label:+ | $port_label}"
 }
-
+camera_topology() {
+    pw-dump | python3 -c '
+import json,sys
+x=json.load(sys.stdin); objs={o.get("id"):o for o in x}; devices={}; defaults=set()
+for o in x:
+ p=o.get("info",{}).get("props",{}); c=p.get("media.class","")
+ if c=="Video/Source":
+  did=p.get("device.id"); d=objs.get(did,{}) if isinstance(did,int) else {}
+  dp=d.get("info",{}).get("props",{})
+  physical=str(dp.get("device.bus-id") or dp.get("device.serial") or dp.get("device.path") or did or p.get("device.id") or o.get("id"))
+  dl=dp.get("device.description") or dp.get("device.nick") or dp.get("device.product.name") or p.get("device.description") or "Camera"
+  nl=p.get("node.description") or p.get("node.nick") or p.get("node.name") or str(o.get("id"))
+  devices.setdefault(physical,{"key":physical,"label":dl,"nodes":[]})["nodes"].append({"id":o.get("id"),"name":p.get("node.name",""),"label":nl})
+print(json.dumps(list(devices.values())))'
+}
+camera_picker() {
+    local topo current device_key device_label node_id node_name node_label i
+    local -a device_keys=() device_labels=() node_ids=() node_names=() node_labels=()
+    topo="$(camera_topology)" || return 1
+    mapfile -t device_keys < <(jq -r '.[].key' <<<"$topo"); mapfile -t device_labels < <(jq -r '.[].label' <<<"$topo")
+    ((${#device_keys[@]})) || { wrap_line 'No physical cameras are exposed.'; return 1; }
+    current="$(wpctl list video sources | awk -F '\t' '$4=="*"{print $2;exit}')"
+    current_device=''; current_device_label=''
+    for i in "${!device_keys[@]}"; do
+      jq -e --arg k "${device_keys[i]}" --arg n "$current" '.[]|select(.key==$k)|.nodes[]|select(.name==$n)' <<<"$topo" >/dev/null && { current_device="${device_keys[i]}"; current_device_label="${device_labels[i]}"; }
+    done
+    choose_index 'Cameras | Physical device' "Currently selected camera${current_device_label:+ ($current_device_label)}" "${device_labels[@]}" || return 1
+    if ((number==0)); then [[ -n "$current_device" ]] || { wrap_line 'No current camera is exposed; select a numbered camera.'; return 1; }; device_key="$current_device"; device_label="$current_device_label"
+    else device_key="${device_keys[number-1]}"; device_label="${device_labels[number-1]}"; fi
+    mapfile -t node_ids < <(jq -r --arg k "$device_key" '.[]|select(.key==$k)|.nodes[].id' <<<"$topo")
+    mapfile -t node_names < <(jq -r --arg k "$device_key" '.[]|select(.key==$k)|.nodes[].name' <<<"$topo")
+    mapfile -t node_labels < <(jq -r --arg k "$device_key" '.[]|select(.key==$k)|.nodes[].label' <<<"$topo")
+    while :; do
+      current_node_label=''; for i in "${!node_names[@]}"; do [[ "${node_names[i]}" == "$current" ]] && current_node_label="${node_labels[i]}"; done
+      choose_index "$device_label | Camera endpoint" "Currently selected endpoint${current_node_label:+ ($current_node_label)}" "${node_labels[@]}" || return 1
+      if ((number==0)); then
+        if [[ -z "$current_node_label" ]]; then wrap_line 'No current endpoint belongs to this camera. Select again.'; continue; fi
+        for i in "${!node_names[@]}"; do [[ "${node_names[i]}" == "$current" ]] && node_id="${node_ids[i]}" && node_name="${node_names[i]}" && node_label="${node_labels[i]}"; done
+      else node_id="${node_ids[number-1]}"; node_name="${node_names[number-1]}"; node_label="${node_labels[number-1]}"; fi
+      break
+    done
+    # Revalidate against a fresh graph, then set and confirm the default.
+    fresh="$(camera_topology)" || return 1
+    jq -e --arg k "$device_key" --argjson id "$node_id" --arg n "$node_name" '.[]|select(.key==$k)|.nodes[]|select(.id==$id and .name==$n)' <<<"$fresh" >/dev/null || { wrap_line 'Camera topology changed; reopen Media Control.'; return 1; }
+    wpctl set-default "$node_id" || return 1
+    wpctl list video sources | awk -F '\t' -v n="$node_name" '$2==n && $4=="*"{ok=1} END{exit !ok}' || { wrap_line 'Camera default change could not be confirmed.'; return 1; }
+    wrap_line "Camera selected: $device_label${node_label:+ | $node_label}"
+}
 ARGS=(-t warning -y overlay -m 'Media control')
 ARGS+=( -z 'Audio services' "printf '%s\n' audio-services > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
 ARGS+=( -z 'CamillaDSP filters' "printf '%s\n' select-filter > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
@@ -306,10 +346,10 @@ case "$selected" in
     else selected="$((number-1))"; fi
     ;;
  select-input)
-    choose_capture audio sources 'Audio input' || exit $?
+    audio_input_picker || exit $?
     exit 0 ;;
  select-camera)
-    choose_capture video sources Camera || exit $?
+    camera_picker || exit $?
     exit 0 ;;
  audio-services)
     choose_index 'Audio services' \
@@ -380,38 +420,53 @@ card_label="${CARDS[selected]#*$'\t'}"
 # Refresh after the Swaynag selection, without changing the live graph.
 TOPOLOGY_JSON="$(output_topology)" || { echo "Start audio services before choosing a playback output." >&2; exit 1; }
 active="$(jq -r --arg n "$card" '.cards[]|select(.name==$n)|.activeProfile // empty' <<<"$TOPOLOGY_JSON")"
-mapfile -t profiles < <(jq -r --arg n "$card" '.cards[]|select(.name==$n)|.profiles[]|select(.available!="no" and .available!="false" and ((.name|ascii_downcase)!="off"))|.index' <<<"$TOPOLOGY_JSON")
+mapfile -t profiles < <(jq -r --arg n "$card" '.cards[]|select(.name==$n)|.profiles[]|select((.name|ascii_downcase)!="off")|.index' <<<"$TOPOLOGY_JSON")
 last_profile="$(python3 "$TOPOLOGY_SCRIPT" --remembered-profile "$card" 2>/dev/null || true)"
 printf '%s\n' "${profiles[@]}" | grep -Fqx -- "$last_profile" || last_profile="$active"
 printf '%s\n' "${profiles[@]}" | grep -Fqx -- "$last_profile" || last_profile=''
 last_profile_label="$(jq -r --arg n "$card" --arg p "$last_profile" '.cards[]|select(.name==$n)|.profiles[]|select((.index|tostring)==$p)|.label' <<<"$TOPOLOGY_JSON")"
 labels=("Last known profile${last_profile_label:+ ($last_profile_label)}")
 for profile in "${profiles[@]}"; do
-    labels+=("$(jq -r --arg n "$card" --arg p "$profile" '.cards[]|select(.name==$n)|.profiles[]|select((.index|tostring)==$p)|.label' <<<"$TOPOLOGY_JSON")")
+    labels+=("$(jq -r --arg n "$card" --arg p "$profile" '.cards[]|select(.name==$n)|.profiles[]|select((.index|tostring)==$p)|.label + (if (.available=="no" or .available=="false") then " (unavailable)" else "" end)' <<<"$TOPOLOGY_JSON")")
 done
-choose_index "Card: $card_label | Playback profile" "${labels[@]}" || exit 0
-if ((number==0)); then
-    [[ -n "$last_profile" ]] || { echo 'No last known available profile for this device.' >&2; exit 1; }
-    profile="$last_profile"
-else profile="${profiles[number-1]}"; fi
-mapfile -t routes < <(jq -r --arg n "$card" --arg p "$profile" '.cards[]|select(.name==$n)|.routes[]|select(.available!="no" and .available!="false" and ((.profiles|length)==0 or ([.profiles[]|tostring]|index($p))!=null))|.index' <<<"$TOPOLOGY_JSON")
+while :; do
+    choose_index "Card: $card_label | Playback profile" "${labels[@]}" || exit 0
+    if ((number==0)); then
+        [[ -n "$last_profile" ]] || { wrap_line 'The last known profile is unavailable. Select again.'; continue; }
+        profile="$last_profile"
+    else profile="${profiles[number-1]}"; fi
+    availability="$(jq -r --arg n "$card" --arg p "$profile" '.cards[]|select(.name==$n)|.profiles[]|select((.index|tostring)==$p)|.available' <<<"$TOPOLOGY_JSON")"
+    [[ "$availability" != no && "$availability" != false ]] && break
+    wrap_line 'That playback profile is unavailable. Select again.'
+done
+mapfile -t routes < <(jq -r --arg n "$card" '.cards[]|select(.name==$n)|.routes[].index' <<<"$TOPOLOGY_JSON")
 route=''
+remembered_sink="$(python3 "$TOPOLOGY_SCRIPT" --remembered-sink "$card" "$profile" 2>/dev/null || true)"
+last_route="$(python3 "$TOPOLOGY_SCRIPT" --remembered-port "$card" "$profile" "$remembered_sink" 2>/dev/null || true)"
+printf '%s\n' "${routes[@]}" | grep -Fqx -- "$last_route" || last_route="$(jq -r --arg n "$card" '.cards[]|select(.name==$n)|.activeRoutes[0] // empty' <<<"$TOPOLOGY_JSON")"
+printf '%s\n' "${routes[@]}" | grep -Fqx -- "$last_route" || last_route=''
+last_route_label="$(jq -r --arg n "$card" --arg r "$last_route" '.cards[]|select(.name==$n)|.routes[]|select((.index|tostring)==$r)|.label' <<<"$TOPOLOGY_JSON")"
+labels=("Last known route${last_route_label:+ ($last_route_label)}")
 if ((${#routes[@]})); then
-    remembered_sink="$(python3 "$TOPOLOGY_SCRIPT" --remembered-sink "$card" "$profile" 2>/dev/null || true)"
-    last_route="$(python3 "$TOPOLOGY_SCRIPT" --remembered-port "$card" "$profile" "$remembered_sink" 2>/dev/null || true)"
-    printf '%s\n' "${routes[@]}" | grep -Fqx -- "$last_route" || last_route="$(jq -r --arg n "$card" '.cards[]|select(.name==$n)|.activeRoutes[0] // empty' <<<"$TOPOLOGY_JSON")"
-    printf '%s\n' "${routes[@]}" | grep -Fqx -- "$last_route" || last_route=''
-    last_route_label="$(jq -r --arg n "$card" --arg r "$last_route" '.cards[]|select(.name==$n)|.routes[]|select((.index|tostring)==$r)|.label' <<<"$TOPOLOGY_JSON")"
-    labels=("Last known route${last_route_label:+ ($last_route_label)}")
     for r in "${routes[@]}"; do
-        labels+=("$(jq -r --arg n "$card" --arg r "$r" '.cards[]|select(.name==$n)|.routes[]|select((.index|tostring)==$r)|.label' <<<"$TOPOLOGY_JSON")")
+        labels+=("$(jq -r --arg n "$card" --arg p "$profile" --arg r "$r" '.cards[]|select(.name==$n)|.routes[]|select((.index|tostring)==$r)|.label + (if (.available=="no" or .available=="false" or ((.profiles|length)>0 and ([.profiles[]|tostring]|index($p))==null)) then " (unavailable)" else "" end)' <<<"$TOPOLOGY_JSON")")
     done
-    choose_index 'Output route' "${labels[@]}" || exit 0
-    if ((number>0)); then route="${routes[number-1]}"; else
-        [[ -n "$last_route" ]] || { echo 'No last known available route for this profile.' >&2; exit 1; }
-        route="$last_route"
-    fi
+else
+    labels+=("No output routes exposed (unavailable)")
 fi
+while :; do
+    choose_index 'Output route' "${labels[@]}" || exit 0
+    if ((number==0)); then
+        [[ -n "$last_route" ]] || { wrap_line 'The last known route is unavailable. Select again.'; continue; }
+        candidate="$last_route"
+    else
+        ((number-1 < ${#routes[@]})) || { wrap_line 'That output route is unavailable. Select again.'; continue; }
+        candidate="${routes[number-1]}"
+    fi
+    usable="$(jq -r --arg n "$card" --arg p "$profile" --arg r "$candidate" '.cards[]|select(.name==$n)|.routes[]|select((.index|tostring)==$r)|(.available!="no" and .available!="false" and ((.profiles|length)==0 or ([.profiles[]|tostring]|index($p))!=null))' <<<"$TOPOLOGY_JSON")"
+    [[ "$usable" == true ]] && { route="$candidate"; break; }
+    wrap_line 'That output route is unavailable for this profile. Select again.'
+done
 # 0 selects the last known still-exposed sink; numbered items are live sinks.
 saved="$(jq -r '.saved.sink // empty' <<<"$TOPOLOGY_JSON")"
 sink=''
