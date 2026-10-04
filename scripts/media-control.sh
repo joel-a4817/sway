@@ -49,7 +49,6 @@ switch_process() {
     # The script must be Bash's script operand, not a path in unrelated arguments.
     arg="${args[1]:-}"
     [[ "$arg" == "$SCRIPT_PATH" ]] && return 0
-    [[ "$arg" == */audio-control.sh || "$arg" == audio-control.sh ]] || return 1
     [[ "$(readlink -f -- "$arg" 2>/dev/null)" == "$SCRIPT_PATH" ]]
 }
 process_start() {
@@ -156,11 +155,11 @@ trap 'exit 131' QUIT
 
 TOPOLOGY_SCRIPT="$HOME_DIR/.config/sway/scripts/network/camilladsp-server-sonobus.py"
 [[ -f "$TOPOLOGY_SCRIPT" ]] || { echo "Missing paired server: $TOPOLOGY_SCRIPT" >&2; exit 1; }
-# Opening Audio Control itself runs the requested normalization transaction.
+# Opening Media Control itself runs the requested normalization transaction.
 # The paired CLI pauses only currently-playing media, restores the saved master,
 # then leaves playback paused before the menu appears.
 if ! python3 "$TOPOLOGY_SCRIPT" --normalize-menu-open >>"$ACTION_LOG" 2>&1; then
-    echo 'Audio normalization failed while opening Audio Control.' >&2
+    echo 'Audio normalization failed while opening Media Control.' >&2
     echo "Details: $ACTION_LOG" >&2
     exit 1
 fi
@@ -257,8 +256,8 @@ choose_index() {
         if ((number < i)); then
             local choice="${@:$((number+1)):1}"
             case "$choice" in
-                '[UNAVAILABLE] '*|'[INTERNAL] '*|'[MONITOR] '*|'[MONITOR - NOT SELECTABLE] '*|'[LOOPBACK] '*|'[VIRTUAL] '*)
-                    wrap_line 'That labeled item is not selectable. Select again.'; continue ;;
+                '[UNAVAILABLE] '*)
+                    wrap_line 'That item is unavailable. Select again.'; continue ;;
             esac
             return 0
         fi
@@ -271,7 +270,7 @@ choose_index() {
 camera_topology() {
     pw-dump | python3 -c '
 import json,sys
-x=json.load(sys.stdin); objs={o.get("id"):o for o in x}; devices={}; defaults=set()
+x=json.load(sys.stdin); objs={o.get("id"):o for o in x}; devices={}
 for o in x:
  p=o.get("info",{}).get("props",{}); c=p.get("media.class","")
  if c=="Video/Source":
@@ -395,110 +394,11 @@ case "$selected" in
             [[ -n "$current_card_index" ]] || { wrap_line 'No current output is exposed; select a numbered device.'; continue; }
             selected="$current_card_index"
         else selected="$((number-1))"; fi
-        [[ "$(jq -r --arg n "${CARDS[selected]%%$'\t'*}" '.cards[]|select(.name==$n)|.internal // false' <<<"$TOPOLOGY_JSON")" != true ]] && break
-        wrap_line 'That device is internal. Select an available playback device.'
+        break
     done
     ;;
  select-input)
-    python3 -c '
-import importlib.util, json, sys
-spec=importlib.util.spec_from_file_location("media_control_backend",sys.argv[1])
-backend=importlib.util.module_from_spec(spec)
-spec.loader.exec_module(backend)
-def blocked(row):
-    text=str(row.get("label") or row.get("name") or "")
-    return (not backend._available_option(row) or
-            text.startswith(("[UNAVAILABLE] ","[INTERNAL] ","[MONITOR] ","[LOOPBACK] ","[VIRTUAL] ")))
-def display(row):
-    text=str(row.get("label") or row.get("name") or row.get("index") or "")
-    tags=("[UNAVAILABLE] ","[INTERNAL] ","[MONITOR - NOT SELECTABLE] ",
-          "[MONITOR] ","[LOOPBACK] ","[VIRTUAL] ")
-    tag=next((t for t in tags if text.startswith(t)),"")
-    if tag:text=text[len(tag):]
-    while any(text.startswith(t) for t in tags):
-        text=text[len(next(t for t in tags if text.startswith(t))):]
-    if text.startswith("Monitor of "):text=text[len("Monitor of "):]
-    status={"[UNAVAILABLE] ":"N/A","[INTERNAL] ":"INT",
-            "[MONITOR - NOT SELECTABLE] ":"MON","[MONITOR] ":"MON",
-            "[LOOPBACK] ":"LOOP","[VIRTUAL] ":"VIRT"}.get(tag)
-    if not status and not backend._available_option(row):status="N/A"
-    return ("["+status+"] " if status else "")+text
-def wrapped(prefix,text):
-    import shutil,textwrap
-    width=shutil.get_terminal_size(fallback=(80,24)).columns
-    available=max(1,width-len(prefix))
-    for line in str(text).splitlines() or [""]:
-        pieces=textwrap.wrap(line,width=available,break_long_words=True,
-                             break_on_hyphens=False,replace_whitespace=False,
-                             drop_whitespace=True) or [""]
-        for index,piece in enumerate(pieces):
-            print((prefix if index==0 else " "*len(prefix))+piece)
-def pick(label,rows,current=None):
-    if label=="Audio input | Device":
-        result=backend.run([backend.exe("pactl"),"get-default-source"],False,5,backend.media_env())
-        if result.returncode:raise RuntimeError("Cannot read current input source")
-        source=result.stdout.strip()
-        current=next((row["name"] for row in rows if any(
-            node["name"]==source for node in row["sources"])),None)
-    if not rows:raise RuntimeError("No "+label+" choices are exposed")
-    selected=next((row for row in rows if str(row.get("index",row.get("name")))==str(current)
-                   and not blocked(row)),None) if current is not None else None
-    print()
-    wrapped("",label)
-    if selected:
-        wrapped("[0] ","Current ("+display(selected)+")")
-    else:
-        wrapped("[N/A] [0] ","Current")
-    for number,row in enumerate(rows,1):
-        text=display(row)
-        tag=next((t for t in ("[N/A] ","[INT] ","[MON] ","[LOOP] ","[VIRT] ")
-                  if text.startswith(t)),"")
-        wrapped("{}[{}] ".format(tag,number),text[len(tag):])
-    while True:
-        answer=input("Select: ").strip()
-        if answer.isdecimal():
-            number=int(answer)
-            if number==0 and selected is not None:return selected
-            if 1<=number<=len(rows) and not blocked(rows[number-1]):return rows[number-1]
-        print("Select an available number.")
-
-def staged_pick(label,rows,current=None):
-    selected=pick(label,rows,current)
-    if label=='Audio input | Device':
-        saved_playback=backend.saved_output_route()
-        if saved_playback.get('card')==selected['name'] and not backend.STOPPED.exists():
-            live_playback=backend._find_card(backend.audio_topology(),selected['name'])
-            backend.MEDIA_TRANSACTION.input_playback_before={
-                'profile':live_playback['activeProfile'],
-                'routes':list(live_playback['activeRoutes']),
-                'monitor':backend.alive(backend.rpid(backend.LOCALMONPID))}
-        backend.MEDIA_TRANSACTION.input_original=backend._input_card(selected['name'])
-        backend.MEDIA_TRANSACTION.input_ports=backend._input_stage_port_snapshot(selected['name'])
-        backend.MEDIA_TRANSACTION.input_default=backend.run([backend.exe('pactl'),'get-default-source'],False,5,backend.media_env()).stdout.strip()
-        backend.MEDIA_TRANSACTION.input_stream_origins=backend.input_stream_origins()
-        backend._input_stage_card=selected['name']
-    elif label=='Audio input | Profile':
-        backend._input_stage(backend._input_stage_card,selected['index'])
-    elif label=='Audio input | Route':
-        backend._input_stage(backend._input_stage_card,backend._input_stage_profile,selected['index'])
-    if label=='Audio input | Profile':backend._input_stage_profile=selected['index']
-    return selected
-backend._pick_input=staged_pick
-from contextlib import nullcontext
-backend.media_change=nullcontext
-try:
-    def finalize():
-        if not backend.STOPPED.exists():backend.normalize_audio_volumes()
-    result=backend.select_input_interactive(finalize=finalize)
-    print(json.dumps(result,ensure_ascii=False))
-except KeyboardInterrupt:
-    sys.exit(130)
-except Exception as error:
-    print(str(error),file=sys.stderr)
-    sys.exit(1)
-finally:
-    backend.pause_for_normalization()
-' "$TOPOLOGY_SCRIPT" || exit $?
+    python3 "$TOPOLOGY_SCRIPT" --interactive-input || exit $?
     exit 0 ;;
  select-camera)
     camera_picker || exit $?
@@ -644,7 +544,7 @@ for x in "${sinks[@]}"; do
     labels+=("$(jq -r --arg n "$card" --arg s "$x" --arg r "$route" '
       .cards[]|select(.name==$n) as $card|.sinks[]|select(.name==$s) as $sink|
       ([$card.routes[]|select((.index|tostring)==$r)|.devices[]|tostring]) as $devices|
-      (if ($sink.internal or (($devices|length)>0 and $sink.profileDevice != null and
+      (if ((($devices|length)>0 and $sink.profileDevice != null and
             ($devices|index($sink.profileDevice|tostring))==null))
        then "[UNAVAILABLE] " else "" end)+$sink.label' <<<"$TOPOLOGY_JSON")")
 done
@@ -661,7 +561,7 @@ while :; do
         ((number-1 < ${#sinks[@]})) || { wrap_line 'Select an exposed sink.'; continue; }
         idx="$number";candidate="${sinks[number-1]}"
     fi
-    [[ "${labels[idx]}" != '[UNAVAILABLE] '* && "${labels[idx]}" != '[INTERNAL] '* ]] && { sink="$candidate"; break; }
+    [[ "${labels[idx]}" != '[UNAVAILABLE] '* ]] && { sink="$candidate"; break; }
     wrap_line 'That sink cannot be selected. Select again.'
 done
 
