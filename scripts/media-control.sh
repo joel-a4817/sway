@@ -154,8 +154,8 @@ trap 'exit 131' QUIT
 TOPOLOGY_SCRIPT="$HOME_DIR/.config/sway/scripts/network/camilladsp-server-sonobus.py"
 [[ -f "$TOPOLOGY_SCRIPT" ]] || { echo "Missing paired server: $TOPOLOGY_SCRIPT" >&2; exit 1; }
 # Opening Audio Control itself runs the requested normalization transaction.
-# The server pauses only currently-playing media, restores the saved master,
-# then resumes only that snapshot before the menu appears.
+# The paired CLI pauses only currently-playing media, restores the saved master,
+# then leaves playback paused before the menu appears.
 if ! python3 "$TOPOLOGY_SCRIPT" --normalize-menu-open >>"$ACTION_LOG" 2>&1; then
     echo 'Audio normalization failed while opening Audio Control.' >&2
     tail -n 25 "$ACTION_LOG" >&2
@@ -170,8 +170,8 @@ run_quiet_action() {
         return "$status"
     fi
 }
-# Selection does not pause or mutate. The server owns pause, routing,
-# normalization, and resume as one transaction after the final choice.
+# Selection does not pause or mutate. The paired CLI owns pause, routing,
+# normalization as one transaction after the final choice; playback stays paused.
 TOPOLOGY_JSON="$(output_topology 2>/dev/null)" || TOPOLOGY_JSON='{"cards":[]}'
 mapfile -t CARDS < <(jq -r '.cards[] | [.name,.label] | @tsv' <<<"$TOPOLOGY_JSON")
 # Output devices are enumerated when Outputs is selected, not cached.
@@ -199,13 +199,36 @@ wrap_prefixed_line() {
         else printf '%s%s\n' "$continuation" "$line"; fi
     done < <(printf '%s\n' "$text" | expand -t 4 | fold -s -w "$width")
 }
+compact_menu_label() {
+    local text="$1"
+    text="${text//Currently selected/Current}"
+    text="${text//Last known/Last}"
+    text="${text//Playback device/Device}"
+    text="${text//Playback profile/Profile}"
+    text="${text//Playback sink/Sink}"
+    text="${text//Capture device/Input}"
+    text="${text//Physical device/Device}"
+    text="${text//Camera endpoint/Endpoint}"
+    text="${text//MONITOR - NOT SELECTABLE/MONITOR}"
+    printf '%s' "$text"
+}
 print_menu_item() {
-    wrap_prefixed_line "[$1] " "$2"
+    local label="$2" tag='' prefix
+    # Only presentation moves tags; original labels still govern validation.
+    case "$label" in
+        '[UNAVAILABLE] '*) tag='[N/A] '; label="${label#'[UNAVAILABLE] '}" ;;
+        '[INTERNAL] '*) tag='[INT] '; label="${label#'[INTERNAL] '}" ;;
+        '[MONITOR] '*) tag='[MONITOR] '; label="${label#'[MONITOR] '}" ;;
+        '[MONITOR - NOT SELECTABLE] '*) tag='[MONITOR] '; label="${label#'[MONITOR - NOT SELECTABLE] '}" ;;
+        '[LOOPBACK] '*) tag='[LOOPBACK] '; label="${label#'[LOOPBACK] '}" ;;
+    esac
+    prefix="${tag}[$1] "
+    wrap_prefixed_line "$prefix" "$label"
 }
 choose_index() {
     local title="$1" answer i=0; shift
     ((${#@})) || { echo "No choices for $title" >&2; return 1; }
-    echo; wrap_line "$title"; echo
+    echo; wrap_line "$(compact_menu_label "$title")"; echo
     for label in "$@"; do print_menu_item "$i" "$label"; i=$((i+1)); done
     while :; do
         read -r -p 'Select: ' answer || return 1
@@ -224,24 +247,41 @@ audio_input_picker() {
     json="$(pactl -f json list sources)" || return 1
     current="$(pactl get-default-source 2>/dev/null || true)"
     mapfile -t source_names < <(jq -r '.[] | select((.name // "") != "") | .name' <<<"$json")
-    mapfile -t source_labels < <(jq -r '.[] | select((.name // "") != "") | (.description // .name)' <<<"$json")
+    mapfile -t source_labels < <(jq -r '
+      .[] | select((.name // "") != "") |
+      (.properties // {}) as $p |
+      ((.monitor_of_sink != null and .monitor_of_sink != -1 and .monitor_of_sink != 4294967295) or
+       ($p["device.class"] == "monitor") or
+       ((.name // "") | endswith(".monitor"))) as $monitor |
+      (($p["alsa.driver_name"] == "snd_aloop") or
+       (($p["alsa.card_name"] // "" | ascii_downcase) == "loopback") or
+       ((.name // "") | startswith("alsa_input.platform-snd_aloop"))) as $loopback |
+      (if $monitor then "[MONITOR - NOT SELECTABLE] "
+       elif $loopback then "[LOOPBACK] " else "" end) + (.description // .name)' <<<"$json")
     ((${#source_names[@]})) || { wrap_line 'No audio input sources are exposed.'; return 1; }
     current_label=''
     for i in "${!source_names[@]}"; do [[ "${source_names[i]}" == "$current" ]] && current_label="${source_labels[i]}"; done
-    choose_index 'Audio inputs | Capture device' "Currently selected input${current_label:+ ($current_label)}" "${source_labels[@]}" || return 1
+    while :; do
+    choose_index 'Audio inputs | Capture device' "Current input${current_label:+ ($current_label)}" "${source_labels[@]}" || return 1
     if ((number==0)); then
-        [[ -n "$current_label" ]] || { wrap_line 'No current audio input is exposed; select a numbered input.'; return 1; }
+        [[ -n "$current_label" ]] || { wrap_line 'No current audio input is exposed; select a numbered input.'; continue; }
         source_name="$current"; source_label="$current_label"
     else
         source_name="${source_names[number-1]}"; source_label="${source_labels[number-1]}"
     fi
+    if [[ "$source_label" == '[MONITOR - NOT SELECTABLE] '* ]]; then
+        wrap_line 'A playback monitor is not a microphone input. Select another source.'
+        continue
+    fi
+    break
+    done
     mapfile -t port_names < <(jq -r --arg n "$source_name" '.[]|select(.name==$n)|(.ports // [])[]|.name' <<<"$json")
-    mapfile -t port_labels < <(jq -r --arg n "$source_name" '.[]|select(.name==$n)|(.ports // [])[]|(.description // .name) + (if ((.availability // "unknown") == "not available") then " (unavailable)" else "" end)' <<<"$json")
+    mapfile -t port_labels < <(jq -r --arg n "$source_name" '.[]|select(.name==$n)|(.ports // [])[]|(if ((.availability // "unknown") == "not available") then "[UNAVAILABLE] " else "" end) + (.description // .name)' <<<"$json")
     active_port="$(jq -r --arg n "$source_name" '.[]|select(.name==$n)|.active_port // empty' <<<"$json")"
     while :; do
         active_label=''; for i in "${!port_names[@]}"; do [[ "${port_names[i]}" == "$active_port" ]] && active_label="${port_labels[i]}"; done
         if ((${#port_names[@]})); then
-            choose_index "$source_label | Input port" "Currently selected port${active_label:+ ($active_label)}" "${port_labels[@]}" || return 1
+            choose_index "$source_label | Input port" "Current port${active_label:+ ($active_label)}" "${port_labels[@]}" || return 1
             if ((number==0)); then port_name="$active_port"; port_label="$active_label"; else port_name="${port_names[number-1]}"; port_label="${port_labels[number-1]}"; fi
             availability="$(jq -r --arg n "$source_name" --arg p "$port_name" '.[]|select(.name==$n)|(.ports // [])[]|select(.name==$p)|(.availability // "unknown")' <<<"$json")"
             if [[ "$availability" == 'not available' || -z "$port_name" ]]; then wrap_line 'That input port is unavailable. Select again.'; continue; fi
@@ -267,7 +307,7 @@ for o in x:
  if c=="Video/Source":
   did=p.get("device.id"); d=objs.get(did,{}) if isinstance(did,int) else {}
   dp=d.get("info",{}).get("props",{})
-  physical=str(dp.get("device.bus-id") or dp.get("device.serial") or dp.get("device.path") or did or p.get("device.id") or o.get("id"))
+  physical=str(did) if isinstance(did,int) else "node:"+str(o.get("id"))
   dl=dp.get("device.description") or dp.get("device.nick") or dp.get("device.product.name") or p.get("device.description") or "Camera"
   nl=p.get("node.description") or p.get("node.nick") or p.get("node.name") or str(o.get("id"))
   devices.setdefault(physical,{"key":physical,"label":dl,"nodes":[]})["nodes"].append({"id":o.get("id"),"name":p.get("node.name",""),"label":nl})
@@ -284,15 +324,18 @@ camera_picker() {
     for i in "${!device_keys[@]}"; do
       jq -e --arg k "${device_keys[i]}" --arg n "$current" '.[]|select(.key==$k)|.nodes[]|select(.name==$n)' <<<"$topo" >/dev/null && { current_device="${device_keys[i]}"; current_device_label="${device_labels[i]}"; }
     done
-    choose_index 'Cameras | Physical device' "Currently selected camera${current_device_label:+ ($current_device_label)}" "${device_labels[@]}" || return 1
-    if ((number==0)); then [[ -n "$current_device" ]] || { wrap_line 'No current camera is exposed; select a numbered camera.'; return 1; }; device_key="$current_device"; device_label="$current_device_label"
+    while :; do
+    choose_index 'Cameras | Physical device' "Current camera${current_device_label:+ ($current_device_label)}" "${device_labels[@]}" || return 1
+    if ((number==0)); then [[ -n "$current_device" ]] || { wrap_line 'No current camera is exposed; select a numbered camera.'; continue; }; device_key="$current_device"; device_label="$current_device_label"
     else device_key="${device_keys[number-1]}"; device_label="${device_labels[number-1]}"; fi
+    break
+    done
     mapfile -t node_ids < <(jq -r --arg k "$device_key" '.[]|select(.key==$k)|.nodes[].id' <<<"$topo")
     mapfile -t node_names < <(jq -r --arg k "$device_key" '.[]|select(.key==$k)|.nodes[].name' <<<"$topo")
     mapfile -t node_labels < <(jq -r --arg k "$device_key" '.[]|select(.key==$k)|.nodes[].label' <<<"$topo")
     while :; do
       current_node_label=''; for i in "${!node_names[@]}"; do [[ "${node_names[i]}" == "$current" ]] && current_node_label="${node_labels[i]}"; done
-      choose_index "$device_label | Camera endpoint" "Currently selected endpoint${current_node_label:+ ($current_node_label)}" "${node_labels[@]}" || return 1
+      choose_index "$device_label | Camera endpoint" "Current endpoint${current_node_label:+ ($current_node_label)}" "${node_labels[@]}" || return 1
       if ((number==0)); then
         if [[ -z "$current_node_label" ]]; then wrap_line 'No current endpoint belongs to this camera. Select again.'; continue; fi
         for i in "${!node_names[@]}"; do [[ "${node_names[i]}" == "$current" ]] && node_id="${node_ids[i]}" && node_name="${node_names[i]}" && node_label="${node_labels[i]}"; done
@@ -339,11 +382,15 @@ case "$selected" in
             current_card_index="$i"; current_card_label="${labels[i]}"; break
         fi
     done
-    choose_index 'Audio outputs | Playback device' "Currently selected output${current_card_label:+ ($current_card_label)}" "${labels[@]}" || exit 0
-    if ((number == 0)); then
-        [[ -n "$current_card_index" ]] || { wrap_line 'No current output is exposed; select a numbered device.' >&2; exit 1; }
-        selected="$current_card_index"
-    else selected="$((number-1))"; fi
+    while :; do
+        choose_index 'Audio outputs | Playback device' "Current output${current_card_label:+ ($current_card_label)}" "${labels[@]}" || exit 0
+        if ((number == 0)); then
+            [[ -n "$current_card_index" ]] || { wrap_line 'No current output is exposed; select a numbered device.'; continue; }
+            selected="$current_card_index"
+        else selected="$((number-1))"; fi
+        [[ "$(jq -r --arg n "${CARDS[selected]%%$'\t'*}" '.cards[]|select(.name==$n)|.internal // false' <<<"$TOPOLOGY_JSON")" != true ]] && break
+        wrap_line 'That device is internal. Select an available playback device.'
+    done
     ;;
  select-input)
     audio_input_picker || exit $?
@@ -353,7 +400,7 @@ case "$selected" in
     exit 0 ;;
  audio-services)
     choose_index 'Audio services' \
-        'Audio stop / start (toggle)' \
+        'Stop / start audio' \
         'Restart CamillaDSP' \
         'Restart SonoBus' \
         'Restart AirPlay' \
@@ -399,8 +446,8 @@ case "$selected" in
         echo 'The currently selected filter is not available.' >&2
         exit 1
     fi
-    filter_choices=("Currently selected filter ($current_label)" "${labels[@]}")
-    choose_index 'CamillaDSP listening filter' "${filter_choices[@]}" || exit 0
+    filter_choices=("Current filter ($current_label)" "${labels[@]}")
+    choose_index 'Listening filter' "${filter_choices[@]}" || exit 0
     answer="$number"
     if ((number == 0)); then
         selected_filter="$current_filter"
@@ -419,15 +466,46 @@ card="${CARDS[selected]%%$'\t'*}"
 card_label="${CARDS[selected]#*$'\t'}"
 # Refresh after the Swaynag selection, without changing the live graph.
 TOPOLOGY_JSON="$(output_topology)" || { echo "Start audio services before choosing a playback output." >&2; exit 1; }
+# Device selection is a real output apply, exactly like the web picker.
+# Reuse the active profile if usable, otherwise the remembered usable profile,
+# then the first exposed usable profile. The paired controller owns pause and
+# normalization for this stage, including when the web host is not running.
+device_profile="$(jq -r --arg n "$card" '
+  .cards[] | select(.name==$n) |
+  (.activeProfile | tostring) as $active |
+  [.profiles[] | select(.available != "no" and .available != "false" and
+    (.name | ascii_downcase) != "off") | .index | tostring] as $usable |
+  if ($usable | index($active)) != null then $active else empty end
+' <<<"$TOPOLOGY_JSON")"
+remembered_profile="$(python3 "$TOPOLOGY_SCRIPT" --remembered-profile "$card" 2>/dev/null || true)"
+if [[ -z "$device_profile" ]]; then
+    device_profile="$(jq -r --arg n "$card" --arg p "$remembered_profile" '
+      .cards[] | select(.name==$n) | .profiles[] |
+      select((.index | tostring)==$p and .available != "no" and
+        .available != "false" and (.name | ascii_downcase) != "off") |
+      .index
+    ' <<<"$TOPOLOGY_JSON" | head -n 1)"
+fi
+if [[ -z "$device_profile" ]]; then
+    device_profile="$(jq -r --arg n "$card" '
+      .cards[] | select(.name==$n) | .profiles[] |
+      select(.available != "no" and .available != "false" and
+        (.name | ascii_downcase) != "off") | .index
+    ' <<<"$TOPOLOGY_JSON" | head -n 1)"
+fi
+[[ -n "$device_profile" ]] || { wrap_line 'No usable playback profile for this device.' >&2; exit 1; }
+TOPOLOGY_JSON="$(python3 "$TOPOLOGY_SCRIPT" --apply-output-profile "$card" "$device_profile")" || {
+    wrap_line 'Playback device could not be applied.' >&2; exit 1;
+}
 active="$(jq -r --arg n "$card" '.cards[]|select(.name==$n)|.activeProfile // empty' <<<"$TOPOLOGY_JSON")"
-mapfile -t profiles < <(jq -r --arg n "$card" '.cards[]|select(.name==$n)|.profiles[]|select((.name|ascii_downcase)!="off")|.index' <<<"$TOPOLOGY_JSON")
+mapfile -t profiles < <(jq -r --arg n "$card" '.cards[]|select(.name==$n)|.profiles[]|.index' <<<"$TOPOLOGY_JSON")
 last_profile="$(python3 "$TOPOLOGY_SCRIPT" --remembered-profile "$card" 2>/dev/null || true)"
 printf '%s\n' "${profiles[@]}" | grep -Fqx -- "$last_profile" || last_profile="$active"
 printf '%s\n' "${profiles[@]}" | grep -Fqx -- "$last_profile" || last_profile=''
 last_profile_label="$(jq -r --arg n "$card" --arg p "$last_profile" '.cards[]|select(.name==$n)|.profiles[]|select((.index|tostring)==$p)|.label' <<<"$TOPOLOGY_JSON")"
-labels=("Last known profile${last_profile_label:+ ($last_profile_label)}")
+labels=("Last profile${last_profile_label:+ ($last_profile_label)}")
 for profile in "${profiles[@]}"; do
-    labels+=("$(jq -r --arg n "$card" --arg p "$profile" '.cards[]|select(.name==$n)|.profiles[]|select((.index|tostring)==$p)|.label + (if (.available=="no" or .available=="false") then " (unavailable)" else "" end)' <<<"$TOPOLOGY_JSON")")
+    labels+=("$(jq -r --arg n "$card" --arg p "$profile" '.cards[]|select(.name==$n)|.profiles[]|select((.index|tostring)==$p)|(if (.available=="no" or .available=="false" or ((.name|ascii_downcase)=="off")) then "[UNAVAILABLE] " else "" end) + .label' <<<"$TOPOLOGY_JSON")")
 done
 while :; do
     choose_index "Card: $card_label | Playback profile" "${labels[@]}" || exit 0
@@ -436,9 +514,12 @@ while :; do
         profile="$last_profile"
     else profile="${profiles[number-1]}"; fi
     availability="$(jq -r --arg n "$card" --arg p "$profile" '.cards[]|select(.name==$n)|.profiles[]|select((.index|tostring)==$p)|.available' <<<"$TOPOLOGY_JSON")"
-    [[ "$availability" != no && "$availability" != false ]] && break
+    [[ "$availability" != no && "$availability" != false && "$(jq -r --arg n "$card" --arg p "$profile" '.cards[]|select(.name==$n)|.profiles[]|select((.index|tostring)==$p)|.name' <<<"$TOPOLOGY_JSON")" != off ]] && break
     wrap_line 'That playback profile is unavailable. Select again.'
 done
+# The selected profile is applied now so its actual sinks/routes appear next.
+TOPOLOGY_JSON="$(python3 "$TOPOLOGY_SCRIPT" --apply-output-profile "$card" "$profile")" || { wrap_line 'Playback profile could not be applied.' >&2; exit 1; }
+active="$(jq -r --arg n "$card" '.cards[]|select(.name==$n)|.activeProfile // empty' <<<"$TOPOLOGY_JSON")"
 mapfile -t routes < <(jq -r --arg n "$card" '.cards[]|select(.name==$n)|.routes[].index' <<<"$TOPOLOGY_JSON")
 route=''
 remembered_sink="$(python3 "$TOPOLOGY_SCRIPT" --remembered-sink "$card" "$profile" 2>/dev/null || true)"
@@ -446,14 +527,15 @@ last_route="$(python3 "$TOPOLOGY_SCRIPT" --remembered-port "$card" "$profile" "$
 printf '%s\n' "${routes[@]}" | grep -Fqx -- "$last_route" || last_route="$(jq -r --arg n "$card" '.cards[]|select(.name==$n)|.activeRoutes[0] // empty' <<<"$TOPOLOGY_JSON")"
 printf '%s\n' "${routes[@]}" | grep -Fqx -- "$last_route" || last_route=''
 last_route_label="$(jq -r --arg n "$card" --arg r "$last_route" '.cards[]|select(.name==$n)|.routes[]|select((.index|tostring)==$r)|.label' <<<"$TOPOLOGY_JSON")"
-labels=("Last known route${last_route_label:+ ($last_route_label)}")
+labels=("Last route${last_route_label:+ ($last_route_label)}")
 if ((${#routes[@]})); then
     for r in "${routes[@]}"; do
-        labels+=("$(jq -r --arg n "$card" --arg p "$profile" --arg r "$r" '.cards[]|select(.name==$n)|.routes[]|select((.index|tostring)==$r)|.label + (if (.available=="no" or .available=="false" or ((.profiles|length)>0 and ([.profiles[]|tostring]|index($p))==null)) then " (unavailable)" else "" end)' <<<"$TOPOLOGY_JSON")")
+        labels+=("$(jq -r --arg n "$card" --arg p "$profile" --arg r "$r" '.cards[]|select(.name==$n)|.routes[]|select((.index|tostring)==$r)|(if (.available=="no" or .available=="false" or ((.name|ascii_downcase)=="off") or ((.profiles|length)>0 and ([.profiles[]|tostring]|index($p))==null)) then "[UNAVAILABLE] " else "" end) + .label' <<<"$TOPOLOGY_JSON")")
     done
 else
-    labels+=("No output routes exposed (unavailable)")
+    labels+=("[UNAVAILABLE] No output routes exposed")
 fi
+if ((${#routes[@]})); then
 while :; do
     choose_index 'Output route' "${labels[@]}" || exit 0
     if ((number==0)); then
@@ -463,34 +545,54 @@ while :; do
         ((number-1 < ${#routes[@]})) || { wrap_line 'That output route is unavailable. Select again.'; continue; }
         candidate="${routes[number-1]}"
     fi
-    usable="$(jq -r --arg n "$card" --arg p "$profile" --arg r "$candidate" '.cards[]|select(.name==$n)|.routes[]|select((.index|tostring)==$r)|(.available!="no" and .available!="false" and ((.profiles|length)==0 or ([.profiles[]|tostring]|index($p))!=null))' <<<"$TOPOLOGY_JSON")"
+    usable="$(jq -r --arg n "$card" --arg p "$profile" --arg r "$candidate" '.cards[]|select(.name==$n)|.routes[]|select((.index|tostring)==$r)|(.available!="no" and .available!="false" and ((.name|ascii_downcase)!="off") and ((.profiles|length)==0 or ([.profiles[]|tostring]|index($p))!=null))' <<<"$TOPOLOGY_JSON")"
     [[ "$usable" == true ]] && { route="$candidate"; break; }
     wrap_line 'That output route is unavailable for this profile. Select again.'
 done
-# 0 selects the last known still-exposed sink; numbered items are live sinks.
+else
+    wrap_line 'No output routes exposed for this device; continuing to playback sinks.'
+fi
+
+if [[ -n "$route" ]]; then
+    TOPOLOGY_JSON="$(python3 "$TOPOLOGY_SCRIPT" --apply-output-route "$card" "$profile" "$route")" || { wrap_line 'Output route could not be applied.' >&2; exit 1; }
+fi
+# 0 keeps the last known still-exposed sink; numbered items are live sinks.
 saved="$(jq -r '.saved.sink // empty' <<<"$TOPOLOGY_JSON")"
 sink=''
-if [[ "$profile" == "$active" ]]; then
-    mapfile -t sinks < <(jq -r --arg n "$card" '.cards[]|select(.name==$n)|.sinks[].name' <<<"$TOPOLOGY_JSON")
-    last_sink="$(python3 "$TOPOLOGY_SCRIPT" --remembered-sink "$card" "$profile" 2>/dev/null || true)"
-    printf '%s\n' "${sinks[@]}" | grep -Fqx -- "$last_sink" || last_sink="$saved"
-    printf '%s\n' "${sinks[@]}" | grep -Fqx -- "$last_sink" || last_sink=''
-    last_sink_label="$(jq -r --arg n "$card" --arg s "$last_sink" '.cards[]|select(.name==$n)|.sinks[]|select(.name==$s)|.label' <<<"$TOPOLOGY_JSON")"
-    labels=("Last known sink${last_sink_label:+ ($last_sink_label)}")
-    for x in "${sinks[@]}"; do
-        labels+=("$(jq -r --arg n "$card" --arg s "$x" '.cards[]|select(.name==$n)|.sinks[]|select(.name==$s)|.label' <<<"$TOPOLOGY_JSON")")
-    done
-    if ((${#sinks[@]})); then
-        while :; do
-            choose_index 'Playback sink' "${labels[@]}" || exit 0
-            if ((number>0)); then sink="${sinks[number-1]}"; break; fi
-            if [[ -n "$last_sink" ]]; then sink="$last_sink"; break; fi
-            echo 'No last known available sink; choose a numbered sink.'
-        done
-    fi
+mapfile -t sinks < <(jq -r --arg n "$card" '.cards[]|select(.name==$n)|.sinks[].name' <<<"$TOPOLOGY_JSON")
+last_sink="$(python3 "$TOPOLOGY_SCRIPT" --remembered-sink "$card" "$profile" 2>/dev/null || true)"
+if [[ -z "$last_sink" && "$(jq -r '.saved.card // empty' <<<"$TOPOLOGY_JSON")" == "$card" ]]; then
+    last_sink="$(jq -r '.saved.sink // empty' <<<"$TOPOLOGY_JSON")"
 fi
+last_sink_label="$(jq -r --arg n "$card" --arg s "$last_sink" '.cards[]|select(.name==$n)|.sinks[]|select(.name==$s)|.label' <<<"$TOPOLOGY_JSON")"
+labels=("Last sink${last_sink_label:+ ($last_sink_label)}")
+for x in "${sinks[@]}"; do
+    labels+=("$(jq -r --arg n "$card" --arg s "$x" --arg r "$route" '
+      .cards[]|select(.name==$n) as $card|.sinks[]|select(.name==$s) as $sink|
+      ([$card.routes[]|select((.index|tostring)==$r)|.devices[]|tostring]) as $devices|
+      (if ($sink.internal or (($devices|length)>0 and $sink.profileDevice != null and
+            ($devices|index($sink.profileDevice|tostring))==null))
+       then "[UNAVAILABLE] " else "" end)+$sink.label' <<<"$TOPOLOGY_JSON")")
+done
+((${#sinks[@]})) || { wrap_line 'No playback sinks exposed by the selected profile.' >&2; exit 1; }
+while :; do
+    choose_index 'Playback sink' "${labels[@]}" || exit 0
+    if ((number==0)); then
+        [[ -n "$last_sink" ]] || { wrap_line 'No last known sink is exposed. Select again.'; continue; }
+        candidate="$last_sink"
+        idx=''
+        for i in "${!sinks[@]}"; do [[ "${sinks[i]}" == "$candidate" ]] && idx="$((i+1))"; done
+        [[ -n "$idx" ]] || { wrap_line 'Last known sink is no longer exposed. Select again.'; continue; }
+    else
+        ((number-1 < ${#sinks[@]})) || { wrap_line 'Select an exposed sink.'; continue; }
+        idx="$number";candidate="${sinks[number-1]}"
+    fi
+    [[ "${labels[idx]}" != '[UNAVAILABLE] '* && "${labels[idx]}" != '[INTERNAL] '* ]] && { sink="$candidate"; break; }
+    wrap_line 'That sink cannot be selected. Select again.'
+done
+
 request="$(jq -nc --arg card "$card" --arg profile "$profile" --arg port "$route" --arg sink "$sink" '{card:$card,profile:$profile,port:$port,sink:$sink}')"
-# The running server serializes the entire pause -> output -> normalize -> resume.
+# The paired controller serializes pause -> output -> normalize; playback stays paused.
 flock -u 9
 run_quiet_action python3 "$TOPOLOGY_SCRIPT" --switch-output "$request" || exit $?
 result_line="Playback output applied: $card_label"
