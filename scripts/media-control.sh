@@ -2,7 +2,7 @@
 set -u
 
 HOME_DIR="${HOME:?HOME is required}"
-STATE_DIR="$HOME_DIR/.local/state/sway/audio-switch"
+STATE_DIR="$HOME_DIR/.local/state/sway/media-control"
 REMOTE_STATE="$HOME_DIR/.local/state/sway/camilladsp-webremote"
 LEGACY_STATE="$HOME_DIR/.local/state/sway/audio"
 
@@ -11,7 +11,7 @@ mkdir -p "$STATE_DIR" "$REMOTE_STATE"
 # Do not migrate an active old server's PID/markers: restart the paired server first.
 legacy_server_pid="$(cat "$LEGACY_STATE/camilladsp-webremote/web-server.pid" 2>/dev/null || true)"
 if [[ "$legacy_server_pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$legacy_server_pid" 2>/dev/null; then
-    echo 'Restart the updated webremote server before using the updated audio switch.' >&2
+    echo 'Restart the updated webremote server before using the updated media-control.' >&2
     exit 1
 fi
 # First-run migration: copy persistent values without overwriting new state.
@@ -32,9 +32,9 @@ if [[ ! -e "$STATE_DIR/state-migrated" && -d "$LEGACY_STATE" ]]; then
     rmdir "$LEGACY_STATE/camilladsp-webremote" "$LEGACY_STATE" 2>/dev/null || true
 fi
 # Serialize new launches separately from the lock shared with webremote startup.
-LAUNCH_LOCK="$STATE_DIR/audio-switch-launch.lock"
-OWNER_FILE="$STATE_DIR/audio-switch-owner"
-LOCK_FILE="$STATE_DIR/audio-switch.lock"
+LAUNCH_LOCK="$STATE_DIR/media-control-launch.lock"
+OWNER_FILE="$STATE_DIR/media-control-owner"
+LOCK_FILE="$STATE_DIR/media-control.lock"
 exec 8>"$LAUNCH_LOCK"
 flock -x 8 || exit 1
 # Match a switch process by its script argument, not by its terminal or audio engine.
@@ -82,22 +82,22 @@ for entry in /proc/[0-9]*; do
 done
 exec 9>"$LOCK_FILE"
 if ! flock -w 10 9; then
-    echo 'Previous audio switch or webremote startup still holds the audio lock.' >&2
+    echo 'Previous media-control or webremote startup still holds the audio lock.' >&2
     exit 1
 fi
 printf '%s %s\n' "$$" "$(process_start "$$")" >"$OWNER_FILE"
 flock -u 8
 exec 8>&-
 
-ACTION_LOG="$STATE_DIR/audio-switch.log"
+ACTION_LOG="$STATE_DIR/media-control.log"
 RESULT_FILE="$STATE_DIR/audio-toggle-complete.$$"
 ACTION_STARTED_FILE="$STATE_DIR/audio-toggle-started.$$"
 CARD_SELECTION_FILE="$STATE_DIR/audio-card-selected.$$"
-SWAYNAG_LOG="$STATE_DIR/audio-switch-swaynag.$$"
+SWAYNAG_LOG="$STATE_DIR/media-control-swaynag.$$"
 
 mkdir -p "$STATE_DIR"
 chmod 700 "$STATE_DIR" 2>/dev/null || true
-printf '\n[%s] audio-switch pid=%s\n' "$(date -Iseconds 2>/dev/null || date)" "$$" >>"$ACTION_LOG"
+printf '\n[%s] media-control pid=%s\n' "$(date -Iseconds 2>/dev/null || date)" "$$" >>"$ACTION_LOG"
 FINAL_PAUSE_REACHED=0
 EXIT_HANDLER_RUNNING=0
 
@@ -174,8 +174,7 @@ run_quiet_action() {
 # normalization, and resume as one transaction after the final choice.
 TOPOLOGY_JSON="$(output_topology 2>/dev/null)" || TOPOLOGY_JSON='{"cards":[]}'
 mapfile -t CARDS < <(jq -r '.cards[] | [.name,.label] | @tsv' <<<"$TOPOLOGY_JSON")
-if ((${#CARDS[@]})); then printf '%s\n' "${CARDS[@]}" > "$STATE_DIR/audio-control-cards-last.txt"
-elif [[ -s "$STATE_DIR/audio-control-cards-last.txt" ]]; then mapfile -t CARDS < "$STATE_DIR/audio-control-cards-last.txt"; fi
+# Output devices are enumerated when Outputs is selected, not cached.
 terminal_columns() {
     local columns
     columns="$(stty size </dev/tty 2>/dev/null | awk '{print $2}')"
@@ -216,12 +215,63 @@ choose_index() {
         wrap_line 'Enter a listed number.'
     done
 }
-ARGS=(-t warning -y overlay -m 'Choose card, then playback profile')
+# Live capture nodes only. Never save transient PipeWire numeric IDs.
+wp_capture_rows() {
+    local media="$1" kind="$2" raw
+    raw="$(wpctl list "$media" "$kind")" || return 1
+    printf '%s\n' "$raw" | awk -F '\t' 'NF >= 3 && $1 ~ /^[0-9]+$/ { print $1 "\t" $2 "\t" $3 "\t" $4 }'
+}
+choose_capture() {
+    local media="$1" title="$3" saved_name="" line id name type marker
+    local -a ids=() names=() labels=() lines=()
+    local current="" i
+    local -r memory="$STATE_DIR/last-${media}-source.name"
+    local rows
+    rows="$(wp_capture_rows "$media" sources)" || return 1
+    mapfile -t lines <<< "$rows"
+    for line in "${lines[@]}"; do
+        IFS=$'\t' read -r id name type marker <<<"$line"
+        [[ "$type" == "$media/source" && "$id" =~ ^[0-9]+$ && -n "$name" ]] || continue
+        ids+=("$id"); names+=("$name"); labels+=("$name")
+        [[ "$marker" == '*' ]] && current="$name"
+    done
+    ((${#ids[@]})) || { wrap_line "No $title sources are currently exposed by wpctl."; return 1; }
+    if [[ -s "$memory" ]]; then IFS= read -r saved_name < "$memory" || true; fi
+    local preferred="${current:-}" preferred_id="" preferred_label=""
+    for i in "${!ids[@]}"; do
+        if [[ "${names[i]}" == "$preferred" ]]; then preferred_id="${ids[i]}"; preferred_label="${labels[i]}"; break; fi
+    done
+    local -a menu=("Currently selected source${preferred_label:+ ($preferred_label)}")
+    menu+=("${labels[@]}")
+    choose_index "$title source" "${menu[@]}" || return 1
+    if ((number == 0)); then
+        [[ -n "$preferred_id" ]] || { wrap_line 'No current default source is exposed; select a numbered source.'; return 1; }
+        id="$preferred_id"; name="$preferred"
+    else
+        id="${ids[number-1]}"; name="${names[number-1]}"
+    fi
+    # Re-read the live graph: an ID can be reused or disappear while the menu is open.
+    local live
+    live="$(wpctl list "$media" sources)" || return 1
+    if ! printf '%s\n' "$live" | awk -F '\t' -v id="$id" -v name="$name" -v type="$media/source" '$1==id && $2==name && $3==type {found=1} END {exit !found}'; then
+        wrap_line 'Selected source changed while the menu was open. Reopen Audio Control.'; return 1
+    fi
+    wpctl set-default "$id" || return 1
+    # Confirm the chosen default without assuming a device-specific name.
+    live="$(wpctl list "$media" sources)" || return 1
+    if ! printf '%s\n' "$live" | awk -F '\t' -v name="$name" '$2==name && $4=="*" {found=1} END {exit !found}'; then
+        wrap_line 'Default source change could not be confirmed.'; return 1
+    fi
+    printf '%s\n' "$name" > "$memory"
+    wrap_line "$title source selected: $name"
+}
+
+ARGS=(-t warning -y overlay -m 'Media control')
 ARGS+=( -z 'Audio services' "printf '%s\n' audio-services > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
 ARGS+=( -z 'CamillaDSP filters' "printf '%s\n' select-filter > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
-for i in "${!CARDS[@]}"; do
-    ARGS+=( -z "${CARDS[i]#*$'\t'}" "printf '%s\n' '$i' > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
-done
+ARGS+=( -z 'Audio input' "printf '%s\n' select-input > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
+ARGS+=( -z 'Camera' "printf '%s\n' select-camera > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
+ARGS+=( -z 'Audio output' "printf '%s\n' select-output > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
 swaynag "${ARGS[@]}" >"$SWAYNAG_LOG" 2>&1 9>&- &
 SWAYNAG_PID=$!
 while [[ ! -e "$RESULT_FILE" ]]; do
@@ -235,6 +285,32 @@ kill "$SWAYNAG_PID" 2>/dev/null || true
 wait "$SWAYNAG_PID" 2>/dev/null || true
 selected="$(cat "$CARD_SELECTION_FILE")"
 case "$selected" in
+ select-output)
+    TOPOLOGY_JSON="$(output_topology)" || { wrap_line 'Output topology unavailable.' >&2; exit 1; }
+    mapfile -t CARDS < <(jq -r '.cards[] | [.name,.label] | @tsv' <<<"$TOPOLOGY_JSON")
+    ((${#CARDS[@]})) || { wrap_line 'No playback devices currently exposed.' >&2; exit 1; }
+    labels=()
+    for item in "${CARDS[@]}"; do labels+=("${item#*$'\t'}"); done
+    current_card="$(jq -r '.saved.card // empty' <<<"$TOPOLOGY_JSON")"
+    current_card_index=''
+    current_card_label=''
+    for i in "${!CARDS[@]}"; do
+        if [[ "${CARDS[i]%%$'\t'*}" == "$current_card" ]]; then
+            current_card_index="$i"; current_card_label="${labels[i]}"; break
+        fi
+    done
+    choose_index 'Audio outputs | Playback device' "Currently selected output${current_card_label:+ ($current_card_label)}" "${labels[@]}" || exit 0
+    if ((number == 0)); then
+        [[ -n "$current_card_index" ]] || { wrap_line 'No current output is exposed; select a numbered device.' >&2; exit 1; }
+        selected="$current_card_index"
+    else selected="$((number-1))"; fi
+    ;;
+ select-input)
+    choose_capture audio sources 'Audio input' || exit $?
+    exit 0 ;;
+ select-camera)
+    choose_capture video sources Camera || exit $?
+    exit 0 ;;
  audio-services)
     choose_index 'Audio services' \
         'Audio stop / start (toggle)' \

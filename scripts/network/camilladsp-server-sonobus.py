@@ -9,7 +9,7 @@ from contextlib import contextmanager, nullcontext
 from concurrent.futures import ThreadPoolExecutor
 
 HOME=Path.home(); PROFILES=HOME/'Documents/prefs/audio-filters'; MUSIC=HOME/'Downloads/Music'
-STATE=HOME/'.local/state/sway/camilladsp-webremote'; SWITCH_STATE=HOME/'.local/state/sway/audio-switch'; PORT=8766
+STATE=HOME/'.local/state/sway/camilladsp-webremote'; SWITCH_STATE=HOME/'.local/state/sway/media-control'; PORT=8766
 CAMILLA=Path('/run/current-system/sw/bin/camilladsp'); SONOBUS=Path('/run/current-system/sw/bin/sonobus')
 SONOSET=HOME/'.config/sonobus/SonoBus.settings'; EXTS={'.m4a','.aac','.mp3','.flac','.wav','.ogg','.opus'}
 CAMPID=STATE/'camilladsp.pid'; ACTIVE=STATE/'active-profile'; SERVERPID=STATE/'web-server.pid'
@@ -197,7 +197,7 @@ def ensure():
         if not source.is_dir():continue
         for item in source.iterdir():
             if not item.is_file() or item.is_symlink():continue
-            if source==legacy and item.name not in ('master-volume','audio-switch.log','audio-switch.lock','audio-cards-last.txt','camilladsp-local.log'):continue
+            if source==legacy and item.name not in ('master-volume','media-control.log','audio-switch.lock','audio-cards-last.txt','camilladsp-local.log'):continue
             target=destination/item.name
             if not target.exists() and item.name!='mpv.sock':
                 try:shutil.move(str(item),str(target))
@@ -748,7 +748,7 @@ def watch_master_volume(stop):
     while not stop.wait(.6):
         # The terminal switch holds this marker while a profile can recreate
         # the default sink at 100%. Do not overwrite the pre-switch master.
-        owner=SWITCH_STATE/'audio-switch-owner'
+        owner=SWITCH_STATE/'media-control-owner'
         try:
             switch_pid=int(owner.read_text().split()[0])
         except (OSError,ValueError,IndexError):switch_pid=None
@@ -2570,7 +2570,7 @@ def main():
     global LOCAL_ENGINE_OWNED
     me=os.getpid()
     SWITCH_STATE.mkdir(parents=True,exist_ok=True)
-    startup_lock=(SWITCH_STATE/'audio-switch.lock').open('a+')
+    startup_lock=(SWITCH_STATE/'media-control.lock').open('a+')
     fcntl.flock(startup_lock,fcntl.LOCK_EX)
     legacy_pid=HOME/'.local/state/sway/audio/camilladsp-webremote/web-server.pid'
     previous=rpid(legacy_pid)
