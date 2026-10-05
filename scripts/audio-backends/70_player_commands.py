@@ -15,27 +15,6 @@ def mpv(command):
                 if attempt:raise
                 stop_mpv()
 
-def queue_playlist_name(entries=None,validate_files=True):
-    data=_read_json(QUEUE_SOURCE,{})
-    if not isinstance(data,dict):return ''
-    name=data.get('playlist')
-    if not isinstance(name,str) or not name:return ''
-    try:directory=pdir(name)
-    except ValueError:return ''
-    if not directory.is_dir():return ''
-    # Reject stale markers if another client replaced the MPV queue.
-    if entries is None:
-        try:entries=mpv_direct(['get_property','playlist']) or []
-        except (OSError,RuntimeError,ValueError):return ''
-    if not isinstance(entries,list) or not entries:return ''
-    expected=data.get('files')
-    if not isinstance(expected,list) or not expected:return ''
-    try:
-        raw=[item['filename'] for item in entries]
-        if raw==expected and not validate_files:return name
-        actual=[str(song(path)) for path in raw]
-    except (KeyError,TypeError,ValueError,OSError):return ''
-    return name if actual==expected else ''
 
 def shuffle_current_playlist():
     with PLAYERLOCK:

@@ -218,8 +218,6 @@ def ensure_pipewire_ready():
         time.sleep(.1)
     raise RuntimeError('PipeWire did not become ready')
 AIRPLAY_SERVICES=('nqptp.service','shairport-sync.service')
-def service_active(service):
-    return run(['systemctl','is-active','--quiet',service],False,5).returncode==0
 def airplay_health():
     result=run(['systemctl','is-active',*AIRPLAY_SERVICES],False,5)
     states=result.stdout.splitlines()

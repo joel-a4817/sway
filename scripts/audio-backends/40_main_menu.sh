@@ -153,9 +153,8 @@ while :; do
         [[ -n "$last_profile" ]] || { wrap_line 'The last known profile is unavailable. Select again.'; continue; }
         profile="$last_profile"
     else profile="${profiles[number-1]}"; fi
-    availability="$(jq -r --arg n "$card" --arg p "$profile" '.cards[]|select(.name==$n)|.profiles[]|select((.index|tostring)==$p)|.available' <<<"$TOPOLOGY_JSON")"
     profile_selectable="$(jq -r --arg n "$card" --arg p "$profile" '.cards[]|select(.name==$n) as $card|$card.profiles[]|select((.index|tostring)==$p)|($card.internal!=true and .available!="no" and .available!="false" and ((.name|ascii_downcase)!="off") and ((.label|test("^\[(INTERNAL|MONITOR|LOOPBACK|VIRTUAL|UNAVAILABLE)\]"))|not))' <<<"$TOPOLOGY_JSON")"
-    [[ "$availability" != no && "$availability" != false && "$profile_selectable" == true ]] && break
+    [[ "$profile_selectable" == true ]] && break
     wrap_line 'That playback profile cannot be used. Select again.'
 done
 # The selected profile is applied now so its actual sinks/routes appear next.
