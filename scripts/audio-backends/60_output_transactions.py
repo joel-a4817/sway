@@ -123,6 +123,8 @@ def _stage_local_route(card, profile, route=None, mode=None,origin='web',token=N
     preview=_require_output_preview(origin,token)
     current=_find_card(audio_topology(),card)
     chosen=_profile_choice(current,profile)
+    if current.get('internal') or _labelled_output_option(current) or _labelled_output_option(chosen):
+        raise ValueError('That playback profile cannot be used')
     original=(preview.get('cards') or {}).get(card)
     if original is None:raise RuntimeError('Playback card was not in the preview snapshot')
     if current['activeProfile']!=chosen['index']:
@@ -172,12 +174,21 @@ def _stage_local_route(card, profile, route=None, mode=None,origin='web',token=N
     result['stageSelection']=selected
     return result
 
+
+def _labelled_output_option(row):
+    label=str(row.get('label') or '')
+    return any(label.startswith(prefix) for prefix in
+               ('[UNAVAILABLE] ','[INTERNAL] ','[MONITOR] ','[MONITOR - NOT SELECTABLE] ',
+                '[LOOPBACK] ','[VIRTUAL] '))
+
 def select_output_device_stage(card,origin='web',token=None):
     # Both UIs commit the same usable profile at Device Select, before Profile UI.
     with LOCK, (audio_start_change() if STOPPED.exists() else media_change()):
         item=_find_card(audio_topology(),card)
+        if item.get('internal') or _labelled_output_option(item):
+            raise ValueError('That playback device is informational and cannot be selected')
         usable=[row for row in item['profiles'] if row['available'] not in ('no','false')
-                and row['name'].strip().lower()!='off']
+                and row['name'].strip().lower()!='off' and not _labelled_output_option(row)]
         if not usable:raise RuntimeError('No usable playback profile for this device')
         active=next((row for row in usable if row['index']==item['activeProfile']),None)
         remembered=remembered_card_profile(card)

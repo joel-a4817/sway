@@ -81,9 +81,9 @@ choose_index() {
         number=$((10#$answer))
         if ((number < i)); then
             local choice="${@:$((number+1)):1}"
-            case "$choice" in
-                '[UNAVAILABLE] '*)
-                    wrap_line 'That item is unavailable. Select again.'; continue ;;
+            case "$(compact_item_label "$choice")" in
+                '[N/A] '*|'[INT] '*|'[MON] '*|'[LOOP] '*|'[VIRT] '*)
+                    wrap_line 'That item cannot be selected.'; continue ;;
             esac
             return 0
         fi

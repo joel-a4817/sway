@@ -145,7 +145,7 @@ printf '%s\n' "${profiles[@]}" | grep -Fqx -- "$last_profile" || last_profile=''
 last_profile_label="$(jq -r --arg n "$card" --arg p "$last_profile" '.cards[]|select(.name==$n)|.profiles[]|select((.index|tostring)==$p)|.label' <<<"$TOPOLOGY_JSON")"
 labels=("Last profile${last_profile_label:+ ($last_profile_label)}")
 for profile in "${profiles[@]}"; do
-    labels+=("$(jq -r --arg n "$card" --arg p "$profile" '.cards[]|select(.name==$n)|.profiles[]|select((.index|tostring)==$p)|(if (.available=="no" or .available=="false" or ((.name|ascii_downcase)=="off")) then "[UNAVAILABLE] " else "" end) + .label' <<<"$TOPOLOGY_JSON")")
+    labels+=("$(jq -r --arg n "$card" --arg p "$profile" '.cards[]|select(.name==$n) as $card|$card.profiles[]|select((.index|tostring)==$p)|(if ($card.internal==true or .available=="no" or .available=="false" or ((.name|ascii_downcase)=="off") or (.label|test("^\[(INTERNAL|MONITOR|LOOPBACK|VIRTUAL|UNAVAILABLE)\]"))) then "[UNAVAILABLE] " else "" end) + .label' <<<"$TOPOLOGY_JSON")")
 done
 while :; do
     choose_index "Card: $card_label | Playback profile" "${labels[@]}" || exit 0
@@ -154,8 +154,9 @@ while :; do
         profile="$last_profile"
     else profile="${profiles[number-1]}"; fi
     availability="$(jq -r --arg n "$card" --arg p "$profile" '.cards[]|select(.name==$n)|.profiles[]|select((.index|tostring)==$p)|.available' <<<"$TOPOLOGY_JSON")"
-    [[ "$availability" != no && "$availability" != false && "$(jq -r --arg n "$card" --arg p "$profile" '.cards[]|select(.name==$n)|.profiles[]|select((.index|tostring)==$p)|.name' <<<"$TOPOLOGY_JSON")" != off ]] && break
-    wrap_line 'That playback profile is unavailable. Select again.'
+    profile_selectable="$(jq -r --arg n "$card" --arg p "$profile" '.cards[]|select(.name==$n) as $card|$card.profiles[]|select((.index|tostring)==$p)|($card.internal!=true and .available!="no" and .available!="false" and ((.name|ascii_downcase)!="off") and ((.label|test("^\[(INTERNAL|MONITOR|LOOPBACK|VIRTUAL|UNAVAILABLE)\]"))|not))' <<<"$TOPOLOGY_JSON")"
+    [[ "$availability" != no && "$availability" != false && "$profile_selectable" == true ]] && break
+    wrap_line 'That playback profile cannot be used. Select again.'
 done
 # The selected profile is applied now so its actual sinks/routes appear next.
 TOPOLOGY_JSON="$(python3 "$TOPOLOGY_SCRIPT" --apply-output-profile "$card" "$profile")" || { wrap_line 'Playback profile could not be applied.' >&2; exit 1; }
