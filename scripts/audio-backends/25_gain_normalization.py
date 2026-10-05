@@ -167,10 +167,17 @@ def normalize_audio_volumes():
     # Never restore the master if any ALSA gain failed verification.
     if errors:raise RuntimeError('Audio normalization incomplete: '+'; '.join(errors[:8])+
                                  (f'; {len(errors)-8} more' if len(errors)>8 else ''))
-    # The only PipeWire write in normalization is the saved master, last.
+    # The only PipeWire write in normalization is the logical master, last.
+    # First startup has no persisted master yet. Use the gain subsystem's safe
+    # restoring fallback and persist it before applying it to any live path.
     try:
-        value=float(MASTER_VOLUME.read_text().strip().rstrip('%'))
-        if not math.isfinite(value) or not 0<=value<=100:raise ValueError('saved master outside 0-100%')
+        try:
+            value=float(MASTER_VOLUME.read_text().strip().rstrip('%'))
+            if not math.isfinite(value) or not 0<=value<=100:raise ValueError('saved master outside 0-100%')
+        except (OSError,ValueError):
+            value=master_volume()
+            MASTER_VOLUME.parent.mkdir(parents=True,exist_ok=True)
+            atomic(MASTER_VOLUME,f'{value:.2f}%\n')
         target=getattr(MEDIA_TRANSACTION,'stage_sink',None) or master_sink()
         if target=='@DEFAULT_SINK@':target=pw_default()
         inactive=saved_output_route().get('sink') if target=='camilladsp' else 'camilladsp'
