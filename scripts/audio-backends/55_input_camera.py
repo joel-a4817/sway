@@ -128,6 +128,12 @@ def _input_label(row):
     if label.startswith('Monitor of '):label=label[11:]
     if not status and not _available_option(row):status='N/A'
     return status,label
+def _input_selectable_option(row):
+    label=str(row.get('label') or '')
+    return (_available_option(row) and not label.startswith(
+        ('[UNAVAILABLE] ','[INTERNAL] ','[MONITOR - NOT SELECTABLE] ',
+         '[MONITOR] ','[LOOPBACK] ','[VIRTUAL] ')))
+
 def _print_input_row(number,row):
     import textwrap
     status,label=_input_label(row);prefix=(f'[{status}] ' if status else '')+f'[{number}] '
@@ -138,7 +144,7 @@ def _print_input_row(number,row):
 def _pick_input(label,rows,current=None):
     if not rows:raise RuntimeError('No '+label+' choices are exposed')
     selected=next((row for row in rows if str(row.get('index',row.get('name')))==str(current)
-                   and _available_option(row)),None)
+                   and _input_selectable_option(row)),None)
     print('\n'+label)
     if selected:_print_input_row(0,dict(selected,label='Current ('+_input_label(selected)[1]+')'))
     else:print('[N/A] [0] Current')
@@ -149,7 +155,11 @@ def _pick_input(label,rows,current=None):
         if answer.isdecimal():
             number=int(answer)
             if number==0 and selected is not None:return selected
-            if 1<=number<=len(rows) and _available_option(rows[number-1]):return rows[number-1]
+            if 1<=number<=len(rows):
+                choice=rows[number-1]
+                if _input_selectable_option(choice):return choice
+                print('That item cannot be selected.')
+                continue
         print('Select an available number.')
 def verify_preserved_output(route):
     """Fail closed if an input profile/route disturbed the selected playback path."""
@@ -185,10 +195,6 @@ def verify_preserved_output(route):
     raise RuntimeError('Local playback monitor is not linked to the saved sink')
 
 
-def _input_selectable_source(row):
-    label=str(row.get('label') or '')
-    name=str(row.get('name') or '')
-    return bool(name) and not label.startswith('[UNAVAILABLE]')
 
 def _input_stage(card, profile=None, route=None):
     current=_input_card(card)
@@ -221,7 +227,7 @@ def _input_stage(card, profile=None, route=None):
         route=chosen['index']
     else:route=None
     current=_input_card(card)
-    sources=[row for row in current['sources'] if _input_selectable_source(row)]
+    sources=[row for row in current['sources'] if _input_selectable_option(row)]
     if route is not None:
         selected_route=next(row for row in routes if row['index']==route)
         if selected_route['devices']:
@@ -355,7 +361,7 @@ def select_input_interactive(finalize=None):
                 with media_change():_input_set_route(card,route['index'])
             current=_input_card(card)
             if saved_output.get('card')==card:verify_preserved_output(saved_output)
-            candidates=[row for row in current['sources'] if _input_selectable_source(row)]
+            candidates=[row for row in current['sources'] if _input_selectable_option(row)]
             if route and route['devices']:
                 candidates=[x for x in candidates if x['profileDevice'] is None or str(x['profileDevice']) in {str(v) for v in route['devices']}]
             source=_pick_input('Audio input | Source',candidates,old_source)
