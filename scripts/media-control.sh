@@ -5,6 +5,8 @@ HOME_DIR="${HOME:?HOME is required}"
 STATE_DIR="$HOME_DIR/.local/state/sway/media-control"
 REMOTE_STATE="$HOME_DIR/.local/state/sway/camilladsp-webremote"
 LEGACY_STATE="$HOME_DIR/.local/state/sway/audio"
+LEFT_OUT_BLUETOOTH_DEVICES=("cmf")
+MASTER_VOLUME="$STATE_DIR/master-volume"
 
 # Prevent overlapping selectors from changing the graph concurrently.
 mkdir -p "$STATE_DIR" "$REMOTE_STATE"
@@ -31,6 +33,9 @@ if [[ ! -e "$STATE_DIR/state-migrated" && -d "$LEGACY_STATE" ]]; then
     touch "$STATE_DIR/state-migrated"
     rmdir "$LEGACY_STATE/camilladsp-webremote" "$LEGACY_STATE" 2>/dev/null || true
 fi
+if [[ ! -e "$MASTER_VOLUME" ]]; then set -C; printf '50.00%%\n' >"$MASTER_VOLUME" 2>/dev/null || true; set +C; fi
+chmod 700 "$STATE_DIR" "$REMOTE_STATE" 2>/dev/null || true
+chmod 600 "$MASTER_VOLUME" 2>/dev/null || true
 # Serialize new launches separately from the lock shared with webremote startup.
 LAUNCH_LOCK="$STATE_DIR/media-control-launch.lock"
 OWNER_FILE="$STATE_DIR/media-control-owner"
@@ -155,14 +160,7 @@ trap 'exit 131' QUIT
 
 TOPOLOGY_SCRIPT="$HOME_DIR/.config/sway/scripts/network/camilladsp-server-sonobus.py"
 [[ -f "$TOPOLOGY_SCRIPT" ]] || { echo "Missing paired server: $TOPOLOGY_SCRIPT" >&2; exit 1; }
-# Opening Media Control itself runs the requested normalization transaction.
-# The paired CLI pauses only currently-playing media, restores the saved master,
-# then leaves playback paused before the menu appears.
-if ! python3 "$TOPOLOGY_SCRIPT" --normalize-menu-open >>"$ACTION_LOG" 2>&1; then
-    echo 'Audio normalization failed while opening Media Control.' >&2
-    echo "Details: $ACTION_LOG" >&2
-    exit 1
-fi
+# Opening Media Control is UI-only. Audio changes occur only after a selected action.
 output_topology() { python3 "$TOPOLOGY_SCRIPT" --output-topology; }
 run_quiet_action() {
     local output status
@@ -427,7 +425,9 @@ case "$selected" in
  select-filter)
     profiles="$(python3 "$TOPOLOGY_SCRIPT" --dsp-profiles)" || exit 1
     info="$(python3 "$TOPOLOGY_SCRIPT" --dsp-filter-info)" || exit 1
-    mapfile -t filters < <(jq -r '.[] | select((ascii_downcase|contains("cmf"))|not)' <<<"$profiles")
+    profiles="$(jq -c 'if index("__no_filter__") then . else ["__no_filter__"] + . end' <<<"$profiles")" || exit 1
+    left_out_json="$(printf '%s\n' "${LEFT_OUT_BLUETOOTH_DEVICES[@]}" | jq -Rsc 'split("\n") | map(select(length > 0) | ascii_downcase)')"
+    mapfile -t filters < <(jq -r --argjson left_out "$left_out_json" '.[] | select(. as $p | ($left_out | any(. as $x | ($p|ascii_downcase|contains($x)))) | not)' <<<"$profiles")
     ((${#filters[@]})) || { echo 'No listening filters found.' >&2; exit 1; }
     filter_device_label() {
         local filter="$1" room_label="$2" group
@@ -440,22 +440,20 @@ case "$selected" in
         labels+=("$(filter_device_label "$filter" "$room_label")")
     done
     current_filter="$(python3 "$TOPOLOGY_SCRIPT" --selected-filter 2>/dev/null || true)"
-    current_room_label="$(jq -r --arg f "$current_filter" '.[$f].label // $f' <<<"$info")"
-    current_label="$(filter_device_label "$current_filter" "$current_room_label")"
-    if ! printf '%s\n' "${filters[@]}" | grep -Fqx -- "$current_filter"; then
-        echo 'The currently selected filter is not available.' >&2
-        exit 1
-    fi
-    filter_choices=("Current filter ($current_label)" "${labels[@]}")
+    printf '%s\n' "$profiles" | jq -e --arg current "$current_filter" 'index($current) != null' >/dev/null || current_filter='__no_filter__'
+    current_visible=0
+    if printf '%s\n' "${filters[@]}" | grep -Fqx -- "$current_filter"; then
+        current_visible=1
+        current_room_label="$(jq -r --arg f "$current_filter" '.[$f].label // $f' <<<"$info")"
+        current_label="$(filter_device_label "$current_filter" "$current_room_label")"
+        filter_choices=("Current filter ($current_label)" "${labels[@]}")
+    else filter_choices=("${labels[@]}"); fi
     choose_index 'Listening filter' "${filter_choices[@]}" || exit 0
     answer="$number"
-    if ((number == 0)); then
-        selected_filter="$current_filter"
-        selected_label="$current_label"
-    else
-        selected_filter="${filters[$((10#$answer-1))]}"
-        selected_label="${labels[$((10#$answer-1))]}"
-    fi
+    if ((current_visible)); then
+        if ((number == 0)); then selected_filter="$current_filter"; selected_label="$current_label"
+        else selected_filter="${filters[$((10#$answer-1))]}"; selected_label="${labels[$((10#$answer-1))]}"; fi
+    else selected_filter="${filters[$((10#$answer))]}"; selected_label="${labels[$((10#$answer))]}"; fi
     flock -u 9
     run_quiet_action python3 "$TOPOLOGY_SCRIPT" --select-filter "$selected_filter" || exit $?
     wrap_line "Listening filter applied: $selected_label"

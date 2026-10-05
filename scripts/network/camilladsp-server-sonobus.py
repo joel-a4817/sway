@@ -2,20 +2,20 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse, unquote
-import base64, fcntl, hashlib, json, math, os, random, re, select, shutil, signal, socket, struct, subprocess, threading, time, uuid
+import ast, base64, fcntl, hashlib, json, math, os, random, re, select, shutil, signal, socket, struct, subprocess, threading, time, uuid
 from collections import OrderedDict
 from functools import lru_cache, wraps
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 
-HOME=Path.home(); PROFILES=HOME/'Documents/prefs/audio-filters'; MUSIC=HOME/'Downloads/Music'
+HOME=Path.home(); PROFILES=HOME/'Documents/prefs/audio-filters'; MUSIC=HOME/'Downloads/Music'; REBUILD_SCRIPT=HOME/'.config/sway/scripts/updaters/rebuild-camilla.py'
 STATE=HOME/'.local/state/sway/camilladsp-webremote'; SWITCH_STATE=HOME/'.local/state/sway/media-control'; PORT=8766
 CAMILLA=Path('/run/current-system/sw/bin/camilladsp'); SONOBUS=Path('/run/current-system/sw/bin/sonobus')
 SONOSET=HOME/'.config/sonobus/SonoBus.settings'; EXTS={'.m4a','.aac','.mp3','.flac','.wav','.ogg','.opus'}
 CAMPID=STATE/'camilladsp.pid'; ACTIVE=STATE/'active-profile'; SERVERPID=STATE/'web-server.pid'
 NO_FILTER='__no_filter__'; BYPASSPID=STATE/'no-filter-bridge.pid'
 MPVPID=STATE/'mpv.pid'; MPVSOCK=STATE/'mpv.sock'; MPVLOG=STATE/'mpv.log'; MODE=STATE/'mode'
-MASTER_VOLUME=SWITCH_STATE/'master-volume'; CAM_WS_PORT=8767
+MASTER_VOLUME=SWITCH_STATE/'master-volume'; DEFAULT_MASTER_VOLUME='50.00%\n'; CAM_WS_PORT=8767
 QUEUE_FILE=STATE/'mpv-queue.json'; QUEUE_SOURCE=STATE/'mpv-queue-source.json'; RESTORE_LIST=STATE/'mpv-restore.m3u'; PLAYLIST_COVERS=STATE/'playlist-last-played.json'
 QUEUE_SAVE_LOCK=threading.RLock(); LAST_QUEUE_WRITE=0.0; LAST_QUEUE_DATA=None; LAST_QUEUE_RAW=None
 LOCK=threading.RLock(); MEDIA_TRANSACTION=threading.local(); PLAYERLOCK=threading.RLock(); MPRISLOCK=threading.RLock(); LAST_MPRIS=None
@@ -144,7 +144,9 @@ def pw_move_streams(sink):
                 for link in pw_objects('Link',current)):
                 break
             time.sleep(.1)
-        else:raise RuntimeError('Playback stream did not reconnect to '+sink)
+        # target.node is authoritative for paused/idle streams. They may keep an
+        # old link until playback resumes, so lack of an immediate relink is not
+        # an output-switch failure.
 
 def wp_control(args,timeout=10):
     action=args[0] if args else ''
@@ -186,32 +188,32 @@ def wp_control(args,timeout=10):
     raise RuntimeError('Unsupported PipeWire control: '+action)
 
 def ensure():
-    STATE.mkdir(parents=True,exist_ok=True)
-    SWITCH_STATE.mkdir(parents=True,exist_ok=True)
-    MUSIC.mkdir(parents=True,exist_ok=True)
-    legacy=HOME/'.local/state/sway/audio'
-    old_server=legacy/'camilladsp-webremote'
-    # One-time migration. Never resurrect a deliberately cleared stop marker.
-    marker=STATE/'state-migrated'
-    if marker.exists():return
-    for source,destination in ((old_server,STATE),(legacy,SWITCH_STATE)):
-        if not source.is_dir():continue
-        for item in source.iterdir():
-            if not item.is_file() or item.is_symlink():continue
-            if source==legacy and item.name not in ('master-volume','media-control.log','media-control.lock','audio-cards-last.txt','camilladsp-local.log'):continue
-            target=destination/item.name
-            if not target.exists() and item.name!='mpv.sock':
-                try:shutil.move(str(item),str(target))
+    STATE.mkdir(parents=True,exist_ok=True);SWITCH_STATE.mkdir(parents=True,exist_ok=True);MUSIC.mkdir(parents=True,exist_ok=True)
+    legacy=HOME/'.local/state/sway/audio';old_server=legacy/'camilladsp-webremote';marker=STATE/'state-migrated'
+    if not marker.exists():
+        for source,destination in ((old_server,STATE),(legacy,SWITCH_STATE)):
+            if not source.is_dir():continue
+            for item in source.iterdir():
+                if not item.is_file() or item.is_symlink():continue
+                if source==legacy and item.name not in ('master-volume','media-control.log','media-control.lock','audio-cards-last.txt','camilladsp-local.log'):continue
+                target=destination/item.name
+                if not target.exists() and item.name!='mpv.sock':
+                    try:shutil.move(str(item),str(target))
+                    except OSError:pass
+        for name in ('audio-stopped','audio-stop-complete','audio-stop-capable.pid'):
+            old=legacy/name;new=STATE/name
+            if old.is_file() and not new.exists():
+                try:shutil.move(str(old),str(new))
                 except OSError:pass
-    for name in ('audio-stopped','audio-stop-complete','audio-stop-capable.pid'):
-        old=legacy/name;new=STATE/name
-        if old.is_file() and not new.exists():
-            try:shutil.move(str(old),str(new))
+        marker.touch()
+        for directory in (old_server,legacy):
+            try:directory.rmdir()
             except OSError:pass
-    marker.touch()
-    for directory in (old_server,legacy):
-        try:directory.rmdir()
-        except OSError:pass
+    if not MASTER_VOLUME.exists():
+        try:descriptor=os.open(MASTER_VOLUME,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+        except FileExistsError:pass
+        else:
+            with os.fdopen(descriptor,'w') as handle:handle.write(DEFAULT_MASTER_VOLUME)
 
 def rpid(p):
     try:return int(p.read_text().strip())
@@ -292,35 +294,55 @@ def profiles():
         for pattern in ('*.yml','*.yaml'):
             for item in PROFILES.rglob(pattern):
                 if not item.is_file():continue
-                if item.parent==PROFILES or re.match(r'^(?:\(\d+ms\)|\d+ms(?:$|[-_ ]))',item.parent.name,re.I):found.append(item)
+                if item.parent==PROFILES or re.match(r'^(?:\(\d+ms(?:-(?:IE|OE))?\)|\d+ms(?:$|[-_ ]))',item.parent.name,re.I):found.append(item)
         return sorted(found,key=lambda item:(item.name.casefold(),str(item).casefold()))
     return cached('profiles',5.0,load)
 BRIR_DIR=PROFILES
 def _filter_key(value):
     return re.sub(r'[^a-z0-9]+','',value.casefold())
+def configured_filter_devices():
+    """Map generated filename identity to the exact configured device label."""
+    try:
+        text=REBUILD_SCRIPT.read_text();tree=ast.parse(text)
+        assignment=next((node for node in tree.body if isinstance(node,ast.Assign)
+                         and any(isinstance(target,ast.Name) and target.id=='HPCFS'
+                                 for target in node.targets)),None)
+        entries=ast.literal_eval(assignment.value) if assignment is not None else ()
+    except (OSError,SyntaxError,ValueError,TypeError):return {}
+    result={}
+    if not isinstance(entries,(tuple,list)):return result
+    for item in entries:
+        if not isinstance(item,dict):continue
+        label=str(item.get('label') or '').strip();kind=str(item.get('kind') or '').strip().upper()
+        if not label or kind not in ('IE','OE'):continue
+        slug=re.sub(r'[^a-z0-9]+','-',label.casefold()).strip('-')
+        if slug:result[(kind.casefold(),slug)]=label
+    return result
 def listening_filters():
     """Resolve display-only labels from BRIR directories; retain YAML IDs."""
     folders={}
     if BRIR_DIR.is_dir():
         for folder in BRIR_DIR.iterdir():
             if not folder.is_dir():continue
-            match=re.match(r'^(?:\((\d+)ms\)|(\d+)ms(?:$|[-_ ]))(.*)$',folder.name,re.I)
+            match=re.match(r'^(?:\((\d+)ms(?:-(IE|OE))?\)|(\d+)ms(?:$|[-_ ]))(.*)$',folder.name,re.I)
             if match:
-                delay=match.group(1) or match.group(2)
-                folders.setdefault(delay,[]).append((folder.name,_filter_key(match.group(3))))
+                delay=match.group(1) or match.group(3)
+                folders.setdefault(delay,[]).append((folder.name,_filter_key(match.group(4))))
     result={NO_FILTER:{'group':'Other','label':'No filter (bypass CamillaDSP)'}}
+    configured=configured_filter_devices()
     for item in profiles():
         stem=item.stem
         if stem.casefold()=='00-filterless':
             result[item.name]={'group':'Other','label':'Filterless'}
             continue
-        match=re.match(r'^\d+-(.+?)-(\d+)ms-(.+)$',stem,re.I)
+        match=re.match(r'^\d+-(ie|oe)-(.+?)-(\d+)ms-(.+)$',stem,re.I)
         if not match:
             result[item.name]={'group':'Other','label':stem}
             continue
-        device,delay,slug=match.groups()
-        # The device label comes from the filename prefix, not a fixed device list.
-        group=device.replace('-',' ').strip().title()
+        kind,device,delay,slug=match.groups()
+        configured_label=configured.get((kind.casefold(),device.casefold()))
+        group=((configured_label if configured_label else device.replace('-',' ').strip().title())+
+               ' ('+kind.upper()+')')
         candidates=folders.get(delay,[])
         suffix=_filter_key(slug)
         matches=[name for name,key in candidates if key==suffix]
@@ -335,58 +357,61 @@ def profile(name):
     if len(matches)!=1:raise FileNotFoundError('Missing or ambiguous profile: '+name)
     return matches[0]
 def selected_filter():
-    try:return ACTIVE.read_text().strip()
-    except OSError:return ''
+    """Return only an exact current profile; otherwise default to No filter."""
+    try:saved=ACTIVE.read_text().strip()
+    except OSError:saved=''
+    if saved==NO_FILTER:return NO_FILTER
+    if saved and any(item.name==saved for item in profiles()):return saved
+    ACTIVE.write_text(NO_FILTER+'\n')
+    return NO_FILTER
 
 def bridge_playback_pids():
-    """Only identify this user's exact no-filter aplay loopback endpoint."""
+    """Return this user's exact arecord/aplay children from current or legacy bypasses."""
     found=[]
+    endpoints={'arecord':{b'camilladsp_input',b'hw:Loopback,1,0'},
+               'aplay':{b'camilladsp_output_shared',b'hw:Loopback,0,1'}}
     for entry in Path('/proc').iterdir():
         if not entry.name.isdigit():continue
         try:
             if entry.stat().st_uid!=os.getuid():continue
             args=(entry/'cmdline').read_bytes().split(b'\0')
-            if (args and Path(os.fsdecode(args[0])).name=='aplay' and
-                b'-D' in args and args[args.index(b'-D')+1:args.index(b'-D')+2]==[b'hw:Loopback,0,1']):
-                found.append(int(entry.name))
+            command=Path(os.fsdecode(args[0])).name if args and args[0] else ''
+            if command not in endpoints or b'-D' not in args:continue
+            device=args[args.index(b'-D')+1]
+            if device in endpoints[command]:found.append(int(entry.name))
         except (OSError,ValueError,IndexError):continue
     return found
-
 def stop_bypass():
     pid=rpid(BYPASSPID)
     if alive(pid):
-        try:
-            args=Path(f'/proc/{pid}/cmdline').read_bytes()
-            if b'camilladsp_input' not in args or b'camilladsp_output_shared' in args:
-                raise RuntimeError('No-filter PID belongs to another process')
-            os.killpg(pid,signal.SIGTERM)
+        try:os.killpg(pid,signal.SIGTERM)
         except ProcessLookupError:pass
-    deadline=time.monotonic()+3
-    while time.monotonic()<deadline:
+    for sig,seconds in ((signal.SIGTERM,2),(signal.SIGKILL,2)):
+        deadline=time.monotonic()+seconds
+        while True:
+            children=bridge_playback_pids()
+            if not children:break
+            for child in children:
+                try:os.kill(child,sig)
+                except ProcessLookupError:pass
+            if time.monotonic()>=deadline:break
+            time.sleep(.05)
         if not bridge_playback_pids():break
-        time.sleep(.05)
-    else:
-        # A stale bridge may outlive its shell; terminate only its exact
-        # per-user playback endpoint, never arbitrary ALSA clients.
-        for child in bridge_playback_pids():
-            try:os.kill(child,signal.SIGTERM)
-            except ProcessLookupError:pass
-        deadline=time.monotonic()+2
-        while bridge_playback_pids() and time.monotonic()<deadline:time.sleep(.05)
-    if bridge_playback_pids():
-        raise RuntimeError('No-filter playback still owns the CamillaDSP ALSA endpoint')
+    remaining=bridge_playback_pids()
+    if remaining:raise RuntimeError('No-filter bridge still owns CamillaDSP ALSA endpoints: '+','.join(map(str,remaining)))
     BYPASSPID.unlink(missing_ok=True)
-
 def select_desktop_sink(name):
     target=pw_sink(name)
     result=run([exe('wpctl'),'set-default',str(target['id'])],False,10,media_env())
     if result.returncode:raise RuntimeError(result.stderr.strip() or 'Could not select '+name)
     pw_move_streams(name)
 
-def direct_no_filter(route):
+def direct_no_filter(route,persist=True):
     sink=route.get('sink') if isinstance(route,dict) else None
     if not sink or sink=='camilladsp':raise RuntimeError('Select a physical output for No filter')
     select_desktop_sink(sink)
+    if persist:
+        _write_json(LOCALSINK,route);remember_output(route)
     return route
 
 def restore_dsp_desktop_sink():
@@ -427,8 +452,7 @@ def start_bypass():
 def active():
     if selected_filter()==NO_FILTER:return NO_FILTER
     if STOPPED.exists() and not alive(rpid(CAMPID),'camilladsp'):return ''
-    try:return ACTIVE.read_text().strip()
-    except OSError:return ''
+    return selected_filter()
 def stop_camilla(include_stale=False):
     global CAMILLA_PROCESS
     process=CAMILLA_PROCESS
@@ -606,13 +630,15 @@ def switch_profile(name):
             stop_local_monitor()
             stop_camilla(include_stale=True)
             try:
-                start_bypass()
-                if audio_mode()=='laptop_laptop':
+                mode=audio_mode()
+                if mode=='laptop_laptop':
+                    stop_bypass();stop_local_monitor()
                     user_service('stop',SYSTEM_AUDIO_SERVICE)
                     direct_no_filter(route)
-                elif MODES[audio_mode()][1]=='system':
-                    restore_dsp_desktop_sink()
-                if local:start_local_monitor(route,resolved=True)
+                else:
+                    start_bypass()
+                    if MODES[mode][1]=='system':restore_dsp_desktop_sink()
+                    if local:start_local_monitor(route,resolved=True)
                 ACTIVE.write_text(NO_FILTER+'\n')
             except Exception:
                 # Do not report No filter if its bridge/monitor never came up.
@@ -2624,7 +2650,9 @@ def _stage_local_route(card, profile, route=None, mode=None,origin='web',token=N
               'sink':sink['name'],'label':sink['label'],'sinkCard':card,'sinkProfile':str(chosen['index'])}
     # Preview uses the full live route but must not overwrite committed choices.
     if not STOPPED.exists() and MODES[mode or audio_mode()][2]:
-        start_local_monitor(selected,resolved=True,persist=False)
+        if selected_filter()==NO_FILTER and (mode or audio_mode())=='laptop_laptop':
+            stop_local_monitor();direct_no_filter(selected,persist=False)
+        else:start_local_monitor(selected,resolved=True,persist=False)
     master=master_sink()
     MEDIA_TRANSACTION.stage_sink=(selected['sink'] if master=='@DEFAULT_SINK@' or (selected_filter()==NO_FILTER and (mode or audio_mode())=='laptop_laptop') else master)
     snapshot=_read_json(OUTPUT_PREVIEW,{})
@@ -2782,7 +2810,13 @@ def activate_output(request,mode='laptop_laptop',password=None,origin='web',toke
                     raise RuntimeError('Selected sink remained muted after output switch')
             if not STOPPED.exists() and MODES[mode][2]:
                 actual=saved_output_route()
-                if actual.get('sink')!=selected['sink'] or not alive(rpid(LOCALMONPID)):
+                direct=(selected_filter()==NO_FILTER and mode=='laptop_laptop')
+                if actual.get('sink')!=selected['sink']:
+                    raise RuntimeError('Output switch did not persist the selected sink')
+                if direct:
+                    if pw_default()!=selected['sink']:
+                        raise RuntimeError('Direct No filter output did not become the PipeWire default')
+                elif not alive(rpid(LOCALMONPID)):
                     raise RuntimeError('Output switch was not confirmed by the local playback monitor')
             (STATE/'output-preview').unlink(missing_ok=True)
             OUTPUT_PREVIEW.unlink(missing_ok=True)
@@ -2797,8 +2831,9 @@ def activate_output(request,mode='laptop_laptop',password=None,origin='web',toke
                 restore_exact_device_routes(card,old_routes,'output')
                 if previous_output.get('sink') and MODES[previous_mode][2] and not STOPPED.exists():
                     restored=choose_output_route(dict(previous_output,_remembered=True))
-                    if selected_filter()==NO_FILTER and previous_mode=='laptop_laptop':direct_no_filter(restored)
-                    start_local_monitor(restored,resolved=True)
+                    if selected_filter()==NO_FILTER and previous_mode=='laptop_laptop':
+                        stop_local_monitor();direct_no_filter(restored)
+                    else:start_local_monitor(restored,resolved=True)
                     MODE.write_text(previous_mode+'\n')
                     normalize_with_media()
             except Exception as error:rollback.append(str(error))
@@ -2888,13 +2923,12 @@ def apply_mode(name,password=None,restore_camilla=True,output=None,output_resolv
     direct=(selected_filter()==NO_FILTER and source=='system' and not sono and local)
     if selected_filter()==NO_FILTER:
         if alive(rpid(CAMPID),'camilladsp'):stop_camilla(include_stale=True)
-        start_bypass()
+        if direct:stop_bypass()
+        else:start_bypass()
     elif restore_camilla and not alive(rpid(CAMPID),'camilladsp'):
-        try:saved=ACTIVE.read_text().strip()
-        except OSError:saved=''
-        available=profiles()
-        selected=profile(saved) if saved and saved!=NO_FILTER else available[0]
-        start_camilla(selected)
+        saved=selected_filter()
+        if saved==NO_FILTER:raise RuntimeError('No exact saved CamillaDSP profile is available')
+        start_camilla(profile(saved))
     apply_source_services(source,direct=direct)
     if source=='system' and not direct and selected_filter()!=NO_FILTER:
         restore_dsp_desktop_sink()
@@ -2909,8 +2943,9 @@ def apply_mode(name,password=None,restore_camilla=True,output=None,output_resolv
             raise RuntimeError('CamillaDSP desktop sink service is not active')
     if local:
         selected=output if output_resolved else choose_output_route(output)
-        if direct:direct_no_filter(selected)
-        start_local_monitor(selected,resolved=True)
+        if direct:
+            stop_local_monitor();direct_no_filter(selected)
+        else:start_local_monitor(selected,resolved=True)
     elif alive(rpid(LOCALMONPID)):stop_local_monitor()
     if sono:
         if not sonobus_matches(policy):restart_sonobus(password,policy,normalize=False)
@@ -3331,79 +3366,86 @@ def restore_saved_output_for_startup(route):
     route.update(sink=chosen['name'],label=chosen['label'],sinkCard=card,sinkProfile=route['profile'])
     return route
 
+def stop_user_camilla_processes():
+    """Stop this user's CamillaDSP engines before restoring the saved profile."""
+    targets=[]
+    for pid in other_camilla_processes():
+        try:
+            entry=Path(f'/proc/{pid}')
+            if entry.stat().st_uid!=os.getuid():continue
+            executable=(entry/'exe').resolve()
+            if executable!=CAMILLA.resolve():continue
+            targets.append(pid)
+        except OSError:continue
+    for sig,seconds in ((signal.SIGTERM,2),(signal.SIGKILL,1)):
+        for pid in list(targets):
+            if not alive(pid,'camilladsp'):continue
+            try:os.killpg(pid,sig)
+            except OSError:
+                try:os.kill(pid,sig)
+                except OSError:pass
+        deadline=time.monotonic()+seconds
+        while any(alive(pid,'camilladsp') for pid in targets) and time.monotonic()<deadline:time.sleep(.05)
+    remaining=[pid for pid in targets if alive(pid,'camilladsp')]
+    if remaining:raise RuntimeError('CamillaDSP process did not stop: '+','.join(map(str,remaining)))
+    CAMPID.unlink(missing_ok=True)
+
 def start_runtime(force=False):
     global MASTER_RESTORING
     MASTER_RESTORING=True
-    ensure()
-    (STATE/'output-preview').unlink(missing_ok=True)
+    ensure();(STATE/'output-preview').unlink(missing_ok=True)
+    mode='laptop_laptop';MODE.write_text(mode+'\n')
     if STOPPED.exists() and not force:
         if OUTPUT_PREVIEW.exists():_recover_stale_cli_preview()
-        MODE.write_text('laptop_laptop\n')
         run(['systemctl','--user','stop',SYSTEM_AUDIO_SERVICE],False,10)
         run(['systemctl','stop','shairport-sync.service','nqptp.service'],False,10)
         return
-    ensure_pipewire_ready()
+    try:ensure_pipewire_ready()
+    except Exception as error:
+        print('Audio restoration pending: '+str(error),flush=True);MASTER_RESTORING=False;return
     if OUTPUT_PREVIEW.exists():_recover_stale_cli_preview()
-    # Keep persisted master until the route has been restored; a newly
-    # created default sink may temporarily report 100%.
-    available=profiles()
-    saved=ACTIVE.read_text().strip() if ACTIVE.is_file() else '';selected=None
-    if not available and saved!=NO_FILTER:raise RuntimeError('No CamillaDSP profiles found in '+str(PROFILES))
-    if saved and saved!=NO_FILTER:
-        try:selected=profile(saved)
-        except (ValueError,FileNotFoundError):pass
-    if selected is None and saved!=NO_FILTER:
-        selected=available[0]
-    # Set the startup mode before any bypass, engine or source decisions.
-    mode='laptop_laptop'
-    MODE.write_text(mode+'\n')
-    # Reuse a verified surviving engine; never start a competing instance.
-    if saved==NO_FILTER:
-        stop_camilla(include_stale=True)
-        start_bypass()
-    elif not alive(rpid(CAMPID),'camilladsp'):
-        stop_camilla(include_stale=True)
-        start_camilla(selected)
-    if selected_filter()!=NO_FILTER:
-        wait_for_camilla_config(profile(selected_filter()))
-    # Both the web picker and Media Control commit to LOCALSINK through
-    # start_local_monitor(). Do not replace their last successful selection
-    # with PipeWire's temporary default (often the virtual DSP sink).
-    saved_route=saved_output_route()
-    if saved_route['card'] and saved_route['profile']:
-        try:saved_route=restore_saved_output_for_startup(saved_route)
+    try:stop_user_camilla_processes()
+    except RuntimeError as error:print('CamillaDSP cleanup pending: '+str(error),flush=True)
+    saved_filter=selected_filter()
+    saved_route=saved_output_route();restored=None
+    if saved_route.get('card') and saved_route.get('profile'):
+        try:
+            saved_route=restore_saved_output_for_startup(saved_route)
+            restored=choose_output_route(dict(saved_route,_remembered=True))
         except (RuntimeError,ValueError,OSError) as error:
             print('Saved output pending: '+str(error),flush=True)
+    if saved_filter!=NO_FILTER:
+        try:
+            stop_local_monitor();stop_bypass();stop_camilla(include_stale=True)
+            start_camilla(profile(saved_filter))
+            wait_for_camilla_config(profile(saved_filter))
+        except Exception as error:
+            print('Saved filter unavailable; using No filter: '+str(error),flush=True)
+            stop_local_monitor()
+            try:stop_camilla(include_stale=True)
+            except Exception as stop_error:print('CamillaDSP cleanup pending: '+str(stop_error),flush=True)
+            try:stop_bypass()
+            except Exception as stop_error:print('Bypass cleanup pending: '+str(stop_error),flush=True)
+            ACTIVE.write_text(NO_FILTER+'\n');saved_filter=NO_FILTER
+    else:
+        stop_camilla(include_stale=True)
     try:
-        apply_mode(mode,restore_camilla=False,
-                   output=choose_output_route(dict(saved_route,_remembered=True)) if saved_route.get('card') else None)
-    except RuntimeError as error:
-        if not any(message in str(error) for message in ('exposes no available playback sink','Select a playback output','No playback device in PipeWire graph','Playback device unavailable:','Playback sink unavailable:')):raise
-        label,source,local,sono=MODES[mode]
-        apply_source_services(source);stop_local_monitor()
-        if sono:restart_sonobus(None,MODE_POLICIES[mode],normalize=False)
-        else:stop_sonobus()
-        MODE.write_text(mode+'\n')
-    except ValueError as error:
-        # A saved password-protected group cannot be joined unattended. Keep
-        # CamillaDSP and the web UI alive so the password can be entered there.
-        if 'requires a password' not in str(error):raise
-        label,source,local,sono=MODES[mode]
-        apply_source_services(source)
-        if local:start_local_monitor()
-        else:stop_local_monitor()
-        stop_sonobus();MODE.write_text(mode+'\n')
-    if MODES[audio_mode()][1]=='system' and QUEUE_FILE.is_file():
+        apply_mode(mode,restore_camilla=False,output=restored,output_resolved=restored is not None)
+    except (RuntimeError,ValueError,OSError) as error:
+        if saved_filter!=NO_FILTER:
+            print('Saved filtered route unavailable; using No filter: '+str(error),flush=True)
+            stop_local_monitor()
+            try:stop_camilla(include_stale=True)
+            except Exception:pass
+            ACTIVE.write_text(NO_FILTER+'\n');saved_filter=NO_FILTER
+            try:apply_mode(mode,restore_camilla=False,output=restored,output_resolved=restored is not None)
+            except Exception as fallback_error:print('No filter output pending: '+str(fallback_error),flush=True)
+        else:print('No filter output pending: '+str(error),flush=True)
+    if QUEUE_FILE.is_file():
         try:ensure_mpv()
         except (OSError,RuntimeError):pass
-    if selected_filter()!=NO_FILTER:
-        wait_for_camilla_config(profile(selected_filter()))
-    try:
-        apply_master_volume(master_volume(),normalize_sinks=False)
-    except RuntimeError as error:
-        if not alive(rpid(LOCALMONPID)) and any(x in str(error) for x in ('No playback sink','Could not identify the current default sink','Playback sink unavailable','Audio node unavailable')):
-            print('Saved master pending: '+str(error),flush=True)
-        else:raise
+    try:apply_master_volume(master_volume(),normalize_sinks=False)
+    except RuntimeError as error:print('Saved master pending: '+str(error),flush=True)
     MASTER_RESTORING=False
 def stop_audio_services(mark_stopped=True,stop_pipewire=True):
     global MASTER_RESTORING
@@ -3443,12 +3485,18 @@ def release_audio_for_output_switch():
 def toggle_audio_services():
     with LOCK:
         if STOPPED.exists():
-            with audio_start_change():
-                start_runtime(force=True)
-                STOPPED.unlink(missing_ok=True)
+            pause_for_audio_stop()
+            start_runtime(force=True)
+            STOPPED.unlink(missing_ok=True)
+            try:normalize_audio_volumes()
+            except RuntimeError as error:print('Startup normalization pending: '+str(error),flush=True)
+            pause_for_normalization()
         else:
             stop_audio_services()
         return {'stopped':STOPPED.exists()}
+def apply_laptop_laptop_boundary():
+    if STOPPED.exists():MODE.write_text('laptop_laptop\n');return {'mode':'laptop_laptop','stopped':True}
+    return set_mode('laptop_laptop')
 def cleanup():
     # Host shutdown is not Stop all audio. Leave the local playback graph
     # available to Media Control after selecting the clean laptop mode.
@@ -3528,23 +3576,13 @@ def main():
     tracked=rpid(CAMPID)
     if tracked and reusable_camilla(tracked):
         stop_local_monitor();stop_camilla(include_stale=True)
-    # A surviving engine may be reused only if it is the tracked engine and
-    # reports the selected YAML. Every active startup still reapplies local mode.
-    running=other_camilla_processes()
-    if running:
-        if len(running)!=1:
-            raise RuntimeError('Multiple CamillaDSP engines found; refusing unsafe startup')
-        verified=reusable_camilla(running[0])
-        if not verified or selected_filter()==NO_FILTER:
-            raise RuntimeError('Unverified CamillaDSP engine is running; refusing unsafe startup')
-        if rpid(CAMPID)!=running[0]:
-            CAMPID.write_text(str(running[0])+'\n')
-        if selected_filter()!=verified.name:
-            raise RuntimeError('Surviving CamillaDSP config differs from selected profile; refusing unsafe startup')
+    # start_runtime owns stale-engine cleanup and saved-profile fallback.
     watcher_stop=threading.Event()
     threading.Thread(target=watch_sonobus_workspace,args=(watcher_stop,),daemon=True).start()
     start_runtime()
-    if not STOPPED.exists():normalize_audio_volumes()
+    if not STOPPED.exists():
+        try:normalize_audio_volumes()
+        except RuntimeError as error:print('Startup normalization pending: '+str(error),flush=True)
     threading.Thread(target=watch_master_volume,args=(watcher_stop,),daemon=True).start()
     threading.Thread(target=watch_output_preview,args=(watcher_stop,),daemon=True).start()
     server=S(('0.0.0.0',PORT),H);SERVERPID.write_text(str(me)+'\n');STOP_CAP.write_text(str(me)+'\n')
@@ -3579,6 +3617,7 @@ def local_api_post(path,payload=None,timeout=90,error='Request failed'):
 def topology_cli():
     import sys
     try:
+        ensure()
         if len(sys.argv)==2 and sys.argv[1]=='--audio-toggle':
             ensure()
             server=rpid(SERVERPID)
@@ -3606,10 +3645,14 @@ def topology_cli():
             print(json.dumps(away_display_state()));return
         if len(sys.argv)==3 and sys.argv[1]=='--select-filter':
             server=rpid(SERVERPID)
-            if not alive(server) or server==os.getpid():
-                raise RuntimeError('Webremote must be running for filter selection')
-            data=local_api_post('/api/select',{'profile':sys.argv[2]},120,'Filter selection failed')
+            if alive(server) and server!=os.getpid():
+                local_api_post('/api/mode',{'mode':'laptop_laptop'},120,'Laptop mode apply failed')
+                data=local_api_post('/api/select',{'profile':sys.argv[2]},120,'Filter selection failed')
+            else:
+                set_mode('laptop_laptop');data=switch_profile(sys.argv[2])
             print(json.dumps(data,ensure_ascii=False));return
+        if len(sys.argv)==2 and sys.argv[1]=='--laptop-laptop-boundary':
+            print(json.dumps(apply_laptop_laptop_boundary(),ensure_ascii=False));return
         if len(sys.argv)==2 and sys.argv[1]=='--normalize-menu-open':
             if STOPPED.exists():
                 print(json.dumps({'skipped':'audio stopped'}));return
@@ -3703,4 +3746,6 @@ def topology_cli():
 if __name__=='__main__':
     import sys
     if len(sys.argv)>1:topology_cli()
-    else:main()
+    else:
+        try:main()
+        except Exception as error:print(str(error),file=sys.stderr);sys.exit(1)
