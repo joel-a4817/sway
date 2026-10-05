@@ -52,8 +52,14 @@ def begin_output_preview(origin='web',owner_pid=None,owner_start=None):
         if audio_mode() not in MODES or not MODES[audio_mode()][2]:
             raise RuntimeError('Laptop output can only be configured while the current audio output includes Laptop')
         _recover_stale_cli_preview()
-        if OUTPUT_PREVIEW.exists():
-            raise RuntimeError('Another output selection is pending; cancel it first')
+        current=_read_json(OUTPUT_PREVIEW,None)
+        if isinstance(current,dict):
+            owner=current.get('owner')
+            if owner not in ('web','cli'):
+                raise RuntimeError('Cannot recover output selection with unknown owner')
+            cancel_output_preview(owner,recover=True)
+        elif OUTPUT_PREVIEW.exists():
+            OUTPUT_PREVIEW.unlink(missing_ok=True)
         if origin=='cli' and (not owner_pid or not owner_start):raise ValueError('Missing CLI picker identity')
         top=audio_topology()
         token=uuid.uuid4().hex if origin=='web' else None
