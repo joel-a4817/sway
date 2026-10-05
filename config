@@ -122,9 +122,8 @@ bindsym --no-repeat $mod+shift+a fullscreen disable; exec $term -T "$popup-serve
 bindsym --no-repeat $mod+shift+b fullscreen disable; exec $term -T "$popup-server-linux" -e bash -c 'trap "" INT; (trap - INT; python3 /home/joel/.config/sway/scripts/network/camilladsp-server-sonobus.py); read -n 1 -rsp "Press any key to close..."'
 bindsym --locked --no-repeat $mod+shift+d fullscreen disable; exec python3 "/home/joel/.config/sway/scripts/network/camilladsp-server-sonobus.py" --toggle-away-display
 bindsym --no-repeat $mod+shift+e fullscreen disable; exec $term -T "$popup-update-a_profiles" -e bash -c '/home/joel/.config/sway/scripts/network/airplay-hotspot-toggle.sh; echo; read -n 1 -rsp "Press any key to close..."'
-bindsym --no-repeat $mod+shift+f fullscreen disable; exec $term -T "$popup-update-play_music" -e bash -c 'python3 ~/.config/sway/scripts/play-music.py'
-bindsym --no-repeat $mod+shift+g fullscreen disable; exec $term -T "$popup-update-add_audio_device" -e bash -c 'python3 ~/.config/sway/scripts/updaters/add-audio-device.py'
-bindsym --no-repeat $mod+shift+i fullscreen disable; exec systemctl suspend
+bindsym --no-repeat $mod+shift+f fullscreen disable; exec $term -T "$popup-update-add_audio_device" -e bash -c 'python3 ~/.config/sway/scripts/updaters/add-audio-device.py'
+bindsym --no-repeat $mod+shift+g fullscreen disable; exec systemctl suspend
 
 #keybinds app
 bindsym --no-repeat $mod+F2 fullscreen disable; exec $term -T "$popup-tuis" -e clipse
