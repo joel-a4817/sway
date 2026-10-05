@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 import re
+import subprocess
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -10,38 +12,52 @@ SAMPLE_RATE = 96000
 N_FFT = 65536
 CAMILLA_PLAYBACK_DEVICE = "hw:Loopback,0,1"
 CAMILLA_PLAYBACK_FORMAT = "S32_LE"
-# Only the three device compensation filters are fixed; room profiles are discovered.
+# Customize devices here. Each entry is: filename, profile label, and IE/OE class.
 CAMILLA_ROOT = Path.home() / 'Documents/prefs/audio-filters'
 BRIR_ROOT = CAMILLA_ROOT
-EARPODS_HPCF = CAMILLA_ROOT / 'Apple_EarPods_Ahastyle_Covers_Custom_Average_A+B.wav'
-CLOUD3_HPCF = CAMILLA_ROOT / 'HyperX_Cloud_III_Average.wav'
-CMF_BUDS_PRO_2_HPCF = CAMILLA_ROOT / 'CMF_by_Nothing_Buds_Pro_2_Sample_A.wav'
+HPCFS = (
+    {
+        'file': 'Apple_EarPods_Ahastyle_Covers_Custom_Average_A+B.wav',
+        'label': 'Apple EarPods',
+        'kind': 'IE',
+    },
+    {
+        'file': 'HyperX_Cloud_III_Average.wav',
+        'label': 'HyperX Cloud III',
+        'kind': 'OE',
+    },
+    {
+        'file': 'CMF_by_Nothing_Buds_Pro_2_Sample_A.wav',
+        'label': 'cmf-buds-pro-2',
+        'kind': 'IE',
+    },
+)
+FOLDER_PATTERN = re.compile(r'^\((\d+)ms-(IE|OE)\)(?:\s+(.+))?$', re.I)
 
-# Discover every BRIR profile folder automatically and sort by the
-# millisecond value at the start of its name, from least to most reverb.
-def profile_sort_key(folder_name):
-    match = re.match(r'^\((\d+)ms\)', folder_name)
-    if match is None:
-        raise SystemExit(
-            f'BRIR folder name does not start with "(NNNNms)": '
-            f'{folder_name}'
-        )
-    return int(match.group(1)), folder_name.casefold()
+def parse_profile_folder(path):
+    match = FOLDER_PATTERN.match(path.name)
+    if not match:
+        return None
+    milliseconds, kind, room = match.groups()
+    return {
+        'path': path, 'folder': path.name, 'milliseconds': milliseconds,
+        'kind': kind.upper(), 'room': (room or '').strip(),
+    }
+
+def profile_sort_key(profile):
+    return (int(profile['milliseconds']), profile['room'].casefold(), profile['kind'])
 
 PROFILES = sorted(
-    (path.name for path in BRIR_ROOT.iterdir() if path.is_dir() and re.match(r"^\(\d+ms\)", path.name)),
+    (profile for path in BRIR_ROOT.iterdir() if path.is_dir()
+     if (profile := parse_profile_folder(path)) is not None),
     key=profile_sort_key,
+) if BRIR_ROOT.is_dir() else []
+
+# IE and OE versions of the same room share one number. 00 remains filterless.
+ROOM_KEYS = sorted(
+    {(int(profile['milliseconds']), profile['room'].casefold()) for profile in PROFILES}
 )
-# Reserve 00 for filterless. Both anechoic device variants use 01;
-# subsequent reverberant environments advance once per environment.
-ANECHOIC_OE = '(0000ms) Anechoic (OE)'
-PROFILE_NUMBERS = {
-    folder: index for index, folder in enumerate(
-        (name for name in PROFILES if name != ANECHOIC_OE), 1
-    )
-}
-if ANECHOIC_OE in PROFILES:
-    PROFILE_NUMBERS[ANECHOIC_OE] = 1
+PROFILE_NUMBERS = {key: index for index, key in enumerate(ROOM_KEYS, 1)}
 
 def slugify(value):
     value = value.lower().replace("'", '')
@@ -217,29 +233,19 @@ def yaml_string(value):
     value = value.replace('"', '\\"')
     return f'"{value}"'
 
-def make_camilladsp_profile(
-    index,
-    folder_name,
-    gain,
-    brir,
-    hpcf,
-    device,
-    title_device,
-):
-    slug = slugify(folder_name)
-
-    filename = (
-        f"{index:02d}-{device}-{slug}.yml"
-    )
-
-    output_path = CAMILLA_ROOT / folder_name / filename
+def make_camilladsp_profile(index, profile, gain, brir, hpcf, device_label):
+    room_slug = slugify(profile['room']) or 'room'
+    device_slug = slugify(device_label)
+    kind = profile['kind'].lower()
+    filename = f"{index:02d}-{kind}-{device_slug}-{profile['milliseconds']}ms-{room_slug}.yml"
+    output_path = profile['path'] / filename
 
     gain_text = f"{gain:.17f}"
     brir_text = yaml_string(brir)
     hpcf_text = yaml_string(hpcf)
 
     title = yaml_string(
-        f"{title_device} ASH - {folder_name}"
+        f"{device_label} ASH - {profile['folder']}"
     )
 
     description = yaml_string(
@@ -437,30 +443,55 @@ pipeline: []
 
 def main():
     if not CAMILLA_ROOT.is_dir() or not PROFILES:
-        raise SystemExit(f'No (NNNNms) BRIR folders in {CAMILLA_ROOT}')
-    for hpcf in (EARPODS_HPCF, CLOUD3_HPCF, CMF_BUDS_PRO_2_HPCF):
+        raise SystemExit(f'No (NNNNms-IE) or (NNNNms-OE) BRIR folders in {CAMILLA_ROOT}')
+    devices = []
+    for item in HPCFS:
+        kind = str(item.get('kind', '')).upper()
+        label = str(item.get('label', '')).strip()
+        hpcf = CAMILLA_ROOT / str(item.get('file', ''))
+        if kind not in ('IE', 'OE') or not label:
+            raise SystemExit(f'Invalid HPCFS entry: {item!r}')
         if not hpcf.is_file():
             raise SystemExit(f'Missing HpCF: {hpcf}')
-    for folder in PROFILES:
-        brir = CAMILLA_ROOT / folder / 'BRIR_True_Stereo.wav'
+        devices.append({'kind': kind, 'label': label, 'path': hpcf})
+    for profile in PROFILES:
+        brir = profile['path'] / 'BRIR_True_Stereo.wav'
         if not brir.is_file():
             raise SystemExit(f'Missing BRIR: {brir}')
-    # Build all configs before clearing old YAMLs, so invalid WAVs cannot
-    # leave a half-generated profile library.
+        if not any(device['kind'] == profile['kind'] for device in devices):
+            raise SystemExit(f"No {profile['kind']} HpCF configured for {profile['folder']}")
     hf = load_required_ash_helpers()
     generated = []
-    for folder in PROFILES:
-        brir = CAMILLA_ROOT / folder / 'BRIR_True_Stereo.wav'
-        devices = (('cloud3', 'HyperX Cloud III', CLOUD3_HPCF),) if folder == ANECHOIC_OE else (
-            ('earpods', 'Apple EarPods', EARPODS_HPCF),
-            ('cmf-buds-pro-2', 'CMF Buds Pro 2', CMF_BUDS_PRO_2_HPCF),
-        )
-        for device, title, hpcf in devices:
-            *_, gain = calculate_gain(brir, hpcf, hf)
+    for profile in PROFILES:
+        brir = profile['path'] / 'BRIR_True_Stereo.wav'
+        room_key = (int(profile['milliseconds']), profile['room'].casefold())
+        for device in devices:
+            if device['kind'] != profile['kind']:
+                continue
+            *_, gain = calculate_gain(brir, device['path'], hf)
             generated.append(make_camilladsp_profile(
-                PROFILE_NUMBERS[folder], folder, gain, brir, hpcf, device, title
+                PROFILE_NUMBERS[room_key], profile, gain, brir,
+                device['path'], device['label'],
             ))
-    # Clear all YAMLs, including stale nested profiles, before writing new ones.
+    paths=[path for path,_ in generated]
+    if len(paths)!=len(set(paths)):
+        raise SystemExit('HpCF labels create duplicate output filenames')
+    # Validate every generated profile with the installed CamillaDSP before
+    # deleting the currently working profile set.
+    camilladsp = Path('/run/current-system/sw/bin/camilladsp')
+    if not camilladsp.is_file():
+        raise SystemExit(f'Missing CamillaDSP executable: {camilladsp}')
+    with tempfile.TemporaryDirectory() as temporary:
+        temporary = Path(temporary)
+        for path, text in generated:
+            candidate = temporary / path.name
+            candidate.write_text(text, encoding='utf-8')
+            check = subprocess.run([str(camilladsp), '--check', str(candidate)], text=True,
+                                   capture_output=True)
+            if check.returncode:
+                raise SystemExit(f'Invalid generated profile {path.name}: '+
+                                 (check.stderr.strip() or check.stdout.strip()))
+    # Validate every source before deleting stale generated YAML files.
     for path in CAMILLA_ROOT.rglob('*'):
         if path.is_file() and path.suffix.lower() in ('.yml', '.yaml'):
             path.unlink()
@@ -468,9 +499,8 @@ def main():
     for path, text in generated:
         path.write_text(text, encoding='utf-8')
         output.append(path)
-    assert len(output) == 1 + sum(1 if folder == ANECHOIC_OE else 2 for folder in PROFILES)
+    assert len(output) == 1 + len(generated)
     print(f'Rebuilt {len(output)} CamillaDSP YAML profiles in {CAMILLA_ROOT}')
-
 
 if __name__ == '__main__':
     main()
