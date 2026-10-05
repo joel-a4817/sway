@@ -145,7 +145,7 @@ printf '%s\n' "${profiles[@]}" | grep -Fqx -- "$last_profile" || last_profile=''
 last_profile_label="$(jq -r --arg n "$card" --arg p "$last_profile" '.cards[]|select(.name==$n)|.profiles[]|select((.index|tostring)==$p)|.label' <<<"$TOPOLOGY_JSON")"
 labels=("Last profile${last_profile_label:+ ($last_profile_label)}")
 for profile in "${profiles[@]}"; do
-    labels+=("$(jq -r --arg n "$card" --arg p "$profile" '.cards[]|select(.name==$n) as $card|$card.profiles[]|select((.index|tostring)==$p)|(if ($card.internal==true or .available=="no" or .available=="false" or ((.name|ascii_downcase)=="off") or (.label|test("^\[(INTERNAL|MONITOR|LOOPBACK|VIRTUAL|UNAVAILABLE)\]"))) then "[UNAVAILABLE] " else "" end) + .label' <<<"$TOPOLOGY_JSON")")
+    labels+=("$(jq -r --arg n "$card" --arg p "$profile" '.cards[]|select(.name==$n) as $card|$card.profiles[]|select((.index|tostring)==$p)|(if ($card.internal==true or .available=="no" or .available=="false" or ((.name|ascii_downcase)=="off") or (.label|test("^\[(INT|MON|LOOP|VIRT|N/A)\]"))) then "[N/A] " else "" end) + .label' <<<"$TOPOLOGY_JSON")")
 done
 while :; do
     choose_index "Card: $card_label | Playback profile" "${labels[@]}" || exit 0
@@ -153,7 +153,7 @@ while :; do
         [[ -n "$last_profile" ]] || { wrap_line 'The last known profile is unavailable. Select again.'; continue; }
         profile="$last_profile"
     else profile="${profiles[number-1]}"; fi
-    profile_selectable="$(jq -r --arg n "$card" --arg p "$profile" '.cards[]|select(.name==$n) as $card|$card.profiles[]|select((.index|tostring)==$p)|($card.internal!=true and .available!="no" and .available!="false" and ((.name|ascii_downcase)!="off") and ((.label|test("^\[(INTERNAL|MONITOR|LOOPBACK|VIRTUAL|UNAVAILABLE)\]"))|not))' <<<"$TOPOLOGY_JSON")"
+    profile_selectable="$(jq -r --arg n "$card" --arg p "$profile" '.cards[]|select(.name==$n) as $card|$card.profiles[]|select((.index|tostring)==$p)|($card.internal!=true and .available!="no" and .available!="false" and ((.name|ascii_downcase)!="off") and ((.label|test("^\[(INT|MON|LOOP|VIRT|N/A)\]"))|not))' <<<"$TOPOLOGY_JSON")"
     [[ "$profile_selectable" == true ]] && break
     wrap_line 'That playback profile cannot be used. Select again.'
 done
@@ -169,10 +169,10 @@ last_route_label="$(jq -r --arg n "$card" --arg r "$last_route" '.cards[]|select
 labels=("Last route${last_route_label:+ ($last_route_label)}")
 if ((${#routes[@]})); then
     for r in "${routes[@]}"; do
-        labels+=("$(jq -r --arg n "$card" --arg p "$profile" --arg r "$r" '.cards[]|select(.name==$n)|.routes[]|select((.index|tostring)==$r)|(if (.available=="no" or .available=="false" or ((.name|ascii_downcase)=="off") or ((.profiles|length)>0 and ([.profiles[]|tostring]|index($p))==null)) then "[UNAVAILABLE] " else "" end) + .label' <<<"$TOPOLOGY_JSON")")
+        labels+=("$(jq -r --arg n "$card" --arg p "$profile" --arg r "$r" '.cards[]|select(.name==$n)|.routes[]|select((.index|tostring)==$r)|(if (.available=="no" or .available=="false" or ((.name|ascii_downcase)=="off") or ((.profiles|length)>0 and ([.profiles[]|tostring]|index($p))==null)) then "[N/A] " else "" end) + .label' <<<"$TOPOLOGY_JSON")")
     done
 else
-    labels+=("[UNAVAILABLE] No output routes exposed")
+    labels+=("[N/A] No output routes exposed")
 fi
 if ((${#routes[@]})); then
 while :; do
@@ -210,7 +210,7 @@ for x in "${sinks[@]}"; do
       ([$card.routes[]|select((.index|tostring)==$r)|.devices[]|tostring]) as $devices|
       (if ((($devices|length)>0 and $sink.profileDevice != null and
             ($devices|index($sink.profileDevice|tostring))==null))
-       then "[UNAVAILABLE] " else "" end)+$sink.label' <<<"$TOPOLOGY_JSON")")
+       then "[N/A] " else "" end)+$sink.label' <<<"$TOPOLOGY_JSON")")
 done
 ((${#sinks[@]})) || { wrap_line 'No playback sinks exposed by the selected profile.' >&2; exit 1; }
 while :; do
@@ -225,7 +225,7 @@ while :; do
         ((number-1 < ${#sinks[@]})) || { wrap_line 'Select an exposed sink.'; continue; }
         idx="$number";candidate="${sinks[number-1]}"
     fi
-    [[ "${labels[idx]}" != '[UNAVAILABLE] '* ]] && { sink="$candidate"; break; }
+    [[ "${labels[idx]}" != '[N/A] '* ]] && { sink="$candidate"; break; }
     wrap_line 'That sink cannot be selected. Select again.'
 done
 

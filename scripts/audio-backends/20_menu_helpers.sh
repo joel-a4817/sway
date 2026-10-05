@@ -37,29 +37,10 @@ compact_menu_label() {
 }
 # Presentation only: one status tag, while original labels retain validation.
 compact_item_label() {
-    local label="$1" tag='' prefix
-    case "$label" in
-        '[UNAVAILABLE] '*) tag='[N/A]'; label="${label#'[UNAVAILABLE] '}" ;;
-        '[INTERNAL] '*) tag='[INT]'; label="${label#'[INTERNAL] '}" ;;
-        '[MONITOR - NOT SELECTABLE] '*) tag='[MON]'; label="${label#'[MONITOR - NOT SELECTABLE] '}" ;;
-        '[MONITOR] '*) tag='[MON]'; label="${label#'[MONITOR] '}" ;;
-        '[LOOPBACK] '*) tag='[LOOP]'; label="${label#'[LOOPBACK] '}" ;;
-        '[VIRTUAL] '*) tag='[VIRT]'; label="${label#'[VIRTUAL] '}" ;;
-    esac
-    while :; do
-        case "$label" in
-            '[UNAVAILABLE] '*) label="${label#'[UNAVAILABLE] '}" ;;
-            '[INTERNAL] '*) label="${label#'[INTERNAL] '}" ;;
-            '[MONITOR] '*) label="${label#'[MONITOR] '}" ;;
-            '[MONITOR - NOT SELECTABLE] '*) label="${label#'[MONITOR - NOT SELECTABLE] '}" ;;
-            '[LOOPBACK] '*) label="${label#'[LOOPBACK] '}" ;;
-            '[VIRTUAL] '*) label="${label#'[VIRTUAL] '}" ;;
-            *) break ;;
-        esac
-    done
+    local label="$1"
     label="${label% (current)}"
     label="${label/Monitor of /}"
-    [[ -n "$tag" ]] && printf '%s %s' "$tag" "$label" || printf '%s' "$label"
+    printf '%s' "$label"
 }
 print_menu_item() {
     local text tag='' label

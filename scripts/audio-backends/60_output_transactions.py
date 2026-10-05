@@ -177,9 +177,8 @@ def _stage_local_route(card, profile, route=None, mode=None,origin='web',token=N
 
 def _labelled_output_option(row):
     label=str(row.get('label') or '')
-    return any(label.startswith(prefix) for prefix in
-               ('[UNAVAILABLE] ','[INTERNAL] ','[MONITOR] ','[MONITOR - NOT SELECTABLE] ',
-                '[LOOPBACK] ','[VIRTUAL] '))
+    return bool(row.get('internal')) or label.startswith(
+        ('[N/A] ','[INT] ','[MON] ','[LOOP] ','[VIRT] '))
 
 def select_output_device_stage(card,origin='web',token=None):
     # Both UIs commit the same usable profile at Device Select, before Profile UI.

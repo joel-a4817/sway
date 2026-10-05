@@ -34,7 +34,7 @@ def input_topology():
         for node in pw_objects('Node',graph):
             np=pw_props(node);nn=str(np.get('node.name') or '')
             if np.get('media.class')=='Audio/Source' and str(np.get('device.id'))==str(device['id']) and nn:
-                sources.append({'name':nn,'label':('[MONITOR] ' if nn.endswith('.monitor') or str(np.get('device.class') or '').lower()=='monitor' else '')+str(np.get('node.description') or nn),
+                sources.append({'name':nn,'label':('[MON] ' if nn.endswith('.monitor') or str(np.get('device.class') or '').lower()=='monitor' else '')+str(np.get('node.description') or nn),
                                 'profileDevice':np.get('card.profile.device')})
         if profiles or routes or sources:
             result.append({'name':name,'label':(_internal_audio_tag(props) if _internal_audio(props) else '')+str(props.get('device.description') or name),
@@ -44,10 +44,10 @@ def input_topology():
     for node in pw_objects('Node',graph):
         props=pw_props(node);name=str(props.get('node.name') or '')
         if props.get('media.class')!='Audio/Source' or not name or name in owned:continue
-        result.append({'name':'virtual:'+name,'label':('[MONITOR] ' if name.endswith('.monitor') or str(props.get('device.class') or '').lower()=='monitor' else '[VIRTUAL] ')+str(props.get('node.description') or name),
+        result.append({'name':'virtual:'+name,'label':('[MON] ' if name.endswith('.monitor') or str(props.get('device.class') or '').lower()=='monitor' else '[VIRT] ')+str(props.get('node.description') or name),
                        'profiles':[{'index':0,'name':'current','label':'Current live profile','available':'yes'}],
                        'routes':[],'activeProfile':0,'activeRoutes':[],
-                       'sources':[{'name':name,'label':('[MONITOR] ' if name.endswith('.monitor') or str(props.get('device.class') or '').lower()=='monitor' else '')+str(props.get('node.description') or name),'profileDevice':None}]})
+                       'sources':[{'name':name,'label':('[MON] ' if name.endswith('.monitor') or str(props.get('device.class') or '').lower()=='monitor' else '')+str(props.get('node.description') or name),'profileDevice':None}]})
     # Pulse compatibility can expose sink monitors as sources without an
     # Audio/Source node. Show these too, with their live descriptions.
     pulse=run([exe('pactl'),'-f','json','list','sources'],False,8,media_env())
@@ -60,7 +60,7 @@ def input_topology():
         label=str(source.get('description') or name)
         monitor=(name.endswith('.monitor') or source.get('monitor_of_sink') not in (None,'',4294967295)
                  or str(props.get('device.class') or '').lower()=='monitor')
-        tag='[MONITOR] ' if monitor else '[VIRTUAL] '
+        tag='[MON] ' if monitor else '[VIRT] '
         result.append({'name':'virtual:'+name,'label':tag+label,
                        'profiles':[], 'routes':[], 'activeProfile':None,'activeRoutes':[],
                        'sources':[{'name':name,'label':tag+label,'profileDevice':None}]})
@@ -114,26 +114,17 @@ def _input_ports(source):
               'available':x.get('availability','unknown')} for x in item.get('ports') or [] if x.get('name')],
             ap.get('name','') if isinstance(ap,dict) else str(ap or ''))
 
+_OPTION_TAGS=(('[N/A] ','N/A'),('[INT] ','INT'),('[MON] ','MON'),
+              ('[LOOP] ','LOOP'),('[VIRT] ','VIRT'))
 def _input_label(row):
     label=str(row.get('label') or row.get('name') or row.get('index') or '')
-    tags=(('[UNAVAILABLE] ','N/A'),('[INTERNAL] ','INT'),('[MONITOR - NOT SELECTABLE] ','MON'),
-          ('[MONITOR] ','MON'),('[LOOPBACK] ','LOOP'),('[VIRTUAL] ','VIRT'))
-    status=''
-    for prefix,compact in tags:
-        if label.startswith(prefix):status=compact;label=label[len(prefix):];break
-    while True:
-        stripped=next((prefix for prefix,_ in tags if label.startswith(prefix)),None)
-        if not stripped:break
-        label=label[len(stripped):]
+    match=next(((prefix,status) for prefix,status in _OPTION_TAGS if label.startswith(prefix)),None)
+    status,label=(match[1],label[len(match[0]):]) if match else ('',label)
     if label.startswith('Monitor of '):label=label[11:]
-    if not status and not _available_option(row):status='N/A'
+    if not _available_option(row):status='N/A'
     return status,label
 def _input_selectable_option(row):
-    label=str(row.get('label') or '')
-    return (_available_option(row) and not label.startswith(
-        ('[UNAVAILABLE] ','[INTERNAL] ','[MONITOR - NOT SELECTABLE] ',
-         '[MONITOR] ','[LOOPBACK] ','[VIRTUAL] ')))
-
+    return _input_label(row)[0]==''
 def _print_input_row(number,row):
     import textwrap
     status,label=_input_label(row);prefix=(f'[{status}] ' if status else '')+f'[{number}] '

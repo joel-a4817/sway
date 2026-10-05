@@ -35,10 +35,10 @@ def _internal_audio_tag(props):
     card=str(props.get('alsa.card_name') or '').lower()
     name=str(props.get('node.name') or '').lower()
     if driver=='snd_aloop' or card=='loopback' or 'snd_aloop' in name:
-        return '[LOOPBACK] '
+        return '[LOOP] '
     if name.endswith('.monitor') or str(props.get('device.class') or '').lower()=='monitor':
-        return '[MONITOR] '
-    return '[INTERNAL] '
+        return '[MON] '
+    return '[INT] '
 
 def _internal_audio(props):
     return (str(props.get('alsa.driver_name') or '').lower()=='snd_aloop' or

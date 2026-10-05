@@ -1672,13 +1672,18 @@ let localNowArtworkURL='';
 function updateLocalNowArtwork(url){const next=url||'';if(next===localNowArtworkURL)return;localNowArtworkURL=next;const tile=$('#now-cover');tile.replaceChildren();if(!next)return;const image=document.createElement('img');image.alt='';image.decoding='async';image.addEventListener('error',()=>image.remove(),{once:true});image.src=next;tile.appendChild(image)}
 function render(sel,data,query){const list=$(sel);list.replaceChildren();const term=query.toLowerCase();const filtered=data.filter(song=>!term||[song.title,song.artist,song.album,song.relative].join(' ').toLowerCase().includes(term));if(!filtered.length){const empty=document.createElement('div');empty.className='card details';empty.textContent=query?'No matches':'Nothing here yet';list.append(empty);return}const fragment=document.createDocumentFragment();for(const song of filtered){const button=document.createElement('button');button.className='item';button.innerHTML='<span class="name"></span><span class="meta"></span>';button.children[0].textContent=song.title;button.children[1].textContent=[song.artist,song.album].filter(Boolean).join(' • ')||song.relative;const wrap=document.createElement('div');wrap.className='item-cover';const copy=document.createElement('div');copy.className='copy';copy.append(...button.children);wrap.append(coverNode(song.cover),copy);button.append(wrap);button.onclick=async()=>{try{await busy(button,()=>post('/api/play/song',{path:song.path}),'Playing…');note('Playing '+song.title);await refreshVolatile()}catch(error){note(error.message,true)}};fragment.append(button)}list.append(fragment)}
 const MODE_LABELS={ipad_ipad:'External',laptop_laptop:'Laptop',ipad_laptop:'Laptop',ipad_both:'Both',laptop_ipad:'External',laptop_both:'Both'};const LOCAL_MODES=new Set(['ipad_laptop','ipad_both','laptop_laptop','laptop_both']);let pendingMode=null,outputTopology=null,outputProfileBusy=false,outputPreviewToken=null;const outputCard=$('#output-card'),outputProfile=$('#output-profile'),outputRoute=$('#output-route'),outputSink=$('#output-sink');function selectedCard(){return outputTopology?.cards.find(item=>item.name===outputCard.value)}
-function compactOutputLabel(value){
-  return String(value||'').replace(/^\[UNAVAILABLE\] /,'[N/A] ')
-  .replace(/^\[INTERNAL\] /,'[INT] ').trim();
+function outputStatus(row,forceUnavailable=false){
+  if(forceUnavailable)return 'N/A';
+  if(row?.internal)return 'INT';
+  const match=String(row?.label||'').match(/^\[(N\/A|INT|MON|LOOP|VIRT)\] /);
+  return match?.[1]||'';
 }
-function labelledOutputOption(row){
-  return /^(?:\[UNAVAILABLE\]|\[INTERNAL\]|\[MONITOR(?: - NOT SELECTABLE)?\]|\[LOOPBACK\]|\[VIRTUAL\]) /.test(String(row?.label||''));
+function compactOutputLabel(row,forceUnavailable=false){
+  const label=String(row?.label||'').replace(/^\[(?:N\/A|INT|MON|LOOP|VIRT)\] /,'').trim();
+  const status=outputStatus(row,forceUnavailable);
+  return (status?'['+status+'] ':'')+label;
 }
+function labelledOutputOption(row){return outputStatus(row)!==''}
 function availableOption(row,profile){
   return row.available!=='no'&&row.available!=='false'&&
   !['off','[out] off'].includes(String(row.name||'').toLowerCase())&&
@@ -1689,7 +1694,7 @@ function fillRoutes(preferred=''){
   outputRoute.replaceChildren();
   for(const route of card?.routes||[]){
     const blocked=!availableOption(route,profile);
-    const option=new Option((blocked?'[UNAVAILABLE] ':'')+compactOutputLabel(route.label),String(route.index));
+    const option=new Option(compactOutputLabel(route,blocked),String(route.index));
     option.disabled=blocked;outputRoute.add(option);
   }
   const options=[...outputRoute.options],saved=outputTopology?.saved?.port;
@@ -1705,7 +1710,7 @@ function fillSinks(preferred=''){
   if(!card)return;
   for(const sink of card.sinks||[]){
     const incompatible=devices.length>0&&sink.profileDevice!=null&&!devices.includes(String(sink.profileDevice));
-    const option=new Option((incompatible?'[UNAVAILABLE] ':'')+compactOutputLabel(sink.label),sink.name);
+    const option=new Option(compactOutputLabel(sink,incompatible),sink.name);
     option.disabled=incompatible;outputSink.add(option);
   }
   const options=[...outputSink.options];
@@ -1717,7 +1722,7 @@ function fillProfiles(preferred=''){
   const card=selectedCard(),old=preferred||outputProfile.value;outputProfile.replaceChildren();
   for(const profile of card?.profiles||[]){
     const blocked=!!card?.internal||labelledOutputOption(card)||labelledOutputOption(profile)||!availableOption(profile);
-    const option=new Option((blocked?'[UNAVAILABLE] ':'')+compactOutputLabel(profile.label),String(profile.index));
+    const option=new Option(compactOutputLabel(profile,blocked),String(profile.index));
     option.disabled=blocked;outputProfile.add(option);
   }
   const options=[...outputProfile.options];
@@ -1729,7 +1734,7 @@ function fillCards(preferred=''){
   const previous=preferred||outputCard.value;outputCard.replaceChildren();
   for(const card of outputTopology?.cards||[]){
     const blocked=!!card.internal||labelledOutputOption(card);
-    const option=new Option((blocked?'[N/A] ':'')+compactOutputLabel(card.label),card.name);
+    const option=new Option(compactOutputLabel(card,blocked),card.name);
     option.disabled=blocked;outputCard.add(option);
   }
   const options=[...outputCard.options];
