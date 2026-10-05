@@ -54,20 +54,18 @@ def start_runtime(force=False):
     if OUTPUT_PREVIEW.exists():_recover_stale_cli_preview()
     # Keep persisted master until the route has been restored; a newly
     # created default sink may temporarily report 100%.
-    available=profiles()
-    saved=ACTIVE.read_text().strip() if ACTIVE.is_file() else '';selected=None
-    if not available and saved!=NO_FILTER:raise RuntimeError('No CamillaDSP profiles found in '+str(PROFILES))
-    if saved and saved!=NO_FILTER:
-        try:selected=profile(saved)
-        except (ValueError,FileNotFoundError):pass
-    if selected is None and saved!=NO_FILTER:
-        selected=available[0]
+    saved=NO_FILTER if force else selected_filter()
+    selected=None
+    if saved==NO_FILTER:
+        ACTIVE.write_text(NO_FILTER+'\n')
+    else:
+        selected=profile(saved)
     # Set the startup mode before any bypass, engine or source decisions.
     mode='laptop_laptop'
     MODE.write_text(mode+'\n')
     # Reuse a verified surviving engine; never start a competing instance.
     if saved==NO_FILTER:
-        stop_camilla(include_stale=True)
+        stop_camilla_for_no_filter()
         start_bypass()
     elif not alive(rpid(CAMPID),'camilladsp'):
         stop_camilla(include_stale=True)

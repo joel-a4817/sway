@@ -89,5 +89,9 @@ def profile(name):
     return matches[0]
 
 def selected_filter():
-    try:return ACTIVE.read_text().strip()
-    except OSError:return ''
+    try:value=ACTIVE.read_text().strip()
+    except OSError:return NO_FILTER
+    if not value or value==NO_FILTER:return NO_FILTER
+    try:profile(value)
+    except (ValueError,FileNotFoundError):return NO_FILTER
+    return value

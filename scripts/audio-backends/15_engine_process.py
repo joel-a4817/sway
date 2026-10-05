@@ -120,6 +120,14 @@ def stop_camilla(include_stale=False):
     if include_stale and alive(tracked,'camilladsp'):
         raise RuntimeError('Tracked CamillaDSP process did not stop; refusing another start')
     CAMPID.unlink(missing_ok=True)
+def stop_camilla_for_no_filter():
+    """No filter must never coexist with a CamillaDSP process."""
+    stop_camilla(include_stale=True)
+    remaining=other_camilla_processes()
+    if remaining:
+        raise RuntimeError('CamillaDSP still running while applying No filter (PID '+
+                           ', '.join(map(str,remaining))+')')
+
 def validate_camilla_profile(p):
     result=run([str(CAMILLA),'--check',str(p)],False,30)
     if result.returncode:
@@ -276,13 +284,14 @@ def reconcile_sonobus_after_engine_transition(password=None):
 def switch_profile(name):
     with LOCK:
         if name==NO_FILTER:
+            stop_local_monitor()
+            stop_bypass()
+            stop_camilla_for_no_filter()
+            ACTIVE.write_text(NO_FILTER+'\n')
             if STOPPED.exists():
-                ACTIVE.write_text(NO_FILTER+'\n')
                 return {'profile':NO_FILTER,'pid':None,'mode':mode_state()}
             local=MODES[audio_mode()][2]
             route=choose_output_route(dict(saved_output_route(),_remembered=True)) if local else None
-            stop_local_monitor()
-            stop_camilla(include_stale=True)
             try:
                 start_bypass()
                 if audio_mode()=='laptop_laptop':
