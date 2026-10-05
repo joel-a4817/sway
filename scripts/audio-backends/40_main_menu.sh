@@ -112,18 +112,17 @@ esac
 [[ "$selected" =~ ^[0-9]+$ ]] && ((selected < ${#CARDS[@]})) || { echo 'Invalid device selection' >&2; exit 1; }
 card="${CARDS[selected]%%$'\t'*}"
 card_label="${CARDS[selected]#*$'\t'}"
-# The first concrete output selection owns the transition to the local
-# Laptop -> Laptop boundary. Force that complete mode transition before the
-# output transaction is opened, so preview validation cannot reject an
-# External-only starting mode.
-if ! boundary_error="$(python3 "$TOPOLOGY_SCRIPT" --laptop-laptop-boundary 2>&1)"; then
-    printf '%s\n' "$boundary_error" >>"$ACTION_LOG"
-    wrap_line 'Could not force Laptop -> Laptop before applying the output.' >&2
-    exit 1
-fi
+# Open the transaction before the first mutation so cancel and abandoned-preview
+# recovery can restore the original mode, routes and streams.
 if ! preview_error="$(MEDIA_CONTROL_PICKER_PID=$$ MEDIA_CONTROL_PICKER_START="$(process_start "$$")" python3 "$TOPOLOGY_SCRIPT" --begin-output-preview 2>&1 >/dev/null)"; then
     printf '%s\n' "$preview_error" >>"$ACTION_LOG"
-    wrap_line 'Could not begin output selection after switching to Laptop -> Laptop.' >&2
+    wrap_line 'Could not begin output selection.' >&2
+    exit 1
+fi
+OUTPUT_PREVIEW_ACTIVE=1
+if ! boundary_error="$(python3 "$TOPOLOGY_SCRIPT" --laptop-laptop-boundary 2>&1)"; then
+    printf '%s\n' "$boundary_error" >>"$ACTION_LOG"
+    wrap_line 'Could not prepare Laptop -> Laptop output selection.' >&2
     exit 1
 fi
 export MEDIA_CONTROL_PICKER_PID=$$

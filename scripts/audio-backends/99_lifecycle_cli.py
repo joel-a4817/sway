@@ -287,13 +287,9 @@ def local_api_post(path,payload=None,timeout=90,error='Request failed'):
 def topology_cli():
     import sys
     try:
+        ensure()
         if len(sys.argv)==2 and sys.argv[1]=='--audio-toggle':
-            ensure()
-            server=rpid(SERVERPID)
-            if alive(server) and server!=os.getpid():
-                data=local_api_post('/api/audio-toggle',error='Audio toggle failed')
-                print(json.dumps({'stopped':data['stopped']}))
-            else:print(json.dumps(toggle_audio_services()))
+            print(json.dumps(toggle_audio_services()))
             return
         if len(sys.argv)==3 and sys.argv[1]=='--restart-service':
             name=sys.argv[2]
@@ -313,20 +309,25 @@ def topology_cli():
         if len(sys.argv)==2 and sys.argv[1]=='--away-display-status':
             print(json.dumps(away_display_state()));return
         if len(sys.argv)==3 and sys.argv[1]=='--select-filter':
-            server=rpid(SERVERPID)
-            if not alive(server) or server==os.getpid():
-                raise RuntimeError('Webremote must be running for filter selection')
-            data=local_api_post('/api/select',{'profile':sys.argv[2]},120,'Filter selection failed')
+            requested=sys.argv[2]
+            available={NO_FILTER,*[item.name for item in profiles()]}
+            if requested not in available:raise ValueError('Selected filter is not available')
+            if STOPPED.exists():
+                ACTIVE.write_text(requested+'\n')
+                data={'profile':requested,'stopped':True}
+            else:
+                current=selected_filter()
+                if requested!=current:
+                    switch_profile(requested)
+                data={'profile':selected_filter(),'stopped':False}
             print(json.dumps(data,ensure_ascii=False));return
         if len(sys.argv)==2 and sys.argv[1]=='--laptop-laptop-boundary':
             ensure()
-            # Media Control opens on a local source/output boundary before its
-            # selectors run, using the same mode transaction as the web UI.
-            if STOPPED.exists():
-                MODE.write_text('laptop_laptop\n')
-                print(json.dumps({'mode':'laptop_laptop','stopped':True}))
-            else:
-                print(json.dumps(set_mode('laptop_laptop'),ensure_ascii=False))
+            # The preview transaction already owns the rollback snapshot. Mark
+            # the intended local boundary without starting either engine here;
+            # the first output stage acquires ALSA exactly once.
+            MODE.write_text('laptop_laptop\n')
+            print(json.dumps({'mode':'laptop_laptop','stopped':STOPPED.exists()}))
             return
         if len(sys.argv)==2 and sys.argv[1]=='--normalize-menu-open':
             if STOPPED.exists():
