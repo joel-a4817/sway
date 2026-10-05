@@ -1,5 +1,12 @@
+AUDIO_STOPPED_FILE="$HOME_DIR/.local/state/sway/camilladsp-webremote/audio-stopped"
+if [[ -e "$AUDIO_STOPPED_FILE" ]]; then
+    AUDIO_TOGGLE_LABEL='Start audio'
+else
+    AUDIO_TOGGLE_LABEL='Stop audio'
+fi
+
 ARGS=(-t warning -y overlay -m 'Media control')
-ARGS+=( -z 'Stop / start audio' "printf '%s\n' audio-toggle > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
+ARGS+=( -z "$AUDIO_TOGGLE_LABEL" "printf '%s\n' audio-toggle > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
 ARGS+=( -z 'CamillaDSP filters' "printf '%s\n' select-filter > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
 ARGS+=( -z 'Audio input' "printf '%s\n' select-input > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
 ARGS+=( -z 'Camera' "printf '%s\n' select-camera > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
@@ -50,8 +57,20 @@ case "$selected" in
     exit 0 ;;
  audio-toggle)
     flock -u 9
-    run_quiet_action python3 "$TOPOLOGY_SCRIPT" --audio-toggle || exit $?
-    wrap_line 'Audio stop/start toggled.'
+    toggle_result="$(python3 "$TOPOLOGY_SCRIPT" --audio-toggle 2>&1)" || {
+        status=$?
+        printf '%s\n' "$toggle_result" >&2
+        exit "$status"
+    }
+    printf '%s\n' "$toggle_result" >>"$ACTION_LOG"
+    if [[ "$(jq -r 'if has("stopped") then (.stopped|tostring) else empty end' <<<"$toggle_result" 2>/dev/null)" == 'true' ]]; then
+        wrap_line 'Audio stopped.'
+    elif [[ "$(jq -r 'if has("stopped") then (.stopped|tostring) else empty end' <<<"$toggle_result" 2>/dev/null)" == 'false' ]]; then
+        wrap_line 'Audio started.'
+    else
+        wrap_line 'Audio changed state, but the resulting state was not reported.' >&2
+        exit 1
+    fi
     exit 0 ;;
  select-filter)
     profiles="$(python3 "$TOPOLOGY_SCRIPT" --dsp-profiles)" || exit 1

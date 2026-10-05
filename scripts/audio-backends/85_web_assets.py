@@ -898,6 +898,218 @@ body {
   outline:2px solid #d799bb;
   background:linear-gradient(135deg,#6e4c91,#824467)!important;
 }
+.task-feedback {
+  position:fixed;
+  left:12px;
+  right:12px;
+  top:max(12px,env(safe-area-inset-top));
+  z-index:5000;
+  box-sizing:border-box;
+  padding:15px 62px 15px 18px;
+  border:1px solid #b8deda42;
+  border-radius:17px;
+  color:#fff8fb;
+  background:linear-gradient(135deg,#284e5cf2,#443050f2 58%,#5b344df2);
+  box-shadow:inset 0 1px #ffffff2b,0 16px 42px #0c091678;
+  font-weight:750;
+  text-align:center;
+  backdrop-filter:blur(18px) saturate(1.2);
+}
+.task-feedback.working {
+  border-color:#75d7c85c;
+  background:linear-gradient(135deg,#236b70f2,#39415ff2 58%,#553456f2);
+}
+.task-feedback.done {
+  border-color:#84dec568;
+  background:linear-gradient(135deg,#236b5af2,#2f625df2 56%,#4f4968f2);
+}
+.task-feedback.error {
+  border-color:#ef9aa65e;
+  background:linear-gradient(135deg,#71384ef2,#7d3f55f2 56%,#4b315cf2);
+}
+.task-feedback-close {
+  position:absolute;
+  right:8px;
+  top:50%;
+  transform:translateY(-50%);
+  width:44px;
+  height:44px;
+  border:1px solid #ffffff20;
+  border-radius:13px;
+  color:inherit;
+  background:#ffffff12;
+  box-shadow:inset 0 1px #ffffff18;
+  font-size:32px;
+  font-weight:400;
+  line-height:38px;
+  cursor:pointer;
+}
+.task-feedback-close:hover {
+  background:#ffffff22;
+}
+/* Local Music Library: a focused Aurora Dusk music surface. */
+#pc,#songs,#playlist {
+  position:relative;
+}
+#pc::before,#songs::before,#playlist::before {
+  content:"";
+  position:fixed;
+  z-index:-1;
+  inset:0;
+  pointer-events:none;
+  background:
+    radial-gradient(520px 420px at 12% 12%,#27848a42,transparent 68%),
+    radial-gradient(600px 480px at 92% 24%,#91456b3d,transparent 70%),
+    radial-gradient(520px 430px at 54% 100%,#b9844140,transparent 72%);
+}
+#pc .header,#songs .header,#playlist .header {
+  padding:10px 11px;
+  border:1px solid #e9b9d72b;
+  border-radius:20px;
+  background:linear-gradient(125deg,#274f5bbd,#4a315abe 54%,#65384fbd);
+  box-shadow:inset 0 1px #ffffff25,0 13px 34px #0c091650;
+  backdrop-filter:blur(16px);
+}
+#pc .header h1,#songs .header h1,#playlist .header h1 {
+  color:#fff6fb;
+  text-shadow:0 2px 14px #190d245c;
+}
+#pc .header .back,#songs .header .back,#playlist .header .back {
+  border:1px solid #d9c5df2b;
+  background:
+    radial-gradient(70px 48px at 12% 18%,#68c9be32,transparent 72%),
+    radial-gradient(76px 52px at 94% 86%,#b65d7429,transparent 74%),
+    linear-gradient(145deg,#405162a8,#49374fa8);
+  box-shadow:inset 0 1px #ffffff1d,0 6px 16px #0c091638;
+  color:#fff7fb;
+  backdrop-filter:blur(10px);
+  transition:filter .16s ease,border-color .16s ease,box-shadow .16s ease,transform .12s ease;
+}
+#pc .header .back:hover,#songs .header .back:hover,#playlist .header .back:hover {
+  border-color:#83d5ca4f;
+  filter:brightness(1.09) saturate(1.06);
+  box-shadow:inset 0 1px #ffffff28,0 7px 19px #17344742;
+}
+#pc > .card {
+  border-color:#8edbd047;
+  background:
+    linear-gradient(145deg,#254d59e8 0%,#39304be8 52%,#633a50e8 100%);
+  box-shadow:inset 0 1px #ffffff27,0 18px 46px #0c09165c;
+}
+#pc > .card > .label {
+  color:#bfe9df;
+}
+#pc #now-title {
+  color:#fff7fc;
+  text-shadow:0 1px 12px #150b205c;
+}
+#pc #now-details {
+  color:#dbcbda;
+}
+#pc .local-now-artwork {
+  border:1px solid #f0bdd544;
+  background:
+    radial-gradient(circle at 30% 25%,#6fcac07a,transparent 34%),
+    linear-gradient(145deg,#65406a,#2e5261 58%,#24253b);
+  color:#fff0f7;
+  box-shadow:inset 0 1px #ffffff35,0 10px 28px #170e235e;
+}
+#pc .range-row .volume-icon {
+  color:#bfe9df;
+}
+#pc .transport {
+  border-color:#cdb9e42b;
+  background:linear-gradient(145deg,#3c5167,#34304e);
+}
+#pc .transport:first-child {
+  background:linear-gradient(145deg,#2b6670,#354b68);
+}
+#pc .transport:last-child {
+  background:linear-gradient(145deg,#7a465f,#514367);
+}
+#pc .transport.main {
+  background:linear-gradient(145deg,#7a57a5,#a14e73 56%,#b26f50);
+  box-shadow:inset 0 1px #ffffff3d,0 14px 34px #71365c66;
+}
+#pc #repeat {
+  background:linear-gradient(135deg,#315f70,#504475)!important;
+}
+#pc #shuffle:not(:disabled) {
+  background:linear-gradient(135deg,#76519a,#9a4f70)!important;
+}
+#pc #repeat.active,#pc #shuffle.active {
+  outline-color:#78d8ca;
+  background:linear-gradient(135deg,#28757a,#72558f)!important;
+}
+#pc #all-songs {
+  border-color:#f1c3da3d;
+  background:linear-gradient(135deg,#7a579e,#8c4f80 56%,#a16062)!important;
+  box-shadow:inset 0 1px #ffffff2d,0 11px 28px #32172d54;
+}
+#pc > .section-title {
+  color:#f1bfd3;
+}
+#playlists .playlist-row {
+  border:1px solid #eac4d725;
+  background:
+    radial-gradient(150px 90px at 3% 18%,#3c8b8730,transparent 72%),
+    radial-gradient(180px 110px at 98% 86%,#a5536a24,transparent 74%),
+    linear-gradient(145deg,#423448e8 0%,#30364ae8 52%,#3d3048e8 100%);
+  box-shadow:inset 0 1px #ffffff16,0 9px 24px #0b09143b;
+  transition:filter .16s ease,border-color .16s ease,transform .16s ease;
+}
+#playlists .playlist-row:hover {
+  border-color:#88d4ca3d;
+  filter:brightness(1.07) saturate(1.05);
+}
+#playlists .playlist-open {
+  background:transparent;
+  border:0;
+  box-shadow:none;
+}
+#playlists .playlist-icon {
+  background:linear-gradient(145deg,#5d4164,#34485c);
+  border-color:#d9b9dd36;
+}
+#playlists .playlist-icon:hover {
+  background:linear-gradient(145deg,#71527a,#3d6570);
+  border-color:#79d2c7;
+}
+#playlists .cover-art,#song-list .cover-art,#playlist-songs .cover-art {
+  border:1px solid #f3c7dd2e;
+  box-shadow:0 5px 16px #0d09174d;
+}
+#playlists .cover-fallback,#song-list .cover-fallback,#playlist-songs .cover-fallback {
+  background:linear-gradient(145deg,#694463,#315866);
+  color:#ffeaf5;
+}
+#songs .search,#playlist .search {
+  border-color:#d8b8dd35;
+  background:linear-gradient(145deg,#49344fdd,#29364add);
+  box-shadow:inset 0 1px #ffffff14;
+}
+#songs .search:focus,#playlist .search:focus {
+  border-color:#75d7c8;
+  box-shadow:0 0 0 4px #75d7c827;
+}
+#song-list .item,#playlist-songs .item {
+  border-color:#edbed628;
+  background:
+    radial-gradient(130px 80px at 4% 20%,#39857f29,transparent 74%),
+    radial-gradient(150px 95px at 97% 82%,#9d506524,transparent 76%),
+    linear-gradient(145deg,#433348e5 0%,#2d384be5 54%,#3b3046e5 100%);
+  box-shadow:inset 0 1px #ffffff12,0 7px 20px #0b091435;
+  transition:filter .16s ease,border-color .16s ease,transform .12s ease;
+}
+#song-list .item:hover,#playlist-songs .item:hover {
+  border-color:#82d2c83d;
+  filter:brightness(1.08) saturate(1.05);
+}
+#song-list .card.details,#playlist-songs .card.details {
+  color:#d7c6d5;
+  border-color:#e9bdd62b;
+  background:linear-gradient(145deg,#443146d9,#29384ad9);
+}
   </style>
  </head>
  <body>
@@ -1005,7 +1217,7 @@ body {
       Restart VNC
      </button>
      <button class="action accent-red" id="audio-toggle" type="button">
-      Stop all audio
+      Stop audio
      </button>
     </div>
    </section>
@@ -1309,7 +1521,7 @@ const fmt=value=>{const v=Math.max(0,Number(value)||0);return Math.floor(v/60)+'
 function show(id){screens.forEach(screen=>screen.classList.toggle('hidden',screen.id!==id));scrollTo({top:0,behavior:'smooth'});updateBackToTop()}
 function updateBackToTop(){const visible=['songs','playlist'].some(id=>!$('#'+id).classList.contains('hidden'));$('#back-to-top').classList.toggle('hidden',!visible||window.scrollY<320)}
 window.addEventListener('scroll',updateBackToTop,{passive:true});$('#back-to-top').onclick=()=>window.scrollTo({top:0,behavior:'smooth'});$('#open-groups').onclick=()=>show('groups-page');$('#open-listening').onclick=()=>show('listening-page');
-function notificationBox(){const banners=[...document.querySelectorAll('#global-task-feedback')];let banner=banners.shift()||null;banners.forEach(item=>item.remove());if(!banner){banner=document.createElement('div');banner.id='global-task-feedback';banner.setAttribute('role','status');banner.setAttribute('aria-live','polite');banner.style.cssText='position:fixed;left:12px;right:12px;top:12px;z-index:5000;box-sizing:border-box;padding:14px 64px 14px 18px;border-radius:14px;background:#152033;color:#eef5ff;border:1px solid #43638f;box-shadow:0 12px 32px rgba(0,0,0,.4);font-weight:700;text-align:center;';const message=document.createElement('span');message.className='task-feedback-message';const close=document.createElement('button');close.type='button';close.className='task-feedback-close';close.textContent='×';close.setAttribute('aria-label','Close notification');close.style.cssText='position:absolute;right:8px;top:50%;transform:translateY(-50%);width:48px;height:48px;border:0;border-radius:12px;background:transparent;color:inherit;font-size:38px;font-weight:400;line-height:42px;cursor:pointer;';close.addEventListener('click',()=>{clearTimeout(showTaskFeedback.timer);banner.classList.add('hidden')});banner.append(message,close);document.body.appendChild(banner)}return banner}function showTaskFeedback(message,kind='working'){const banner=notificationBox(),messageNode=banner.querySelector('.task-feedback-message');if(messageNode)messageNode.textContent=String(message||'Working…');banner.style.background=kind==='done'?'#163d2b':(kind==='error'?'#4a2025':'#152033');banner.style.borderColor=kind==='done'?'#2f7654':(kind==='error'?'#a64b56':'#43638f');banner.classList.remove('hidden');clearTimeout(showTaskFeedback.timer);if(kind!=='working')showTaskFeedback.timer=setTimeout(()=>banner.classList.add('hidden'),10000)}function note(message,error=false){if(error&&message)showTaskFeedback(message,'error')}
+function notificationBox(){const banners=[...document.querySelectorAll('#global-task-feedback')];let banner=banners.shift()||null;banners.forEach(item=>item.remove());if(!banner){banner=document.createElement('div');banner.id='global-task-feedback';banner.className='task-feedback hidden';banner.setAttribute('role','status');banner.setAttribute('aria-live','polite');const message=document.createElement('span');message.className='task-feedback-message';const close=document.createElement('button');close.type='button';close.className='task-feedback-close';close.textContent='×';close.setAttribute('aria-label','Close notification');close.addEventListener('click',()=>{clearTimeout(showTaskFeedback.timer);banner.classList.add('hidden')});banner.append(message,close);document.body.appendChild(banner)}return banner}function showTaskFeedback(message,kind='working'){const banner=notificationBox(),messageNode=banner.querySelector('.task-feedback-message');if(messageNode)messageNode.textContent=String(message||'Working…');banner.classList.remove('working','done','error','hidden');banner.classList.add(['working','done','error'].includes(kind)?kind:'working');clearTimeout(showTaskFeedback.timer);if(kind!=='working')showTaskFeedback.timer=setTimeout(()=>banner.classList.add('hidden'),10000)}function note(message,error=false){if(error&&message)showTaskFeedback(message,'error')}
 async function api(url,options={}){const response=await fetch(url,{cache:'no-store',...options});const data=await response.json().catch(()=>null);if(!data||typeof data!=='object'||Array.isArray(data))throw Error('Invalid server response');if(!response.ok||data.ok===false)throw Error(data.error||'Request failed');return data}
 const post=(url,data={})=>api(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
 function fill(element,value,maximum){const max=Number(maximum),v=Number(value);const percent=Number.isFinite(max)&&max>0&&Number.isFinite(v)?Math.max(0,Math.min(100,v/max*100)):0;element.style.setProperty('--fill',percent+'%')}
@@ -1674,7 +1886,7 @@ function renderPlaylistSnapshot(playlists){
 }
 function updatePlaylistCover(player){if(!player?.playlist||!player.playing)return;for(const button of document.querySelectorAll('#playlists [data-playlist-name]')){if(button.dataset.playlistName!==player.playlist)continue;const old=button.querySelector('.item-cover .cover-art');if(!old)continue;const url=player.cover||'';if(url&&old.tagName==='IMG'&&old.getAttribute('src')===url)return;if(!url&&old.classList.contains('cover-fallback'))return;old.replaceWith(coverNode(url))}}
 function renderVolatile(data){
-  $('#audio-toggle').textContent=data.mode.mode==='stopped'?'Start all audio':'Stop all audio';
+  $('#audio-toggle').textContent=data.mode.mode==='stopped'?'Start audio':'Stop audio';
   if(data.awayDisplay){const button=$('#away-display-toggle');button.textContent=data.awayDisplay.displayOff?'Show lock screen':data.awayDisplay.away?'Unlock desktop':'Away and display off';button.setAttribute('aria-pressed',String(!!data.awayDisplay.active));button.classList.toggle('mode-active',!!data.awayDisplay.active)}
   if(data.profiles)renderActiveProfile(data.profiles);
   renderSonobusStatus(data.mode,data.groups);
