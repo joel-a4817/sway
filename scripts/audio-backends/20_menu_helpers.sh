@@ -35,7 +35,6 @@ compact_menu_label() {
     text="${text//Camera endpoint/Endpoint}"
     printf '%s' "$text"
 }
-# Presentation only: one status tag, while original labels retain validation.
 compact_item_label() {
     local label="$1"
     label="${label% (current)}"
