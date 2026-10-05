@@ -1392,8 +1392,8 @@ body {
       <button class="action" id="repeat">
        Repeat Off
       </button>
-      <button class="action" id="shuffle" title="Update the saved shuffled playlist without changing what is playing">
-       Shuffle for next play
+      <button class="action" id="shuffle" title="Shuffle the remaining MPV queue">
+       Shuffle remaining queue
       </button>
      </div>
     </div>
@@ -1830,7 +1830,7 @@ $('#playlist-search').oninput=()=>render('#playlist-songs',inside,$('#playlist-s
 document.querySelectorAll('[data-back]').forEach(button=>button.onclick=()=>show(button.dataset.back));
 document.querySelectorAll('[data-cmd]').forEach(button=>button.onclick=async()=>{try{await busy(button,()=>post('/api/player/command',{command:button.dataset.cmd}),'…',null,false);await pollLocal()}catch(error){note(error.message,true)}});
 $('#repeat').onclick=async()=>{try{const data=await api('/api/player');await post('/api/player/repeat',{mode:{off:'all',all:'one',one:'off'}[data.repeat]||'off'});await pollLocal()}catch(error){note(error.message,true)}};
-$('#shuffle').onclick=async()=>{try{await busy($('#shuffle'),()=>post('/api/player/shuffle'),'Updating saved shuffle…','Saved shuffle updated for next play',true)}catch(error){note(error.message,true)}};
+$('#shuffle').onclick=async()=>{try{await busy($('#shuffle'),()=>post('/api/player/shuffle'),'Shuffling remaining queue…','Remaining queue shuffled.',true)}catch(error){note(error.message,true)}};
 for(const [id,command] of [['system-previous','previous'],['system-toggle','toggle'],['system-next','next']])$('#'+id).onclick=async()=>{if(command!=='toggle'){const media=state.system;media.skipPending=true;media.skipFrom=media.trackKey;media.skipStarted=performance.now();media.skipWarned=false;resetSystemPosition()}else{state.system.skipPending=false}try{await busy($('#'+id),()=>post('/api/system-media',{command}),'…',null,false);await pollSystem(true)}catch(error){if(command!=='toggle')systemPositionError('System media skip failed: '+(error?.message||String(error)));else note(error.message,true)}};
 $('#audio-toggle').onclick=async()=>{try{await busy($('#audio-toggle'),()=>post('/api/audio-toggle'),'Switching audio services…','Audio services updated',true);await refreshStatic()}catch(error){note(error.message,true)}};
 $('#restart-sonobus').onclick=()=>busy($('#restart-sonobus'),()=>post('/api/restart-sonobus'),'Restarting SonoBus…','SonoBus restarted',true).then(refreshVolatile).catch(error=>note(error.message,true));

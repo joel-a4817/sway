@@ -173,7 +173,17 @@ def mpv_properties(names):
 
 def set_repeat(m):
     if m not in ('off','all','one'):raise ValueError('Invalid repeat mode')
-    mpv(['set_property','loop-file','inf' if m=='one' else 'no']);mpv(['set_property','loop-playlist','inf' if m=='all' else 'no']);return m
+    wanted_file='inf' if m=='one' else 'no'
+    wanted_playlist='inf' if m=='all' else 'no'
+    with PLAYERLOCK:
+        mpv(['set_property','loop-file',wanted_file])
+        mpv(['set_property','loop-playlist',wanted_playlist])
+        actual_file=mpv_direct(['get_property','loop-file'])
+        actual_playlist=mpv_direct(['get_property','loop-playlist'])
+        if actual_file!=wanted_file or actual_playlist!=wanted_playlist:
+            raise RuntimeError('MPV repeat mode was not confirmed')
+        save_mpv_queue(force=True)
+    return m
 
 def player_state():
     # Read-only status: do not start MPV while opening or polling the library.
@@ -200,7 +210,7 @@ def player_state():
         'playlist':playlist_for_track(path),
         'currentTime':number(values.get('playback-time')),'duration':number(values.get('duration')),
         'volume':master_volume(),
-        'repeat':repeat,'canShuffleQueue':bool(queue_playlist_name(values.get('playlist'),validate_files=False)),
+        'repeat':repeat,'canShuffleQueue':len(values.get('playlist') or [])>1,
     }
 
 def mpris_players():

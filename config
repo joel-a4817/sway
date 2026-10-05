@@ -112,20 +112,19 @@ input "1386:20983:Wacom_Pen_and_multitouch_sensor_Finger" {
 
 # keybinds update
 bindsym --no-repeat $mod+shift+u fullscreen disable; exec $term -T "$popup-update-rebuild" -e bash -c '~/.config/sway/scripts/updaters/nixos-rebuild.sh'
-bindsym --no-repeat $mod+Shift+e fullscreen disable; exec $term -T "$popup-update-clean" -e bash -c '~/.config/sway/scripts/updaters/nixos-clean.sh'
-bindsym --no-repeat $mod+Shift+p fullscreen disable; exec $term -T "$popup-update-pixymon" -e bash -c '~/.config/sway/scripts/updaters/update-pixymon.sh'
-bindsym --no-repeat $mod+Shift+v fullscreen disable; exec $term -T "$popup-update-dvd" -e bash -c '~/.config/sway/scripts/updaters/rewrite-dvd-playlist.sh'
-bindsym --no-repeat $mod+Shift+t fullscreen disable; exec $term -T "$popup-settime" -e bash -c '~/.config/sway/scripts/settime.sh; echo; read -n 1 -rsp "Press any key to close..."'
-bindsym --no-repeat $mod+shift+y fullscreen disable; exec $term -T "$popup-update-rebuild" -e bash -c '~/.config/sway/scripts/updaters/update-music.sh'
-bindsym --no-repeat $mod+shift+s fullscreen disable; exec $term -T "$popup-update-shuffle" -e bash -c 'python3 /home/joel/.config/sway/scripts/updaters/shuffle-playlists.py'
-bindsym --no-repeat $mod+shift+r fullscreen disable; exec bash -c 'mpv /home/joel/Downloads/Music/favourites-shuffled.m3u'
-bindsym --no-repeat $mod+shift+m fullscreen disable; exec bash -c 'mpv /home/joel/Downloads/Music/favourites.m3u'
+bindsym --no-repeat $mod+shift+o fullscreen disable; exec $term -T "$popup-update-clean" -e bash -c '~/.config/sway/scripts/updaters/nixos-clean.sh'
+bindsym --no-repeat $mod+shift+p fullscreen disable; exec $term -T "$popup-update-pixymon" -e bash -c '~/.config/sway/scripts/updaters/update-pixymon.sh'
+bindsym --no-repeat $mod+shift+v fullscreen disable; exec $term -T "$popup-update-dvd" -e bash -c '~/.config/sway/scripts/updaters/rewrite-dvd-playlist.sh'
+bindsym --no-repeat $mod+shift+t fullscreen disable; exec $term -T "$popup-settime" -e bash -c '~/.config/sway/scripts/settime.sh; echo; read -n 1 -rsp "Press any key to close..."'
+bindsym --no-repeat $mod+shift+y fullscreen disable; exec $term -T "$popup-update-playlists" -e bash -c '~/.config/sway/scripts/updaters/update-playlists.sh'
+bindsym --no-repeat $mod+shift+r fullscreen disable; exec bash -c '~/.config/sway/scripts/play-music.sh/py'
 bindsym --no-repeat $mod+shift+a fullscreen disable; exec $term -T "$popup-server-ipad" -e bash -c 'trap "" INT; (trap - INT; /home/joel/.config/sway/scripts/network/start-ipad-webremote.sh); echo; read -n 1 -rsp "Press any key to close..."'
 bindsym --no-repeat $mod+shift+b fullscreen disable; exec $term -T "$popup-server-linux" -e bash -c 'trap "" INT; (trap - INT; python3 /home/joel/.config/sway/scripts/network/camilladsp-server-sonobus.py); read -n 1 -rsp "Press any key to close..."'
 bindsym --locked --no-repeat $mod+shift+d fullscreen disable; exec python3 "/home/joel/.config/sway/scripts/network/camilladsp-server-sonobus.py" --toggle-away-display
-bindsym --no-repeat $mod+shift+f fullscreen disable; exec $term -T "$popup-update-a_profiles" -e bash -c 'python3 /home/joel/.config/sway/scripts/updaters/rebuild-camilla.py; echo; read -n 1 -rsp "Press any key to close..."'
-bindsym --no-repeat $mod+shift+g fullscreen disable; exec systemctl suspend
-bindsym --no-repeat $mod+shift+i fullscreen disable; exec $term -T "$popup-update-a_profiles" -e bash -c '/home/joel/.config/sway/scripts/network/airplay-hotspot-toggle.sh; echo; read -n 1 -rsp "Press any key to close..."'
+bindsym --no-repeat $mod+shift+e fullscreen disable; exec $term -T "$popup-update-a_profiles" -e bash -c '/home/joel/.config/sway/scripts/network/airplay-hotspot-toggle.sh; echo; read -n 1 -rsp "Press any key to close..."'
+bindsym --no-repeat $mod+shift+f fullscreen disable; exec $term -T "$popup-update-play_music" -e bash -c 'python3 ~/.config/sway/scripts/play-music.py'
+bindsym --no-repeat $mod+shift+g fullscreen disable; exec $term -T "$popup-update-add_audio_device" -e bash -c 'python3 ~/.config/sway/scripts/updaters/add-audio-device.py'
+bindsym --no-repeat $mod+shift+i fullscreen disable; exec systemctl suspend
 
 #keybinds app
 bindsym --no-repeat $mod+F2 fullscreen disable; exec $term -T "$popup-tuis" -e clipse
@@ -157,13 +156,13 @@ bindsym --no-repeat $mod+F11 fullscreen disable; exec $term -T "$popup-wifi-togg
 bindsym --no-repeat $mod+F9 fullscreen disable; exec $term -T "$popup-wifi-status" -e bash -c 'nmcli dev status; echo; nmcli dev wifi list; echo; read -n 1 -rsp "Press any key to close..."'
 
 #fastfetch
-bindsym --no-repeat $mod+Control+w fullscreen disable; exec $term -T "$popup-f-wifi" -e bash -c '~/.config/sway/scripts/fastfetch/f-wifi.sh; read -n 1 -rsp "Press any key to close..."'
-bindsym --no-repeat $mod+Control+m fullscreen disable; exec $term -T "$popup-f-main" -e bash -c '~/.config/sway/scripts/fastfetch/f-main.sh; echo; read -n 1 -rsp "Press any key to close..."'
-bindsym --no-repeat $mod+Control+i fullscreen disable; exec $term -T "$popup-f-info" -e bash -c '~/.config/sway/scripts/fastfetch/f-info.sh; echo; read -n 1 -rsp "Press any key to close..."'
-bindsym --no-repeat $mod+Control+s fullscreen disable; exec $term -T "$popup-f-system" -e bash -c '~/.config/sway/scripts/fastfetch/f-system.sh; echo; read -n 1 -rsp "Press any key to close..."'
-bindsym --no-repeat $mod+Control+d fullscreen disable; exec $term -T "$popup-f-devices" -e bash -c '~/.config/sway/scripts/fastfetch/f-devices.sh; echo; read -n 1 -rsp "Press any key to close..."'
-bindsym --no-repeat $mod+Control+h fullscreen disable; exec $term -T "$popup-f-hardware" -e bash -c '~/.config/sway/scripts/fastfetch/f-hardware.sh; echo; read -n 1 -rsp "Press any key to close..."'
-bindsym --no-repeat $mod+Control+a fullscreen disable; exec $term -T "$popup-f-aesthetics" -e bash -c '~/.config/sway/scripts/fastfetch/f-aesthetics.sh; echo; read -n 1 -rsp "Press any key to close..."'
+bindsym --no-repeat $mod+control+w fullscreen disable; exec $term -T "$popup-f-wifi" -e bash -c '~/.config/sway/scripts/fastfetch/f-wifi.sh; read -n 1 -rsp "Press any key to close..."'
+bindsym --no-repeat $mod+control+m fullscreen disable; exec $term -T "$popup-f-main" -e bash -c '~/.config/sway/scripts/fastfetch/f-main.sh; echo; read -n 1 -rsp "Press any key to close..."'
+bindsym --no-repeat $mod+control+i fullscreen disable; exec $term -T "$popup-f-info" -e bash -c '~/.config/sway/scripts/fastfetch/f-info.sh; echo; read -n 1 -rsp "Press any key to close..."'
+bindsym --no-repeat $mod+control+s fullscreen disable; exec $term -T "$popup-f-system" -e bash -c '~/.config/sway/scripts/fastfetch/f-system.sh; echo; read -n 1 -rsp "Press any key to close..."'
+bindsym --no-repeat $mod+control+d fullscreen disable; exec $term -T "$popup-f-devices" -e bash -c '~/.config/sway/scripts/fastfetch/f-devices.sh; echo; read -n 1 -rsp "Press any key to close..."'
+bindsym --no-repeat $mod+control+h fullscreen disable; exec $term -T "$popup-f-hardware" -e bash -c '~/.config/sway/scripts/fastfetch/f-hardware.sh; echo; read -n 1 -rsp "Press any key to close..."'
+bindsym --no-repeat $mod+control+a fullscreen disable; exec $term -T "$popup-f-aesthetics" -e bash -c '~/.config/sway/scripts/fastfetch/f-aesthetics.sh; echo; read -n 1 -rsp "Press any key to close..."'
 
 #screen-record, screenshot
 bindsym --no-repeat $mod+F5 exec bash -c '~/.config/sway/scripts/screen-capture.sh'
@@ -217,7 +216,7 @@ bindsym --locked --no-repeat $mod+F4 exec bash -c '~/.config/sway/scripts/rotati
 
     # Reload the configuration file
 
-bindsym --no-repeat --locked $mod+Shift+c exec ~/.config/sway/scripts/rotation/rotation-restore.sh
+bindsym --no-repeat --locked $mod+shift+c exec ~/.config/sway/scripts/rotation/rotation-restore.sh
 
     # system off options
     bindsym --no-repeat $mod+F12 exec bash -c "~/.config/sway/scripts/device-off.sh"
@@ -236,16 +235,16 @@ bindsym --no-repeat --locked $mod+Shift+c exec ~/.config/sway/scripts/rotation/r
     bindsym $mod+Up focus up
     bindsym $mod+Right focus right
 
-    # Move the focused window with the same, but add Shift
-    bindsym $mod+Shift+$left move left
-    bindsym $mod+Shift+$down move down
-    bindsym $mod+Shift+$up move up
-    bindsym $mod+Shift+$right move right
+    # Move the focused window with the same, but add shift
+    bindsym $mod+shift+$left move left
+    bindsym $mod+shift+$down move down
+    bindsym $mod+shift+$up move up
+    bindsym $mod+shift+$right move right
     # Ditto, with arrow keys
-    bindsym $mod+Shift+Left move left
-    bindsym $mod+Shift+Down move down
-    bindsym $mod+Shift+Up move up
-    bindsym $mod+Shift+Right move right
+    bindsym $mod+shift+Left move left
+    bindsym $mod+shift+Down move down
+    bindsym $mod+shift+Up move up
+    bindsym $mod+shift+Right move right
 #
 # Workspaces:
 #
@@ -261,16 +260,16 @@ bindsym --no-repeat --locked $mod+Shift+c exec ~/.config/sway/scripts/rotation/r
     bindsym $mod+9 workspace number 9
     bindsym $mod+0 workspace number 10
     # Move focused container to workspace
-    bindsym --no-repeat $mod+Shift+1 move container to workspace number 1
-    bindsym --no-repeat $mod+Shift+2 move container to workspace number 2
-    bindsym --no-repeat $mod+Shift+3 move container to workspace number 3
-    bindsym --no-repeat $mod+Shift+4 move container to workspace number 4
-    bindsym --no-repeat $mod+Shift+5 move container to workspace number 5
-    bindsym --no-repeat $mod+Shift+6 move container to workspace number 6
-    bindsym --no-repeat $mod+Shift+7 move container to workspace number 7
-    bindsym --no-repeat $mod+Shift+8 move container to workspace number 8
-    bindsym --no-repeat $mod+Shift+9 move container to workspace number 9
-    bindsym --no-repeat $mod+Shift+0 move container to workspace number 10
+    bindsym --no-repeat $mod+shift+1 move container to workspace number 1
+    bindsym --no-repeat $mod+shift+2 move container to workspace number 2
+    bindsym --no-repeat $mod+shift+3 move container to workspace number 3
+    bindsym --no-repeat $mod+shift+4 move container to workspace number 4
+    bindsym --no-repeat $mod+shift+5 move container to workspace number 5
+    bindsym --no-repeat $mod+shift+6 move container to workspace number 6
+    bindsym --no-repeat $mod+shift+7 move container to workspace number 7
+    bindsym --no-repeat $mod+shift+8 move container to workspace number 8
+    bindsym --no-repeat $mod+shift+9 move container to workspace number 9
+    bindsym --no-repeat $mod+shift+0 move container to workspace number 10
     # Note: workspaces can have any name you want, not just numbers.
     # We just use 1-10 as the default.
 #
@@ -290,7 +289,7 @@ bindsym --no-repeat --locked $mod+Shift+c exec ~/.config/sway/scripts/rotation/r
     bindsym --no-repeat $mod+f fullscreen toggle  
 
     # Toggle the current focus between tiling and floating mode
-    bindsym --no-repeat $mod+Shift+space exec ~/.config/sway/scripts/windows/smart-floating-toggle.sh
+    bindsym --no-repeat $mod+shift+space exec ~/.config/sway/scripts/windows/smart-floating-toggle.sh
     # Swap focus between the tiling area and the floating area
     bindsym --no-repeat $mod+space focus mode_toggle
 
@@ -301,7 +300,7 @@ bindsym --no-repeat --locked $mod+Shift+c exec ~/.config/sway/scripts/rotation/r
 #
 
     # Move the currently focused window to the scratchpad
-    bindsym --no-repeat $mod+Shift+minus move scratchpad
+    bindsym --no-repeat $mod+shift+minus move scratchpad
 
     # Show the next scratchpad window or hide the focused scratchpad window.
     # If there are multiple scratchpad windows, this command cycles through them.

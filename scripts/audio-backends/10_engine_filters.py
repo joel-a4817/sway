@@ -1,4 +1,4 @@
-HPCF_CONFIG=HOME/'.config/sway/scripts/updaters/rebuild-camilla.py'
+HPCF_CONFIG=ADD_AUDIO_DEVICE
 _FOLDER_RE=re.compile(r'^(?:\((\d+)ms(?:-(IE|OE))?\)|(\d+)ms(?:-(IE|OE))?(?:$|[-_ ]))(.*)$',re.I)
 _PROFILE_RE=re.compile(r'^\d+-(?:(ie|oe)-)?(.+?)-(\d+)ms-(.+)$',re.I)
 
@@ -44,7 +44,7 @@ def _device_labels():
         label=str(row.get('label') or '').strip();kind=str(row.get('kind') or '').upper()
         if label and kind in ('IE','OE'):
             slug=re.sub(r'[^a-z0-9]+','-',label.casefold()).strip('-')
-            labels[(kind,slug)]=label
+            labels[(kind,slug)]={'label':label,'mediaControl':not bool(row.get('bluetooth',False))}
     return labels
 
 def listening_filters():
@@ -58,27 +58,28 @@ def listening_filters():
             delay,kind,label=parts
             folders.setdefault((delay,kind),[]).append((folder.name,_filter_key(label)))
     exact_labels=_device_labels()
-    result={NO_FILTER:{'group':'Other','label':'No filter (bypass CamillaDSP)'}}
+    result={NO_FILTER:{'group':'Other','label':'No filter (bypass CamillaDSP)','mediaControl':True}}
     for item in profiles():
         stem=item.stem
         if stem.casefold()=='00-filterless':
-            result[item.name]={'group':'Other','label':'Filterless'}
+            result[item.name]={'group':'Other','label':'Filterless','mediaControl':True}
             continue
         match=_PROFILE_RE.match(stem)
         if not match:
-            result[item.name]={'group':'Other','label':stem}
+            result[item.name]={'group':'Other','label':stem,'mediaControl':True}
             continue
         kind,device,delay,slug=match.groups();kind=(kind or '').upper()
         device_slug=device.casefold()
         configured=exact_labels.get((kind,device_slug)) if kind else None
-        group=configured or device.replace('-',' ').strip().title()
+        group=(configured or {}).get('label') or device.replace('-',' ').strip().title()
         if kind:group+=' ('+kind+')'
         candidates=folders.get((delay,kind),[]) or folders.get((delay,''),[])
         suffix=_filter_key(slug)
         matches=[name for name,key in candidates if key==suffix]
         if not matches and delay=='0000':matches=[name for name,key in candidates if key.endswith(suffix)]
         label=item.parent.name if item.parent!=PROFILES else (matches[0] if len(matches)==1 else stem)
-        result[item.name]={'group':group,'label':label}
+        result[item.name]={'group':group,'label':label,
+                           'mediaControl':bool((configured or {}).get('mediaControl',True))}
     return result
 
 def profile(name):

@@ -9,6 +9,9 @@ from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 
 HOME=Path.home(); PROFILES=HOME/'Documents/prefs/audio-filters'; MUSIC=HOME/'Downloads/Music'
+SCRIPTS=HOME/'.config/sway/scripts'; AUDIO_BACKENDS=SCRIPTS/'audio-backends'; UPDATERS=SCRIPTS/'updaters'
+ADD_AUDIO_DEVICE=UPDATERS/'add-audio-device.py'
+AUDIO_DEVICE_BACKUPS=HOME/'.local/state/sway/audio-device-updater/backups'
 STATE=HOME/'.local/state/sway/camilladsp-webremote'; SWITCH_STATE=HOME/'.local/state/sway/media-control'; PORT=8766
 CAMILLA=Path('/run/current-system/sw/bin/camilladsp'); SONOBUS=Path('/run/current-system/sw/bin/sonobus')
 SONOSET=HOME/'.config/sonobus/SonoBus.settings'; EXTS={'.m4a','.aac','.mp3','.flac','.wav','.ogg','.opus'}

@@ -75,7 +75,7 @@ case "$selected" in
  select-filter)
     profiles="$(python3 "$TOPOLOGY_SCRIPT" --dsp-profiles)" || exit 1
     info="$(python3 "$TOPOLOGY_SCRIPT" --dsp-filter-info)" || exit 1
-    mapfile -t filters < <(jq -r '.[] | select((ascii_downcase|contains("cmf"))|not)' <<<"$profiles")
+    mapfile -t filters < <(jq -r --argjson info "$info" '.[] | select(($info[.] | if has("mediaControl") then .mediaControl else true end) == true)' <<<"$profiles")
     ((${#filters[@]})) || { echo 'No listening filters found.' >&2; exit 1; }
     filter_device_label() {
         local filter="$1" room_label="$2" group
