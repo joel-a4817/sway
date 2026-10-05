@@ -1736,7 +1736,7 @@ function fillCards(preferred=''){
 async function refreshDevicePicker(cardName){
   outputTopology=await api('/api/outputs');fillCards(cardName);
 }
-async function applyMode(mode,output=null){const b=document.querySelector(`[data-mode="${mode}"]`);try{await busy(b,()=>post('/api/mode',{mode,password:$('#group-password').value,output}),'Applying audio route…','Audio route activated',true);await refreshAll()}catch(error){note(error.message,true)}}
+async function applyMode(mode,output=null){const b=document.querySelector(`[data-mode="${mode}"]`);try{await busy(b,()=>post('/api/mode',{mode,password:$('#group-password').value,output}),'Applying audio route…',null,false);await refreshAll()}catch(error){note(error.message,true)}}
 let outputStep='card';
 const outputSteps=['card','profile','route','sink'];
 function showOutputStep(step){
@@ -1771,10 +1771,9 @@ async function commitOutput(){
   const output={card:card.name,profile,sink:outputSink.value,port:outputRoute.value};
   outputProfileBusy=true;
   try{
-    showTaskFeedback('Applying playback sink','working');
-    await post('/api/output-activate',{output,mode:pendingMode,password:$('#group-password').value,token:outputPreviewToken});
+        await post('/api/output-activate',{output,mode:pendingMode,password:$('#group-password').value,token:outputPreviewToken});
     outputTopology=await api('/api/outputs');fillCards(card.name);
-    $('#output-modal').classList.add('hidden');pendingMode=null;outputPreviewToken=null;showOutputStep('card');showTaskFeedback('Playback sink applied','done');await refreshAll();
+    $('#output-modal').classList.add('hidden');pendingMode=null;outputPreviewToken=null;showOutputStep('card');await refreshAll();
   }catch(error){showTaskFeedback(error.message,'error');await refreshDevicePicker(card.name)}
   finally{outputProfileBusy=false}
 }
@@ -1830,12 +1829,12 @@ $('#playlist-search').oninput=()=>render('#playlist-songs',inside,$('#playlist-s
 document.querySelectorAll('[data-back]').forEach(button=>button.onclick=()=>show(button.dataset.back));
 document.querySelectorAll('[data-cmd]').forEach(button=>button.onclick=async()=>{try{await busy(button,()=>post('/api/player/command',{command:button.dataset.cmd}),'…',null,false);await pollLocal()}catch(error){note(error.message,true)}});
 $('#repeat').onclick=async()=>{try{const data=await api('/api/player');await post('/api/player/repeat',{mode:{off:'all',all:'one',one:'off'}[data.repeat]||'off'});await pollLocal()}catch(error){note(error.message,true)}};
-$('#shuffle').onclick=async()=>{try{await busy($('#shuffle'),()=>post('/api/player/shuffle'),'Shuffling remaining queue…','Remaining queue shuffled.',true)}catch(error){note(error.message,true)}};
+$('#shuffle').onclick=async()=>{try{await busy($('#shuffle'),()=>post('/api/player/shuffle'),'Shuffling remaining queue…',null,false)}catch(error){note(error.message,true)}};
 for(const [id,command] of [['system-previous','previous'],['system-toggle','toggle'],['system-next','next']])$('#'+id).onclick=async()=>{if(command!=='toggle'){const media=state.system;media.skipPending=true;media.skipFrom=media.trackKey;media.skipStarted=performance.now();media.skipWarned=false;resetSystemPosition()}else{state.system.skipPending=false}try{await busy($('#'+id),()=>post('/api/system-media',{command}),'…',null,false);await pollSystem(true)}catch(error){if(command!=='toggle')systemPositionError('System media skip failed: '+(error?.message||String(error)));else note(error.message,true)}};
-$('#audio-toggle').onclick=async()=>{try{await busy($('#audio-toggle'),()=>post('/api/audio-toggle'),'Switching audio services…','Audio services updated',true);await refreshStatic()}catch(error){note(error.message,true)}};
+$('#audio-toggle').onclick=async()=>{try{await busy($('#audio-toggle'),()=>post('/api/audio-toggle'),'Switching audio services…',null,false);await refreshStatic()}catch(error){note(error.message,true)}};
 $('#restart-sonobus').onclick=()=>busy($('#restart-sonobus'),()=>post('/api/restart-sonobus'),'Restarting SonoBus…','SonoBus restarted',true).then(refreshVolatile).catch(error=>note(error.message,true));
 $('#restart-airplay').onclick=()=>busy($('#restart-airplay'),()=>post('/api/restart-airplay'),'Restarting AirPlay…','AirPlay restarted',true).then(refreshVolatile).catch(error=>note(error.message,true));
-$('#restart-vnc').onclick=()=>busy($('#restart-vnc'),()=>post('/api/restart-vnc'),'Restarting VNC…','VNC restarted').catch(error=>note(error.message,true));
+$('#restart-vnc').onclick=()=>busy($('#restart-vnc'),()=>post('/api/restart-vnc'),'Restarting VNC…','VNC restarted',true).catch(error=>note(error.message,true));
 $('#profile-search').oninput=()=>{if(profileSnapshot)renderProfileSnapshot(profileSnapshot);else refreshStatic()};
 bindSeek(state.local,'/api/player/seek');bindSeek(state.system,'/api/system-media/seek');bindVolume(state.local,'/api/player/volume');bindVolume(state.system,'/api/system-volume');
 let staticRefreshRunning=false,volatileRefreshRunning=false,profileSnapshot=null;
@@ -1857,7 +1856,7 @@ function renderProfileSnapshot(data){
       button.className='item'+(name===data.active?' active':'');
       const title=document.createElement('span');title.className='name';title.textContent=label;
       button.append(title);
-      button.onclick=async()=>{try{await busy(button,()=>post('/api/select',{profile:name}),'Switching profile…','Profile activated',true);await refreshStatic()}catch(error){note(error.message,true)}};
+      button.onclick=async()=>{try{await busy(button,()=>post('/api/select',{profile:name}),'Switching profile…',null,false);await refreshStatic()}catch(error){note(error.message,true)}};
       list.append(button);
     }
     root.append(list);
