@@ -10,11 +10,11 @@ def save_group(data):
     state=groups_state();state['profiles'][key]={'group':group,'username':user,'server':server,'passwordRequired':bool(data.get('passwordRequired'))};state['active']=key;_write_json(GROUPS,state);return state
 def audio_mode():
     try:value=MODE.read_text().strip()
-    except OSError:value='ipad_external'
+    except OSError:value='laptop_laptop'
     if value=='airplay':value='ipad_external'
     if value=='system':value='laptop_external'
     if value=='external_roundtrip':value='laptop_external'
-    return value if value in MODES else 'ipad_external'
+    return value if value in MODES else 'laptop_laptop'
 def _sonobus_audio_setup(text):
     """Return the decoded DEVICESETUP stored in VALUE[name=audioSetup].val."""
     import xml.etree.ElementTree as ET
