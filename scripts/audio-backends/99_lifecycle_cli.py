@@ -116,10 +116,11 @@ def start_runtime(force=False):
             print('Saved master pending: '+str(error),flush=True)
         else:raise
     MASTER_RESTORING=False
-def stop_audio_services(mark_stopped=True,stop_pipewire=False):
+def stop_audio_services(mark_stopped=True,stop_pipewire=True):
     global MASTER_RESTORING
-    # Capture the last live value, then stop engines and clients while
-    # preserving PipeWire and the NixOS-managed device graph.
+    # Capture the last live value, then stop all NixOS audio services and clients.
+    # Start audio recreates PipeWire first, reapplies routing, normalizes, then
+    # restores the one saved logical master.
     with LOCK:
         pause_for_audio_stop()
         if not MASTER_RESTORING and not STOPPED.exists():master_volume()

@@ -356,8 +356,15 @@ def activate_output(request,mode='laptop_laptop',password=None,origin='web',toke
                     raise RuntimeError('Selected sink remained muted after output switch')
             if not STOPPED.exists() and MODES[mode][2]:
                 actual=saved_output_route()
-                if actual.get('sink')!=selected['sink'] or not alive(rpid(LOCALMONPID)):
-                    raise RuntimeError('Output switch was not confirmed by the local playback monitor')
+                if actual.get('sink')!=selected['sink']:
+                    raise RuntimeError('Output switch did not persist the selected physical sink')
+                if selected_filter()==NO_FILTER:
+                    # Direct No-filter playback deliberately has no monitor or
+                    # bypass process. Confirm the physical PipeWire default.
+                    if pw_default()!=selected['sink'] or alive(rpid(LOCALMONPID)) or alive(rpid(BYPASSPID)):
+                        raise RuntimeError('Direct No filter output was not confirmed on the selected physical sink')
+                elif not alive(rpid(LOCALMONPID)):
+                    raise RuntimeError('Filtered output switch was not confirmed by the local playback monitor')
             (STATE/'output-preview').unlink(missing_ok=True)
             OUTPUT_PREVIEW.unlink(missing_ok=True)
             return result
