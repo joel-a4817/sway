@@ -34,7 +34,6 @@ def display_power(on):
         else:_write_json(DISPLAY_FILE,{'output':name})
         return display_state()
 AWAY_FILE=STATE/'away-state.json'
-AWAY_LOCK=threading.RLock()
 COMBINED_LOCK=threading.RLock()
 COMBINED_FILE=STATE/'away-display.lock'
 def away_identity(pid):

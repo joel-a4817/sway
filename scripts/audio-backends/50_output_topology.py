@@ -145,8 +145,6 @@ def audio_topology():
                       'deviceProfile':'','profileDevice':None}]})
     cards.sort(key=lambda row:(row['internal'],row['label'].casefold()))
     return {'cards':cards,'saved':saved_output_route()}
-def sink_owner(sink,cards):
-    return next((card for card in cards if card['name']==sink.get('cardName')),None)
 
 def _find_card(topology,name):
     card=next((item for item in topology['cards'] if item['name']==name),None)

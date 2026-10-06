@@ -15,15 +15,6 @@ def bridge_endpoint_pids():
         except (OSError,ValueError,IndexError):continue
     return found
 
-def bridge_playback_pids():
-    """Compatibility helper for callers interested in the playback endpoint."""
-    result=[]
-    for pid in bridge_endpoint_pids():
-        try:
-            args=Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0')
-            if args and Path(os.fsdecode(args[0])).name=='aplay':result.append(pid)
-        except OSError:pass
-    return result
 
 def stop_bypass():
     pid=rpid(BYPASSPID)

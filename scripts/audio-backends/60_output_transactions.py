@@ -271,8 +271,11 @@ def choose_output_route(requested=None):
            'sinkProfile':str(owner['activeProfile'])}
     return route
 
-def activate_output(request,mode='laptop_laptop',password=None,origin='web',token=None):
+def activate_output(request,mode=None,password=None,origin='web',token=None):
     if not isinstance(request,dict):raise ValueError('Invalid output request')
+    mode=audio_mode() if mode is None else mode
+    if mode not in MODES or not MODES[mode][2]:
+        raise RuntimeError('Laptop output can only be configured while the selected audio output includes Laptop')
     card=str(request.get('card') or '');profile=request.get('profile');route=request.get('port')
     if not card or profile is None or not request.get('sink'):
         raise ValueError('Select an exposed playback device, profile and sink')
