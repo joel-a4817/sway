@@ -83,7 +83,13 @@ def start_runtime(force=False):
     # Resolve a physical route even when every state file was deleted.
     startup_output=_physical_output_route(saved_route if saved_route.get('card') else None)
     try:
-        apply_mode(mode,restore_camilla=False,output=startup_output,output_resolved=True)
+        if saved==NO_FILTER and not saved_route.get('card'):
+            # A clean state has one explicit baseline: No filter plus a live
+            # physical output. Apply it before any virtual DSP sink can become
+            # a persistent default merely because its service was exposed.
+            startup_output=apply_physical_no_filter_fallback(startup_output)
+        else:
+            apply_mode(mode,restore_camilla=False,output=startup_output,output_resolved=True)
     except RuntimeError as error:
         # Every automatic routing recovery has one safe result: No filter,
         # laptop-to-laptop mode and a currently discovered physical output.

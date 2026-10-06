@@ -264,7 +264,13 @@ def apply_source_services(source,direct=False):
     elif source=='system':
         if any(run(['systemctl','is-active','--quiet',service],False,5).returncode==0
                for service in AIRPLAY_SERVICES):airplay(False)
-        if not direct and run(['systemctl','--user','is-active','--quiet',SYSTEM_AUDIO_SERVICE],False,5).returncode:
+        if direct:
+            # Direct No-filter playback does not use the virtual DSP desktop
+            # sink. Leaving its service active lets WirePlumber recreate or
+            # reclaim CamillaDSP_System_Audio after the physical commit.
+            if run(['systemctl','--user','is-active','--quiet',SYSTEM_AUDIO_SERVICE],False,5).returncode==0:
+                user_service('stop',SYSTEM_AUDIO_SERVICE)
+        elif run(['systemctl','--user','is-active','--quiet',SYSTEM_AUDIO_SERVICE],False,5).returncode:
             user_service('start',SYSTEM_AUDIO_SERVICE)
     else:raise ValueError('Invalid audio source')
 

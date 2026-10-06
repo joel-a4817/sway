@@ -306,25 +306,26 @@ def switch_profile(name):
             stop_bypass()
             stop_camilla_for_no_filter()
             ACTIVE.write_text(NO_FILTER+'\n')
+            invalidate_cache('profiles')
             if STOPPED.exists():
                 return {'profile':NO_FILTER,'pid':None,'mode':mode_state()}
-            local=MODES[audio_mode()][2]
+            mode=audio_mode()
+            local=MODES[mode][2]
             route=choose_output_route(dict(saved_output_route(),_remembered=True)) if local else None
             try:
-                start_bypass()
-                if audio_mode()=='laptop_laptop':
-                    direct_no_filter(route)
-                elif MODES[audio_mode()][1]=='system':
-                    restore_dsp_desktop_sink()
-                if local:start_local_monitor(route,resolved=True)
+                # Use the same complete route application as audio start and
+                # output commit. This owns source services, bypass, monitor,
+                # physical default, stream movement and final verification.
+                result=apply_mode(mode,restore_camilla=False,output=route,
+                                  output_resolved=route is not None)
                 reconcile_sonobus_after_engine_transition()
+                if mode=='laptop_laptop':direct_no_filter(route)
                 ACTIVE.write_text(NO_FILTER+'\n')
             except Exception:
-                # Do not report No filter if its bridge/monitor never came up.
                 stop_local_monitor()
                 stop_bypass()
                 raise
-            return {'profile':NO_FILTER,'pid':None,'mode':mode_state()}
+            return {'profile':NO_FILTER,'pid':None,'mode':result}
         target=profile(name)
         validate_camilla_profile(target)
         pid=rpid(CAMPID)
