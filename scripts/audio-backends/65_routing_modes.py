@@ -75,21 +75,31 @@ def apply_mode(name,password=None,restore_camilla=True,output=None,output_resolv
     if source=='system' and not direct:
         if run(['systemctl','--user','is-active','--quiet',SYSTEM_AUDIO_SERVICE],False,5).returncode:
             raise RuntimeError('CamillaDSP desktop sink service is not active')
+    selected=None
     if local:
         selected=output if output_resolved else _physical_output_route(output)
         # Even pre-resolved callers are revalidated against the live physical set.
         selected=_physical_output_route(dict(selected,_remembered=True))
-        if direct:direct_no_filter(selected)
-        # Rebuild the bypass only after the final physical route is stable.
+    if direct:
+        # Laptop -> Laptop with No filter is genuinely direct PipeWire playback.
+        # Do not open either Loopback endpoint: there is no CamillaDSP/SonoBus
+        # producer-consumer path to bypass, and doing so created the arecord EIO.
+        stop_local_monitor()
+        stop_bypass()
+        direct_no_filter(selected)
+        # start_local_monitor normally persists the selected route. Direct
+        # No-filter deliberately has no monitor, so persist the same complete
+        # route here before clean-state verification or later startup reads it.
+        _write_json(LOCALSINK,selected)
+        remember_output(selected)
+    else:
+        # Shared Laptop routes still enter through camilladsp_input. When the
+        # engine is bypassed, bridge input pair 0 to processed-output pair 1.
         if selected_filter()==NO_FILTER:
             stop_bypass()
             start_bypass()
-        start_local_monitor(selected,resolved=True)
-        # Service, profile and monitor creation can update PipeWire metadata.
-        # In direct No-filter mode the final committed default must still be
-        # the selected physical sink, never the CamillaDSP virtual sink.
-        if direct:direct_no_filter(selected)
-    elif alive(rpid(LOCALMONPID)):stop_local_monitor()
+        if local:start_local_monitor(selected,resolved=True)
+        elif alive(rpid(LOCALMONPID)):stop_local_monitor()
     if sono:
         if not sonobus_matches(policy):restart_sonobus(password,policy,normalize=False)
     elif sonopids():stop_sonobus()

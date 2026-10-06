@@ -88,19 +88,28 @@ def start_bypass():
         if b'camilladsp_input' in args:return
         raise RuntimeError('No-filter bridge PID belongs to another process')
     BYPASSPID.unlink(missing_ok=True)
-    # The existing AirPlay, desktop and MPV inputs write camilladsp_input.
-    # Its paired capture endpoint feeds the same output loopback consumed by
-    # SonoBus and the physical-output monitor. No CamillaDSP or YAML is used.
+    # ALSA can release the Loopback PCM shortly after the previous process
+    # disappears. Retry only that transient startup failure; all other bridge
+    # errors remain fatal and visible.
     command='set -o pipefail; "$1" -q -D hw:Loopback,1,0 -r 96000 -f S32_LE -c 2 -t raw | "$2" -q -D hw:Loopback,0,1 -r 96000 -f S32_LE -c 2 -t raw'
-    log=(STATE/'no-filter-bridge.log').open('ab',buffering=0)
-    try:proc=subprocess.Popen([exe('bash'),'-c',command,'camilladsp_input',exe('arecord'),exe('aplay')],stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
-    finally:log.close()
-    deadline=time.monotonic()+1
-    while time.monotonic()<deadline:
-        if proc.poll() is not None:
-            raise RuntimeError('No-filter bridge exited: '+log_tail(STATE/'no-filter-bridge.log')[-1500:])
-        time.sleep(.05)
-    BYPASSPID.write_text(str(proc.pid)+'\n')
+    log_path=STATE/'no-filter-bridge.log'
+    transient=('Device or resource busy','Input/output error')
+    for attempt in range(3):
+        stop_bypass()
+        if attempt:time.sleep(.2*attempt)
+        with log_path.open('wb',buffering=0) as log:
+            proc=subprocess.Popen([exe('bash'),'-c',command,'camilladsp_input',exe('arecord'),exe('aplay')],stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
+        deadline=time.monotonic()+1
+        while time.monotonic()<deadline:
+            if proc.poll() is not None:break
+            time.sleep(.05)
+        if proc.poll() is None:
+            BYPASSPID.write_text(str(proc.pid)+'\n')
+            return
+        detail=log_tail(log_path)[-1500:]
+        stop_bypass()
+        if attempt<2 and any(message in detail for message in transient):continue
+        raise RuntimeError('No-filter bridge exited: '+detail)
 
 def active():
     if selected_filter()==NO_FILTER:return NO_FILTER
@@ -192,38 +201,47 @@ def start_camilla(p):
     global CAMILLA_PROCESS
     target=profile(p.name if isinstance(p,Path) else str(p))
     validate_camilla_profile(target)
-    stop_bypass()
-    competing=other_camilla_processes()
-    if competing:
-        raise RuntimeError('CamillaDSP already running (PID '+', '.join(map(str,competing))+'); refusing a second instance. Check the local switch or another service.')
-    with socket.socket() as probe:
-        if probe.connect_ex(('127.0.0.1',CAM_WS_PORT))==0:
-            raise RuntimeError('CamillaDSP websocket port 8767 is already occupied; refusing to start another instance')
     logpath=STATE/'camilladsp.log'
-    marker='\n===== start '+time.strftime('%Y-%m-%d %H:%M:%S')+' profile='+target.name+' =====\n'
-    with logpath.open('ab',buffering=0) as log:
-        log.write(marker.encode())
-        process=subprocess.Popen(
-            [str(CAMILLA),f'--port={CAM_WS_PORT}','--gain=0.0',str(target)],stdin=subprocess.DEVNULL,
-            stdout=log,stderr=subprocess.STDOUT,start_new_session=True,
-        )
-    CAMILLA_PROCESS=process;CAMPID.write_text(str(process.pid)+'\n')
-    # ALSA open/start failures occur during initial backend setup. A short,
-    # active readiness window catches them without adding seconds to every switch.
-    deadline=time.monotonic()+2.0
-    while time.monotonic()<deadline:
-        code=process.poll()
-        if code is not None:
-            CAMILLA_PROCESS=None;CAMPID.unlink(missing_ok=True)
-            content=log_tail(logpath)
-            tail=content[content.rfind('===== start '):][-4000:].strip()
-            raise RuntimeError(
-                f'CamillaDSP exited with status {code} while starting {target.name}'+
-                (f': {tail}' if tail else '')
+    transient=('Device or resource busy','Input/output error')
+    for attempt in range(3):
+        # Every filter transition must release the complete bypass pipeline,
+        # including stale children whose PID state was deleted.
+        stop_bypass()
+        if attempt:time.sleep(.25*attempt)
+        competing=other_camilla_processes()
+        if competing:
+            raise RuntimeError('CamillaDSP already running (PID '+', '.join(map(str,competing))+'); refusing a second instance. Check the local switch or another service.')
+        with socket.socket() as probe:
+            if probe.connect_ex(('127.0.0.1',CAM_WS_PORT))==0:
+                raise RuntimeError('CamillaDSP websocket port 8767 is already occupied; refusing to start another instance')
+        marker='\n===== start '+time.strftime('%Y-%m-%d %H:%M:%S')+' profile='+target.name+' attempt='+str(attempt+1)+' =====\n'
+        with logpath.open('ab',buffering=0) as log:
+            log.write(marker.encode())
+            process=subprocess.Popen(
+                [str(CAMILLA),f'--port={CAM_WS_PORT}','--gain=0.0',str(target)],stdin=subprocess.DEVNULL,
+                stdout=log,stderr=subprocess.STDOUT,start_new_session=True,
             )
-        time.sleep(.05)
-    ACTIVE.write_text(target.name+'\n')
-    return process.pid
+        CAMILLA_PROCESS=process;CAMPID.write_text(str(process.pid)+'\n')
+        deadline=time.monotonic()+2.0
+        while time.monotonic()<deadline:
+            code=process.poll()
+            if code is not None:break
+            time.sleep(.05)
+        if process.poll() is None:
+            ACTIVE.write_text(target.name+'\n')
+            return process.pid
+        code=process.returncode
+        CAMILLA_PROCESS=None;CAMPID.unlink(missing_ok=True)
+        content=log_tail(logpath)
+        tail=content[content.rfind('===== start '):][-4000:].strip()
+        if attempt<2 and any(message in tail for message in transient):
+            stop_bypass()
+            continue
+        raise RuntimeError(
+            f'CamillaDSP exited with status {code} while starting {target.name}'+
+            (f': {tail}' if tail else '')
+        )
+
 def wait_for_camilla_config(expected,timeout=10):
     """Wait for the tracked engine to report exactly the selected YAML."""
     expected=Path(expected).resolve()
