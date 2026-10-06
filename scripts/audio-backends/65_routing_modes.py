@@ -24,8 +24,9 @@ def ensure_physical_audio_baseline(force=False):
         if STOPPED.exists():return {'repaired':False,'stopped':True}
         if not force and not audio_baseline_missing():
             return {'repaired':False,'route':saved_output_route(),'mode':mode_state()}
-        ensure_pipewire_ready()
-        route=apply_physical_no_filter_fallback(None)
+        with media_change():
+            ensure_pipewire_ready()
+            route=apply_physical_no_filter_fallback(None)
         if selected_filter()!=NO_FILTER or audio_mode()!='laptop_laptop':
             raise RuntimeError('Clean-state audio baseline did not persist No filter laptop mode')
         if saved_output_route().get('sink')!=route['sink'] or pw_default()!=route['sink']:

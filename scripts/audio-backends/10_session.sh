@@ -162,7 +162,13 @@ if [[ ! -s "$REMOTE_STATE/active-profile" || ! -s "$REMOTE_STATE/mode" || ! -s "
         exit 1
     }
 fi
-# Once a baseline exists, opening Media Control is read-only.
+# Opening Media Control verifies gains through the standard transaction:
+# pause, save master, no-op function boundary, normalize, restore master last.
+python3 "$TOPOLOGY_SCRIPT" --normalize-menu-open >>"$ACTION_LOG" 2>&1 || {
+    cat "$ACTION_LOG" >&2
+    exit 1
+}
+# Once a baseline exists, the menu itself is read-only.
 output_topology() { python3 "$TOPOLOGY_SCRIPT" --output-topology; }
 run_quiet_action() {
     local output status
