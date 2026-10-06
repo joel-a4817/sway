@@ -116,23 +116,6 @@ def start_runtime(force=False):
             print('Saved master pending: '+str(error),flush=True)
         else:raise
     MASTER_RESTORING=False
-MEDIA_USER_SERVICES=('camilladsp-system-audio.service','playerctld.service','camilladsp-wayvnc.service')
-MEDIA_SYSTEM_SERVICES=('shairport-sync.service','nqptp.service')
-MEDIA_SYSTEM_MAINTENANCE=('audio-fixes.timer','audio-fixes.service')
-def _system_media_service(action,name):
-    result=run(['systemctl',action,name],False,30)
-    if result.returncode:
-        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f'Could not {action} {name}')
-def start_media_foundation_services():
-    # PipeWire must exist before user media services inspect or expose nodes.
-    ensure_pipewire_ready()
-    for unit in ('playerctld.service','camilladsp-wayvnc.service'):
-        user_service('start',unit)
-    # The timer is persistent; run the one-shot once so mixer switches are also
-    # repaired immediately rather than waiting for the next timer firing.
-    _system_media_service('start','audio-fixes.timer')
-    _system_media_service('start','audio-fixes.service')
-
 def stop_audio_services(mark_stopped=True,stop_pipewire=True):
     global MASTER_RESTORING
     # Capture the last live value, then stop all NixOS audio services and clients.
@@ -150,15 +133,7 @@ def stop_audio_services(mark_stopped=True,stop_pipewire=True):
             stop_sonobus()
             stop_bypass()
             stop_camilla(include_stale=True)
-            # Stop every media service declared by media.nix. System services
-            # are stopped before PipeWire; user services are stopped before the
-            # sockets that they depend on.
-            for unit in MEDIA_SYSTEM_SERVICES:
-                _system_media_service('stop',unit)
-            for unit in MEDIA_SYSTEM_MAINTENANCE:
-                _system_media_service('stop',unit)
-            for unit in MEDIA_USER_SERVICES:
-                user_service('stop',unit)
+            airplay(False)
             if stop_pipewire:
                 for unit in ('wireplumber.service','pipewire-pulse.service','pipewire.service',
                              'pipewire-pulse.socket','pipewire.socket'):
@@ -179,11 +154,6 @@ def toggle_audio_services():
     with LOCK:
         if STOPPED.exists():
             with audio_start_change():
-                # Recreate the media foundation first. start_runtime then applies
-                # the default No-filter physical route, starts only the source
-                # services required by that mode, normalizes ALSA and restores
-                # the persisted logical master.
-                start_media_foundation_services()
                 start_runtime(force=True)
                 STOPPED.unlink(missing_ok=True)
         else:

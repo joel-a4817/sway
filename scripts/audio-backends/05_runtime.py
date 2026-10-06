@@ -217,31 +217,7 @@ def user_service(action,name):
     r=run(['systemctl','--user',action,name],False,30)
     if r.returncode:raise RuntimeError(r.stderr.strip() or r.stdout.strip() or f'Could not {action} {name}')
 PIPEWIRE_UNITS=('pipewire.socket','pipewire-pulse.socket','wireplumber.service')
-def ensure_pipewire_ready():
-    # wpctl can answer before WirePlumber has recreated the physical ALSA graph.
-    # Every startup caller needs a stable physical card/sink set, not just a live
-    # PipeWire socket.
-    for unit in PIPEWIRE_UNITS:user_service('start',unit)
-    deadline=time.monotonic()+15
-    stable=None;stable_reads=0;last='PipeWire did not become ready'
-    while time.monotonic()<deadline:
-        status=run([exe('wpctl'),'status'],False,3,media_env())
-        if status.returncode:
-            last=status.stderr.strip() or status.stdout.strip() or last
-            time.sleep(.1);continue
-        try:
-            rows=_physical_output_rows(audio_topology())
-            signature=tuple(sorted((card['name'],sink['name']) for card,sink in rows))
-            if not signature:
-                last='No physical playback output in PipeWire graph';stable=None;stable_reads=0
-            elif signature==stable:
-                stable_reads+=1
-                if stable_reads>=3:return
-            else:stable=signature;stable_reads=1
-        except (OSError,RuntimeError,ValueError,TypeError,KeyError) as error:
-            last=str(error);stable=None;stable_reads=0
-        time.sleep(.15)
-    raise RuntimeError('Physical playback topology did not become ready: '+last)
+
 def ensure_system_audio_exposed():
     # This service exposes the stable CamillaDSP PipeWire sink. NixOS keeps
     # the service enabled; the backend only verifies/restarts the exposure.
