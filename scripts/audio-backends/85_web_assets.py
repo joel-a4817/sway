@@ -1214,7 +1214,7 @@ body {
       Restart AirPlay
      </button>
      <button class="action accent-blue" id="restart-vnc">
-      Restart VNC
+      Stop VNC / Start VNC
      </button>
      <button class="action accent-red" id="audio-toggle" type="button">
       Stop audio
@@ -1268,7 +1268,7 @@ body {
      </div>
     </div>
     <button class="action accent-blue" id="open-output" type="button">
-     Configure laptop output
+     Configure PC output
     </button>
     <div class="section-title">
      SonoBus Group
@@ -1468,7 +1468,7 @@ body {
    <div class="output-modal hidden" id="output-modal">
     <div class="output-sheet">
      <div class="label">
-      Laptop output
+      PC output
      </div>
      <div class="title" id="output-mode-title">
       Choose output
@@ -1671,7 +1671,7 @@ function coverNode(url,large=false){const node=document.createElement(url?'img':
 let localNowArtworkURL='';
 function updateLocalNowArtwork(url){const next=url||'';if(next===localNowArtworkURL)return;localNowArtworkURL=next;const tile=$('#now-cover');tile.replaceChildren();if(!next)return;const image=document.createElement('img');image.alt='';image.decoding='async';image.addEventListener('error',()=>image.remove(),{once:true});image.src=next;tile.appendChild(image)}
 function render(sel,data,query){const list=$(sel);list.replaceChildren();const term=query.toLowerCase();const filtered=data.filter(song=>!term||[song.title,song.artist,song.album,song.relative].join(' ').toLowerCase().includes(term));if(!filtered.length){const empty=document.createElement('div');empty.className='card details';empty.textContent=query?'No matches':'Nothing here yet';list.append(empty);return}const fragment=document.createDocumentFragment();for(const song of filtered){const button=document.createElement('button');button.className='item';button.innerHTML='<span class="name"></span><span class="meta"></span>';button.children[0].textContent=song.title;button.children[1].textContent=[song.artist,song.album].filter(Boolean).join(' • ')||song.relative;const wrap=document.createElement('div');wrap.className='item-cover';const copy=document.createElement('div');copy.className='copy';copy.append(...button.children);wrap.append(coverNode(song.cover),copy);button.append(wrap);button.onclick=async()=>{try{await busy(button,()=>post('/api/play/song',{path:song.path}),'Playing…');note('Playing '+song.title);await refreshVolatile()}catch(error){note(error.message,true)}};fragment.append(button)}list.append(fragment)}
-const MODE_LABELS={ipad_ipad:'External',laptop_laptop:'Laptop',ipad_laptop:'Laptop',ipad_both:'Both',laptop_ipad:'External',laptop_both:'Both'};const LOCAL_MODES=new Set(['ipad_laptop','ipad_both','laptop_laptop','laptop_both']);let pendingMode=null,outputTopology=null,outputProfileBusy=false,outputPreviewToken=null;const outputCard=$('#output-card'),outputProfile=$('#output-profile'),outputRoute=$('#output-route'),outputSink=$('#output-sink');function selectedCard(){return outputTopology?.cards.find(item=>item.name===outputCard.value)}
+const MODE_LABELS={ipad_ipad:'External',laptop_laptop:'PC',ipad_laptop:'PC',ipad_both:'Both',laptop_ipad:'External',laptop_both:'Both'};const LOCAL_MODES=new Set(['ipad_laptop','ipad_both','laptop_laptop','laptop_both']);let pendingMode=null,outputTopology=null,outputProfileBusy=false,outputPreviewToken=null;const outputCard=$('#output-card'),outputProfile=$('#output-profile'),outputRoute=$('#output-route'),outputSink=$('#output-sink');function selectedCard(){return outputTopology?.cards.find(item=>item.name===outputCard.value)}
 function labelledOutputOption(row){return /^\[(?:N\/A|INT|MON|LOOP|VIRT)\] /.test(String(row?.label||''))}
 function mediaControlOutputLabel(row,unavailable=false){
   const label=String(row?.label||'').replace(/^\[(?:N\/A|INT|MON|LOOP|VIRT)\] /,'');
@@ -1784,7 +1784,7 @@ async function commitOutput(){
 outputCard.onchange=()=>{if(!outputProfileBusy)fillProfiles()};
 outputProfile.onchange=()=>{if(!outputProfileBusy)fillRoutes()};
 outputRoute.onchange=()=>{if(!outputProfileBusy)fillSinks()};
-for(const [source,items] of [['External',['ipad_ipad','ipad_laptop','ipad_both']],['Laptop',['laptop_ipad','laptop_laptop','laptop_both']]]){const heading=document.createElement('div');heading.className='source-heading';heading.textContent='Playing from '+source;$('#mode-grid').append(heading);for(const key of items){const b=document.createElement('button');b.className='action';b.dataset.mode=key;b.textContent=MODE_LABELS[key];b.onclick=async()=>{try{await applyMode(key)}catch(error){note(error.message,true)}};$('#mode-grid').append(b)}}$('#open-output').onclick=async()=>{try{const current=(await api('/api/volatile')).mode.mode;if(!LOCAL_MODES.has(current))throw Error('Laptop output can only be configured while the current audio output includes Laptop');await chooseOutput(current)}catch(error){note(error.message,true)}};$('#output-next').onclick=async()=>{
+for(const [source,items] of [['External',['ipad_ipad','ipad_laptop','ipad_both']],['PC',['laptop_ipad','laptop_laptop','laptop_both']]]){const heading=document.createElement('div');heading.className='source-heading';heading.textContent='Playing from '+source;$('#mode-grid').append(heading);for(const key of items){const b=document.createElement('button');b.className='action';b.dataset.mode=key;b.textContent=MODE_LABELS[key];b.onclick=async()=>{try{await applyMode(key)}catch(error){note(error.message,true)}};$('#mode-grid').append(b)}}$('#open-output').onclick=async()=>{try{const current=(await api('/api/volatile')).mode.mode;if(!LOCAL_MODES.has(current))throw Error('PC output can only be configured while the current audio output includes PC');await chooseOutput(current)}catch(error){note(error.message,true)}};$('#output-next').onclick=async()=>{
   if(outputProfileBusy)return;
   const selector={card:outputCard,profile:outputProfile,route:outputRoute,sink:outputSink}[outputStep];
   if(!selector?.value||!selector.selectedOptions[0]||selector.selectedOptions[0].disabled){
@@ -1839,7 +1839,7 @@ for(const [id,command] of [['system-previous','previous'],['system-toggle','togg
 $('#audio-toggle').onclick=async()=>{try{await busy($('#audio-toggle'),()=>post('/api/audio-toggle'),'Switching audio services…','Audio services updated',true);await refreshStatic()}catch(error){note(error.message,true)}};
 $('#restart-sonobus').onclick=()=>busy($('#restart-sonobus'),()=>post('/api/restart-sonobus'),'Restarting SonoBus…','SonoBus restarted',true).then(refreshVolatile).catch(error=>note(error.message,true));
 $('#restart-airplay').onclick=()=>busy($('#restart-airplay'),()=>post('/api/restart-airplay'),'Restarting AirPlay…','AirPlay restarted',true).then(refreshVolatile).catch(error=>note(error.message,true));
-$('#restart-vnc').onclick=()=>busy($('#restart-vnc'),()=>post('/api/restart-vnc'),'Restarting VNC…','VNC restarted').catch(error=>note(error.message,true));
+$('#restart-vnc').onclick=()=>busy($('#restart-vnc'),()=>post('/api/restart-vnc'),'Toggling VNC…','VNC toggled').catch(error=>note(error.message,true));
 $('#profile-search').oninput=()=>{if(profileSnapshot)renderProfileSnapshot(profileSnapshot);else refreshStatic()};
 bindSeek(state.local,'/api/player/seek');bindSeek(state.system,'/api/system-media/seek');bindVolume(state.local,'/api/player/volume');bindVolume(state.system,'/api/system-volume');
 let staticRefreshRunning=false,volatileRefreshRunning=false,profileSnapshot=null;
@@ -1890,13 +1890,16 @@ function renderPlaylistSnapshot(playlists){
 }
 function updatePlaylistCover(player){if(!player?.playlist||!player.playing)return;for(const button of document.querySelectorAll('#playlists [data-playlist-name]')){if(button.dataset.playlistName!==player.playlist)continue;const old=button.querySelector('.item-cover .cover-art');if(!old)continue;const url=player.cover||'';if(url&&old.tagName==='IMG'&&old.getAttribute('src')===url)return;if(!url&&old.classList.contains('cover-fallback'))return;old.replaceWith(coverNode(url))}}
 function renderVolatile(data){
+  const sonoAllowed=!!data.mode.sonobusWanted,airAllowed=!!data.mode.airplay;
+  $('#restart-sonobus').disabled=!sonoAllowed;$('#restart-sonobus').setAttribute('aria-disabled',String(!sonoAllowed));
+  $('#restart-airplay').disabled=!airAllowed;$('#restart-airplay').setAttribute('aria-disabled',String(!airAllowed));
   $('#audio-toggle').textContent=data.mode.mode==='stopped'?'Start audio':'Stop audio';
   if(data.awayDisplay){const button=$('#away-display-toggle');button.textContent=data.awayDisplay.displayOff?'Show lock screen':data.awayDisplay.away?'Unlock desktop':'Away and display off';button.setAttribute('aria-pressed',String(!!data.awayDisplay.active));button.classList.toggle('mode-active',!!data.awayDisplay.active)}
   if(data.profiles)renderActiveProfile(data.profiles);
   renderSonobusStatus(data.mode,data.groups);
   $('#engine-status').textContent=data.mode.engineRunning?'Audio engine online ('+data.mode.engineLabel+')':'Audio engine offline ('+data.mode.engineLabel+')';$('.dot').style.opacity=data.mode.engineRunning?'1':'.25';
-  $('#source-title').textContent=({ipad_external:'External',laptop_external:'Laptop',ipad_ipad:'External',ipad_laptop:'Laptop',ipad_both:'Both',laptop_ipad:'External',laptop_laptop:'Laptop',laptop_both:'Both'})[data.mode.mode]||data.mode.label;$('#source-details').textContent='CamillaDSP '+(data.mode.engineRunning?'running':'stopped')+' • SonoBus '+(data.mode.sonobus?'on':'off')+' • AirPlay '+(data.mode.airplay?'on':'off')+(data.mode.localWanted?' • Output '+(data.mode.localOutputLabel||'Not selected'):'');
-  document.querySelectorAll('[data-mode]').forEach(button=>button.classList.toggle('mode-active',button.dataset.mode===data.mode.mode));const localOutput=!!data.mode.localWanted;$('#open-output').disabled=!localOutput;$('#open-output').setAttribute('aria-disabled',String(!localOutput));$('#output-title').textContent=localOutput?(data.mode.localOutputLabel||'Laptop output not selected'):'Not used by current output';$('#output-details').textContent=localOutput?'':'Switch audio output to Laptop or Both before configuring a physical output.';
+  $('#source-title').textContent=({ipad_external:'External',laptop_external:'PC',ipad_ipad:'External',ipad_laptop:'PC',ipad_both:'Both',laptop_ipad:'External',laptop_laptop:'PC',laptop_both:'Both'})[data.mode.mode]||data.mode.label;$('#source-details').textContent='CamillaDSP '+(data.mode.engineRunning?'running':'stopped')+' • SonoBus '+(data.mode.sonobus?'on':'off')+' • AirPlay '+(data.mode.airplay?'on':'off')+(data.mode.localWanted?' • Output '+(data.mode.localOutputLabel||'Not selected'):'');
+  document.querySelectorAll('[data-mode]').forEach(button=>button.classList.toggle('mode-active',button.dataset.mode===data.mode.mode));const localOutput=!!data.mode.localWanted;$('#open-output').disabled=!localOutput;$('#open-output').setAttribute('aria-disabled',String(!localOutput));$('#output-title').textContent=localOutput?(data.mode.localOutputLabel||'PC output not selected'):'Not used by current output';$('#output-details').textContent=localOutput?'':'Switch audio output to PC or Both before configuring a physical output.';
   updatePlaylistCover(data.player);
   const local=data.player,lm=state.local;$('#now-title').textContent=local.title||'Nothing playing';updateLocalNowArtwork(local.cover||'');$('#now-details').textContent=[local.artist,local.album].filter(Boolean).join(' • ')||(local.path||'');renderTimeline(lm,local.currentTime,local.duration);if(lm.volumePending===null&&document.activeElement!==lm.volume){displayMasterVolume(local.volume)}$('#shuffle').disabled=!local.canShuffleQueue;$('#repeat').textContent='Repeat '+({off:'Off',all:'All',one:'1'}[local.repeat]||'Off');$('#repeat').classList.toggle('active',local.repeat!=='off');setPlayIcon($('#local-play-shape'),document.querySelector('[data-cmd="toggle"]'),local.playing)
 }

@@ -122,7 +122,7 @@ fi
 OUTPUT_PREVIEW_ACTIVE=1
 if ! boundary_error="$(python3 "$TOPOLOGY_SCRIPT" --laptop-laptop-boundary 2>&1)"; then
     printf '%s\n' "$boundary_error" >>"$ACTION_LOG"
-    wrap_line 'Could not prepare Laptop -> Laptop output selection.' >&2
+    wrap_line 'Could not prepare PC -> PC output selection.' >&2
     exit 1
 fi
 export MEDIA_CONTROL_PICKER_PID=$$
