@@ -51,21 +51,12 @@ main {
 .card+.grid {
   margin-top:14px;
 }
-.eyebrow,.label,.section-title {
+.label,.section-title {
   color:#bcb7cb;
   text-transform:uppercase;
   letter-spacing:.1em;
   font-size:12px;
   font-weight:800;
-}
-.dot {
-  display:inline-block;
-  width:9px;
-  height:9px;
-  border-radius:50%;
-  background:var(--g);
-  box-shadow:0 0 15px var(--g);
-  margin-right:8px;
 }
 h1 {
   margin:10px 0 5px;
@@ -769,7 +760,6 @@ body {
     linear-gradient(125deg,#22666e9e 0%,#49315fbc 48%,#77405e9e 100%);
   box-shadow:inset 0 1px #ffffff35,0 20px 52px #0c09166b;
 }
-.hero .eyebrow { color:#bfe9df; }
 .hero h1 { color:#fff7fc; text-shadow:0 2px 18px #160d2770; }
 .card {
   border-color:var(--line);
@@ -789,12 +779,8 @@ body {
   color:#efbbcf;
   text-shadow:0 1px 12px #9d49613d;
 }
-.label,.eyebrow { color:#b9ded8; }
+.label { color:#b9ded8; }
 .details,.meta,.times { color:var(--muted); }
-.dot {
-  background:#6ad1c3;
-  box-shadow:0 0 16px #6ad1c3;
-}
 .action:not(.active),.item,.back,.transport {
   border:1px solid #ffffff20;
   box-shadow:inset 0 1px #ffffff19,0 8px 20px #0b08143d;
@@ -1116,13 +1102,6 @@ body {
   <main>
    <section id="profiles">
     <div class="hero">
-     <div class="eyebrow">
-      <span class="dot">
-      </span>
-      <span id="engine-status">
-       Audio engine offline
-      </span>
-     </div>
      <h1>
       CamillaDSP Studio
      </h1>
@@ -1897,7 +1876,6 @@ function renderVolatile(data){
   if(data.awayDisplay){const button=$('#away-display-toggle');button.textContent=data.awayDisplay.displayOff?'Show lock screen':data.awayDisplay.away?'Unlock desktop':'Away and display off';button.setAttribute('aria-pressed',String(!!data.awayDisplay.active));button.classList.toggle('mode-active',!!data.awayDisplay.active)}
   if(data.profiles)renderActiveProfile(data.profiles);
   renderSonobusStatus(data.mode,data.groups);
-  $('#engine-status').textContent=data.mode.engineRunning?'Audio engine online ('+data.mode.engineLabel+')':'Audio engine offline ('+data.mode.engineLabel+')';$('.dot').style.opacity=data.mode.engineRunning?'1':'.25';
   $('#source-title').textContent=({ipad_external:'External',laptop_external:'PC',ipad_ipad:'External',ipad_laptop:'PC',ipad_both:'Both',laptop_ipad:'External',laptop_laptop:'PC',laptop_both:'Both'})[data.mode.mode]||data.mode.label;$('#source-details').textContent='CamillaDSP '+(data.mode.engineRunning?'running':'stopped')+' • SonoBus '+(data.mode.sonobus?'on':'off')+' • AirPlay '+(data.mode.airplay?'on':'off')+(data.mode.localWanted?' • Output '+(data.mode.localOutputLabel||'Not selected'):'');
   document.querySelectorAll('[data-mode]').forEach(button=>button.classList.toggle('mode-active',button.dataset.mode===data.mode.mode));const localOutput=!!data.mode.localWanted;$('#open-output').disabled=!localOutput;$('#open-output').setAttribute('aria-disabled',String(!localOutput));$('#output-title').textContent=localOutput?(data.mode.localOutputLabel||'PC output not selected'):'Not used by current output';$('#output-details').textContent=localOutput?'':'Switch audio output to PC or Both before configuring a physical output.';
   updatePlaylistCover(data.player);

@@ -124,7 +124,7 @@
 
 **What it does:** Controls Away and Display Off behavior.
 
-**How it does it:** Reads Sway outputs, turns displays on or off, starts or stops the away lock, records lock ownership, recovers stale away state, and reports the combined display and lock state.
+**How it does it:** Invokes the shared standalone device-lock.py executable for status and toggle operations, so the web button and Sway key binding use one implementation.
 
 ## `80_state_api.py`
 
@@ -172,4 +172,4 @@
 
 **What it does:** Builds the main Media Control interface and runs its actions.
 
-**How it does it:** Creates the Swaynag buttons, launches filter, input, camera, and output selectors, forces Laptop to Laptop only after an output device is selected, performs the Device to Profile to Route to Sink workflow, commits or cancels output previews, and invokes audio stop/start.
+**How it does it:** Creates the Swaynag buttons, launches filter, input, camera, and output selectors, requires the current mode to include Laptop without changing that mode, performs the Device to Profile to Route to Sink workflow, commits or cancels output previews, and invokes audio stop/start.

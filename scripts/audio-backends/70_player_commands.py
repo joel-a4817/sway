@@ -119,5 +119,3 @@ def play_list(name,shuffle=False):
             return {'playlist':name,'shuffled':bool(shuffle and len(paths)>1),'state':last}
         time.sleep(.05)
     return {'playlist':name,'shuffled':bool(shuffle and len(paths)>1),'state':last,'pending':True}
-DISPLAY_FILE=STATE/'display-output.json'
-DISPLAY_LOCK=threading.RLock()
