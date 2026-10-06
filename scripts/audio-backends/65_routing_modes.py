@@ -1,6 +1,19 @@
 def _physical_output_route(requested=None):
     """Compatibility entry point for the one authoritative physical resolver."""
     return choose_output_route(requested)
+def apply_physical_no_filter_fallback(output=None):
+    """Recover to one deterministic safe graph used by every caller."""
+    requested=dict(output or {},_remembered=True)
+    selected=_physical_output_route(requested)
+    ACTIVE.write_text(NO_FILTER+'\n')
+    invalidate_cache('profiles')
+    # apply_mode performs the authoritative CamillaDSP shutdown, bypass
+    # rebuild, physical monitor start and stream move.
+    apply_mode('laptop_laptop',output=selected,output_resolved=True)
+    direct_no_filter(selected)
+    MODE.write_text('laptop_laptop\n')
+    return selected
+
 def mode_state():
     if STOPPED.exists():
         return {'mode':'stopped','label':'No source selected','source':'',
@@ -55,6 +68,10 @@ def apply_mode(name,password=None,restore_camilla=True,output=None,output_resolv
             stop_bypass()
             start_bypass()
         start_local_monitor(selected,resolved=True)
+        # Service, profile and monitor creation can update PipeWire metadata.
+        # In direct No-filter mode the final committed default must still be
+        # the selected physical sink, never the CamillaDSP virtual sink.
+        if direct:direct_no_filter(selected)
     elif alive(rpid(LOCALMONPID)):stop_local_monitor()
     if sono:
         if not sonobus_matches(policy):restart_sonobus(password,policy,normalize=False)

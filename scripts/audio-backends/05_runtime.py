@@ -74,9 +74,11 @@ def pw_default(graph=None):
             if any(pw_props(x).get('node.name')==name for x in pw_objects('Node',graph)):return name
     sinks=[x for x in pw_objects('Node',graph) if pw_props(x).get('media.class')=='Audio/Sink']
     if not sinks:raise RuntimeError('No playback sink in PipeWire graph')
+    # Generic default recovery must be physical. Filtered routing selects the
+    # DSP sink explicitly through restore_dsp_desktop_sink(); treating it as a
+    # fallback is what allowed stale CamillaDSP routing to persist.
     saved=saved_output_route().get('sink')
-    for candidate in (('camilladsp' if selected_filter()!=NO_FILTER else ''),saved):
-        if candidate and any(pw_props(x).get('node.name')==candidate for x in sinks):return candidate
+    if saved and saved!='camilladsp' and any(pw_props(x).get('node.name')==saved for x in sinks):return saved
     if len(sinks)==1:return str(pw_props(sinks[0]).get('node.name'))
     raise RuntimeError('Could not identify the current default sink')
 

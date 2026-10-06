@@ -84,6 +84,13 @@ def start_runtime(force=False):
     startup_output=_physical_output_route(saved_route if saved_route.get('card') else None)
     try:
         apply_mode(mode,restore_camilla=False,output=startup_output,output_resolved=True)
+    except RuntimeError as error:
+        # Every automatic routing recovery has one safe result: No filter,
+        # laptop-to-laptop mode and a currently discovered physical output.
+        # Do not retain or recreate the virtual CamillaDSP sink as a fallback.
+        print('Audio routing fallback: '+str(error),flush=True)
+        startup_output=apply_physical_no_filter_fallback(startup_output)
+        mode='laptop_laptop'
     except ValueError as error:
         # A saved password-protected group cannot be joined unattended. Keep
         # CamillaDSP and the web UI alive so the password can be entered there.
@@ -307,7 +314,10 @@ def topology_cli():
                 data={'profile':requested,'stopped':True}
             else:
                 current=selected_filter()
-                if requested!=current:
+                # No filter is an idempotent repair operation: its state label
+                # can survive while PipeWire still defaults to the virtual DSP
+                # sink. Always rebuild the bypass and physical default.
+                if requested==NO_FILTER or requested!=current:
                     switch_profile(requested)
                 data={'profile':selected_filter(),'stopped':False}
             print(json.dumps(data,ensure_ascii=False));return
