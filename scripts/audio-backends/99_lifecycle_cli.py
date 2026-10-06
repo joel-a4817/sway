@@ -45,7 +45,6 @@ def start_runtime(force=False):
     ensure()
     (STATE/'output-preview').unlink(missing_ok=True)
     ensure_pipewire_ready()
-    ensure_system_audio_exposed()
     if STOPPED.exists() and not force:
         if OUTPUT_PREVIEW.exists():_recover_stale_cli_preview()
         MODE.write_text('laptop_laptop\n')
@@ -65,8 +64,9 @@ def start_runtime(force=False):
     MODE.write_text(mode+'\n')
     # Reuse a verified surviving engine; never start a competing instance.
     if saved==NO_FILTER:
+        # apply_mode resolves and applies the physical route before rebuilding
+        # the bypass bridge. Do not open ALSA Loopback during startup discovery.
         stop_camilla_for_no_filter()
-        start_bypass()
     elif not alive(rpid(CAMPID),'camilladsp'):
         stop_camilla(include_stale=True)
         start_camilla(selected)

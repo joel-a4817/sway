@@ -127,6 +127,15 @@ def cancel_output_preview(origin='web',token=None,recover=False):
 
 def _stage_local_route(card, profile, route=None, mode=None,origin='web',token=None):
     preview=_require_output_preview(origin,token)
+    # Device/profile/route changes invalidate an active ALSA capture handle.
+    # Quiesce the bridge before the first topology mutation so arecord cannot
+    # exit with EIO while WirePlumber rebuilds the physical card nodes.
+    if not preview.get('bridgeSuspended'):
+        preview['bypassWasRunning']=alive(rpid(BYPASSPID))
+        preview['bridgeSuspended']=True
+        _write_json(OUTPUT_PREVIEW,preview)
+        stop_local_monitor()
+        stop_bypass()
     current=_find_card(audio_topology(),card)
     chosen=_profile_choice(current,profile)
     if current.get('internal') or _labelled_output_option(current) or _labelled_output_option(chosen):
@@ -174,6 +183,8 @@ def _stage_local_route(card, profile, route=None, mode=None,origin='web',token=N
     MEDIA_TRANSACTION.stage_sink=(selected['sink'] if master=='@DEFAULT_SINK@' or (selected_filter()==NO_FILTER and (mode or audio_mode())=='laptop_laptop') else master)
     snapshot=_read_json(OUTPUT_PREVIEW,{})
     snapshot['staged']=True
+    snapshot['bridgeSuspended']=bool(preview.get('bridgeSuspended'))
+    snapshot['bypassWasRunning']=bool(preview.get('bypassWasRunning'))
     if origin=='web':snapshot['renewed']=time.time()
     _write_json(OUTPUT_PREVIEW,snapshot)
     result=output_state()
