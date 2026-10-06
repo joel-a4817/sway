@@ -120,11 +120,6 @@ if ! preview_error="$(MEDIA_CONTROL_PICKER_PID=$$ MEDIA_CONTROL_PICKER_START="$(
     exit 1
 fi
 OUTPUT_PREVIEW_ACTIVE=1
-if ! boundary_error="$(python3 "$TOPOLOGY_SCRIPT" --laptop-laptop-boundary 2>&1)"; then
-    printf '%s\n' "$boundary_error" >>"$ACTION_LOG"
-    wrap_line 'Could not prepare PC -> PC output selection.' >&2
-    exit 1
-fi
 export MEDIA_CONTROL_PICKER_PID=$$
 OUTPUT_PREVIEW_ACTIVE=1
 # Refresh after the Swaynag selection, without changing the live graph.

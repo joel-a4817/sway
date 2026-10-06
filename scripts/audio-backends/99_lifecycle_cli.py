@@ -331,14 +331,6 @@ def topology_cli():
                     switch_profile(requested)
                 data={'profile':selected_filter(),'stopped':False}
             print(json.dumps(data,ensure_ascii=False));return
-        if len(sys.argv)==2 and sys.argv[1]=='--laptop-laptop-boundary':
-            ensure()
-            # The preview transaction already owns the rollback snapshot. Mark
-            # the intended local boundary without starting either engine here;
-            # the first output stage acquires ALSA exactly once.
-            MODE.write_text('laptop_laptop\n')
-            print(json.dumps({'mode':'laptop_laptop','stopped':STOPPED.exists()}))
-            return
         if len(sys.argv)==2 and sys.argv[1]=='--normalize-menu-open':
             if STOPPED.exists():
                 print(json.dumps({'skipped':'audio stopped'}));return
@@ -378,9 +370,9 @@ def topology_cli():
             server=rpid(SERVERPID)
             if not alive(server) or server==os.getpid():
                 if STOPPED.exists():raise RuntimeError('Audio is stopped; start audio before selecting an output')
-                print(json.dumps(activate_output(request,mode='laptop_laptop',origin='cli',token=os.environ.get('MEDIA_CONTROL_PICKER_PID')),ensure_ascii=False))
+                print(json.dumps(activate_output(request,mode=audio_mode(),origin='cli',token=os.environ.get('MEDIA_CONTROL_PICKER_PID')),ensure_ascii=False))
                 return
-            data=local_api_post('/api/output-activate',{'output':request,'mode':'laptop_laptop','origin':'cli','token':os.environ.get('MEDIA_CONTROL_PICKER_PID')},120,'Output switch failed')
+            data=local_api_post('/api/output-activate',{'output':request,'mode':audio_mode(),'origin':'cli','token':os.environ.get('MEDIA_CONTROL_PICKER_PID')},120,'Output switch failed')
             print(json.dumps(data,ensure_ascii=False))
             return
         if len(sys.argv)==4 and sys.argv[1]=='--output-route':
@@ -394,13 +386,13 @@ def topology_cli():
         if (len(sys.argv)==4 and sys.argv[1]=='--apply-output-profile') or (len(sys.argv)==5 and sys.argv[1]=='--apply-output-route'):
             if not alive(rpid(SERVERPID)):
                 if STOPPED.exists():raise RuntimeError('Audio is stopped; start audio before selecting an output')
-                result=(apply_output_profile_stage(sys.argv[2],sys.argv[3],mode='laptop_laptop',origin='cli',token=os.environ.get('MEDIA_CONTROL_PICKER_PID'))
+                result=(apply_output_profile_stage(sys.argv[2],sys.argv[3],mode=audio_mode(),origin='cli',token=os.environ.get('MEDIA_CONTROL_PICKER_PID'))
                         if sys.argv[1]=='--apply-output-profile' else
-                        apply_output_route_stage(sys.argv[2],sys.argv[3],sys.argv[4],mode='laptop_laptop',origin='cli',token=os.environ.get('MEDIA_CONTROL_PICKER_PID')))
+                        apply_output_route_stage(sys.argv[2],sys.argv[3],sys.argv[4],mode=audio_mode(),origin='cli',token=os.environ.get('MEDIA_CONTROL_PICKER_PID')))
                 print(json.dumps(result,ensure_ascii=False));return
             is_profile=sys.argv[1]=='--apply-output-profile'
             endpoint='/api/output-profile-stage' if is_profile else '/api/output-route-stage'
-            payload={'card':sys.argv[2],'profile':sys.argv[3],'mode':'laptop_laptop','origin':'cli','token':os.environ.get('MEDIA_CONTROL_PICKER_PID')}
+            payload={'card':sys.argv[2],'profile':sys.argv[3],'mode':audio_mode(),'origin':'cli','token':os.environ.get('MEDIA_CONTROL_PICKER_PID')}
             if not is_profile:payload['route']=sys.argv[4]
             data=local_api_post(endpoint,payload,90,'Output stage failed')
             print(json.dumps(data,ensure_ascii=False));return

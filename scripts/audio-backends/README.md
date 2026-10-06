@@ -172,4 +172,4 @@
 
 **What it does:** Builds the main Media Control interface and runs its actions.
 
-**How it does it:** Creates the Swaynag buttons, launches filter, input, camera, and output selectors, forces Laptop to Laptop only after an output device is selected, performs the Device to Profile to Route to Sink workflow, commits or cancels output previews, and invokes audio stop/start.
+**How it does it:** Creates the Swaynag buttons, launches filter, input, camera, and output selectors, requires the active mode to include Laptop without changing that mode, performs the Device to Profile to Route to Sink workflow, commits or cancels output previews, and invokes audio stop/start.
