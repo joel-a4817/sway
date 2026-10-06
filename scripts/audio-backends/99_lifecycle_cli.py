@@ -44,13 +44,13 @@ def start_runtime(force=False):
     MASTER_RESTORING=True
     ensure()
     (STATE/'output-preview').unlink(missing_ok=True)
+    ensure_pipewire_ready()
+    ensure_system_audio_exposed()
     if STOPPED.exists() and not force:
         if OUTPUT_PREVIEW.exists():_recover_stale_cli_preview()
         MODE.write_text('laptop_laptop\n')
-        run(['systemctl','--user','stop',SYSTEM_AUDIO_SERVICE],False,10)
         run(['systemctl','stop','shairport-sync.service','nqptp.service'],False,10)
         return
-    ensure_pipewire_ready()
     if OUTPUT_PREVIEW.exists():_recover_stale_cli_preview()
     # Keep persisted master until the route has been restored; a newly
     # created default sink may temporarily report 100%.
@@ -111,10 +111,10 @@ def start_runtime(force=False):
             print('Saved master pending: '+str(error),flush=True)
         else:raise
     MASTER_RESTORING=False
-def stop_audio_services(mark_stopped=True,stop_pipewire=True):
+def stop_audio_services(mark_stopped=True,stop_pipewire=False):
     global MASTER_RESTORING
-    # Capture the last live value before stopping PipeWire, then prevent
-    # status polling from saving a recreated sink's 100% default.
+    # Capture the last live value, then stop engines and clients while
+    # preserving PipeWire and the NixOS-managed device graph.
     with LOCK:
         pause_for_audio_stop()
         if not MASTER_RESTORING and not STOPPED.exists():master_volume()
@@ -127,7 +127,6 @@ def stop_audio_services(mark_stopped=True,stop_pipewire=True):
             stop_sonobus()
             stop_bypass()
             stop_camilla(include_stale=True)
-            user_service('stop',SYSTEM_AUDIO_SERVICE)
             airplay(False)
             if stop_pipewire:
                 for unit in ('wireplumber.service','pipewire-pulse.service','pipewire.service',
@@ -141,7 +140,6 @@ def release_audio_for_output_switch():
         STOP_ACK.unlink(missing_ok=True)
         try:
             stop_local_monitor();stop_mpv();stop_sonobus();stop_bypass();stop_camilla(include_stale=True)
-            user_service('stop',SYSTEM_AUDIO_SERVICE)
             airplay(False)
         except Exception as error:
             (STATE/'audio-start-error').write_text(str(error)+'\n')

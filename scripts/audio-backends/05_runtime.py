@@ -221,6 +221,17 @@ def ensure_pipewire_ready():
         if run([exe('wpctl'),'status'],False,3,media_env()).returncode==0:return
         time.sleep(.1)
     raise RuntimeError('PipeWire did not become ready')
+def ensure_system_audio_exposed():
+    # This service exposes the stable CamillaDSP PipeWire sink. NixOS keeps
+    # the service enabled; the backend only verifies/restarts the exposure.
+    if run(['systemctl','--user','is-active','--quiet',SYSTEM_AUDIO_SERVICE],False,5).returncode:
+        user_service('start',SYSTEM_AUDIO_SERVICE)
+    for _ in range(100):
+        result=run([exe('pactl'),'list','short','sinks'],False,3,media_env())
+        if result.returncode==0 and any(line.split('	')[1:2]==['camilladsp'] for line in result.stdout.splitlines()):
+            return
+        time.sleep(.1)
+    raise RuntimeError('Persistent CamillaDSP system-audio sink did not appear')
 AIRPLAY_SERVICES=('nqptp.service','shairport-sync.service')
 def airplay_health():
     result=run(['systemctl','is-active',*AIRPLAY_SERVICES],False,5)
@@ -238,8 +249,9 @@ def airplay(start):
     if start:require_airplay_services()
 def apply_source_services(source,direct=False):
     if source=='airplay':
-        if run(['systemctl','--user','is-active','--quiet',SYSTEM_AUDIO_SERVICE],False,5).returncode==0:
-            user_service('stop',SYSTEM_AUDIO_SERVICE)
+        # Keep the system-audio sink exposed. The NixOS service is neutral and
+        # no longer changes defaults, so it is safe beside AirPlay.
+        ensure_system_audio_exposed()
         if MODES[audio_mode()][1]!='airplay' and alive(rpid(MPVPID),'mpv'):stop_mpv()
         health=airplay_health()
         for service,active in health['services'].items():
