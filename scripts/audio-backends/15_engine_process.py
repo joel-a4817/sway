@@ -1,16 +1,29 @@
-def bridge_playback_pids():
-    """Only identify this user's exact no-filter aplay loopback endpoint."""
+def bridge_endpoint_pids():
+    """Find this user's exact no-filter capture and playback endpoints."""
+    endpoints={("arecord","hw:Loopback,1,0"),("aplay","hw:Loopback,0,1")}
     found=[]
     for entry in Path('/proc').iterdir():
         if not entry.name.isdigit():continue
         try:
             if entry.stat().st_uid!=os.getuid():continue
             args=(entry/'cmdline').read_bytes().split(b'\0')
-            if (args and Path(os.fsdecode(args[0])).name=='aplay' and
-                b'-D' in args and args[args.index(b'-D')+1:args.index(b'-D')+2]==[b'hw:Loopback,0,1']):
-                found.append(int(entry.name))
+            if not args:continue
+            program=Path(os.fsdecode(args[0])).name
+            if b'-D' not in args:continue
+            device=os.fsdecode(args[args.index(b'-D')+1])
+            if (program,device) in endpoints:found.append(int(entry.name))
         except (OSError,ValueError,IndexError):continue
     return found
+
+def bridge_playback_pids():
+    """Compatibility helper for callers interested in the playback endpoint."""
+    result=[]
+    for pid in bridge_endpoint_pids():
+        try:
+            args=Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0')
+            if args and Path(os.fsdecode(args[0])).name=='aplay':result.append(pid)
+        except OSError:pass
+    return result
 
 def stop_bypass():
     pid=rpid(BYPASSPID)
@@ -22,19 +35,24 @@ def stop_bypass():
             os.killpg(pid,signal.SIGTERM)
         except ProcessLookupError:pass
     deadline=time.monotonic()+3
-    while time.monotonic()<deadline:
-        if not bridge_playback_pids():break
-        time.sleep(.05)
-    else:
-        # A stale bridge may outlive its shell; terminate only its exact
-        # per-user playback endpoint, never arbitrary ALSA clients.
-        for child in bridge_playback_pids():
-            try:os.kill(child,signal.SIGTERM)
+    while bridge_endpoint_pids() and time.monotonic()<deadline:time.sleep(.05)
+    # State files can be deleted while the shell and one pipeline child survive.
+    # Terminate both exact endpoints, not just aplay, before starting CamillaDSP.
+    survivors=bridge_endpoint_pids()
+    for child in survivors:
+        try:os.kill(child,signal.SIGTERM)
+        except ProcessLookupError:pass
+    deadline=time.monotonic()+2
+    while bridge_endpoint_pids() and time.monotonic()<deadline:time.sleep(.05)
+    survivors=bridge_endpoint_pids()
+    if survivors:
+        for child in survivors:
+            try:os.kill(child,signal.SIGKILL)
             except ProcessLookupError:pass
-        deadline=time.monotonic()+2
-        while bridge_playback_pids() and time.monotonic()<deadline:time.sleep(.05)
-    if bridge_playback_pids():
-        raise RuntimeError('No-filter playback still owns the CamillaDSP ALSA endpoint')
+        deadline=time.monotonic()+1
+        while bridge_endpoint_pids() and time.monotonic()<deadline:time.sleep(.05)
+    if bridge_endpoint_pids():
+        raise RuntimeError('No-filter bridge still owns CamillaDSP ALSA capture/playback endpoints')
     BYPASSPID.unlink(missing_ok=True)
 
 def select_desktop_sink(name):

@@ -1,42 +1,6 @@
 def _physical_output_route(requested=None):
-    """Resolve a real playback destination; never auto-select software I/O."""
-    topology=audio_topology()
-    physical=[]
-    blocked=('[N/A] ','[INT] ','[MON] ','[LOOP] ','[VIRT] ')
-    def usable(row):
-        label=str(row.get('label') or '')
-        name=str(row.get('name') or '')
-        return (not row.get('internal') and not label.startswith(blocked)
-                and name not in ('camilladsp','')
-                and 'loopback' not in label.casefold()
-                and 'loopback' not in name.casefold())
-    for card in topology.get('cards',[]):
-        if not usable(card):continue
-        for sink in card.get('sinks',[]):
-            if usable(sink):physical.append((card,sink))
-    if not physical:
-        raise RuntimeError('No physical playback output is available')
-    if isinstance(requested,dict) and requested:
-        selected=choose_output_route(requested)
-        match=next(((card,sink) for card,sink in physical
-                    if card.get('name')==selected.get('card')
-                    and sink.get('name')==selected.get('sink')),None)
-        if match is None:
-            raise RuntimeError('Selected output is internal; select a physical playback output')
-        return selected
-    saved=topology.get('saved') or {}
-    if saved:
-        try:
-            selected=choose_output_route(dict(saved,_remembered=True))
-            if any(card.get('name')==selected.get('card') and sink.get('name')==selected.get('sink')
-                   for card,sink in physical):
-                return selected
-        except (OSError,RuntimeError,ValueError):
-            pass
-    # Dynamic fallback: first available non-internal card/sink in topology order.
-    card,sink=physical[0]
-    return choose_output_route({'card':card['name'],'sink':sink['name']})
-
+    """Compatibility entry point for the one authoritative physical resolver."""
+    return choose_output_route(requested)
 def mode_state():
     if STOPPED.exists():
         return {'mode':'stopped','label':'No source selected','source':'',
@@ -82,9 +46,10 @@ def apply_mode(name,password=None,restore_camilla=True,output=None,output_resolv
         if run(['systemctl','--user','is-active','--quiet',SYSTEM_AUDIO_SERVICE],False,5).returncode:
             raise RuntimeError('CamillaDSP desktop sink service is not active')
     if local:
-        selected=_physical_output_route(output if output_resolved else output)
+        selected=output if output_resolved else _physical_output_route(output)
+        # Even pre-resolved callers are revalidated against the live physical set.
+        selected=_physical_output_route(dict(selected,_remembered=True))
         if direct:direct_no_filter(selected)
-        # Profile, route and default-sink changes may invalidate ALSA Loopback.
         # Rebuild the bypass only after the final physical route is stable.
         if selected_filter()==NO_FILTER:
             stop_bypass()

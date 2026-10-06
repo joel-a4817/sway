@@ -80,16 +80,10 @@ def start_runtime(force=False):
         try:saved_route=restore_saved_output_for_startup(saved_route)
         except (RuntimeError,ValueError,OSError) as error:
             print('Saved output pending: '+str(error),flush=True)
+    # Resolve a physical route even when every state file was deleted.
+    startup_output=_physical_output_route(saved_route if saved_route.get('card') else None)
     try:
-        apply_mode(mode,restore_camilla=False,
-                   output=choose_output_route(dict(saved_route,_remembered=True)) if saved_route.get('card') else None)
-    except RuntimeError as error:
-        if not any(message in str(error) for message in ('exposes no available playback sink','Select a playback output','No playback device in PipeWire graph','Playback device unavailable:','Playback sink unavailable:')):raise
-        label,source,local,sono=MODES[mode]
-        apply_source_services(source);stop_local_monitor()
-        if sono:restart_sonobus(None,MODE_POLICIES[mode],normalize=False)
-        else:stop_sonobus()
-        MODE.write_text(mode+'\n')
+        apply_mode(mode,restore_camilla=False,output=startup_output,output_resolved=True)
     except ValueError as error:
         # A saved password-protected group cannot be joined unattended. Keep
         # CamillaDSP and the web UI alive so the password can be entered there.

@@ -30,22 +30,24 @@ def saved_output_route():
     if not isinstance(data,dict):data={}
     return {key:str(data.get(key) or '') for key in ('card','profile','sink','port')}
 
+def _software_playback_object(props):
+    """Classify software-only playback objects from live PipeWire properties."""
+    media_class=str(props.get('media.class') or '').casefold()
+    device_class=str(props.get('device.class') or '').casefold()
+    driver=str(props.get('alsa.driver_name') or '').casefold()
+    factory=str(props.get('factory.name') or '').casefold()
+    virtual=str(props.get('node.virtual') or props.get('device.virtual') or '').casefold()
+    return (media_class.endswith('/virtual') or device_class in ('monitor','virtual')
+            or driver=='snd_aloop' or virtual in ('true','1','yes')
+            or 'support.null-audio-sink' in factory)
+
 def _internal_audio_tag(props):
-    driver=str(props.get('alsa.driver_name') or '').lower()
-    card=str(props.get('alsa.card_name') or '').lower()
-    name=str(props.get('node.name') or '').lower()
-    if driver=='snd_aloop' or card=='loopback' or 'snd_aloop' in name:
-        return '[LOOP] '
-    if name.endswith('.monitor') or str(props.get('device.class') or '').lower()=='monitor':
-        return '[MON] '
+    if str(props.get('alsa.driver_name') or '').casefold()=='snd_aloop':return '[LOOP] '
+    if str(props.get('device.class') or '').casefold()=='monitor':return '[MON] '
     return '[INT] '
 
 def _internal_audio(props):
-    return (str(props.get('alsa.driver_name') or '').lower()=='snd_aloop' or
-            str(props.get('alsa.card_name') or '').lower()=='loopback' or
-            str(props.get('node.name') or '').lower().endswith('.monitor') or
-            str(props.get('device.class') or '').lower()=='monitor' or
-            str(props.get('node.name') or '')=='camilladsp')
+    return _software_playback_object(props)
 
 def _physical_devices(graph):
     return {str(item['id']):item for item in pw_objects('Device',graph)

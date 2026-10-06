@@ -221,45 +221,55 @@ def apply_output_route_stage(card,profile,route,mode=None,origin='web',token=Non
     with LOCK, (audio_start_change() if STOPPED.exists() else media_change()):
         return _stage_local_route(card,profile,route,mode=mode,origin=origin,token=token)
 
+def _physical_output_rows(topology=None):
+    """Return selectable hardware-owned sinks; software nodes never qualify."""
+    topology=topology or audio_topology();rows=[]
+    for card in topology['cards']:
+        if card.get('internal'):continue
+        for sink in card.get('sinks',[]):
+            if sink.get('internal'):continue
+            rows.append((card,sink))
+    return rows
 def choose_output_route(requested=None):
-    topology=audio_topology();cards=topology['cards']
-    if not cards:raise RuntimeError('No playback device in PipeWire graph')
+    """Resolve only a physical playback destination.
+
+    A saved, explicit, PipeWire-default or priority fallback is accepted only
+    when both its owning card and sink are physical.  This single resolver is
+    shared by startup, mode fallback, Media Control and the web server.
+    """
+    topology=audio_topology();physical=_physical_output_rows(topology)
+    if not physical:raise RuntimeError('No physical playback output in PipeWire graph')
     explicit=isinstance(requested,dict) and not requested.get('_remembered')
     requested=requested if isinstance(requested,dict) else dict(topology['saved'],_remembered=True)
     wanted=str(requested.get('sink') or '')
-    sinks=[sink for card in cards for sink in card['sinks']]
-    selected=next((sink for sink in sinks if sink['name']==wanted and
-                   (not requested.get('card') or sink['cardName']==requested['card'])),None)
-    if selected is None:
-        if wanted and explicit:raise RuntimeError('Selected output unavailable: '+wanted)
+    wanted_card=str(requested.get('card') or '')
+    selected_pair=next(((card,sink) for card,sink in physical
+                        if sink['name']==wanted and (not wanted_card or card['name']==wanted_card)),None)
+    if selected_pair is None and wanted and explicit:
+        raise RuntimeError('Selected physical output unavailable: '+wanted)
+    if selected_pair is None and wanted_card:
+        owned=[pair for pair in physical if pair[0]['name']==wanted_card]
+        if owned:selected_pair=owned[0]
+    if selected_pair is None:
         try:default=pw_default()
         except RuntimeError:default=''
-        selected=next((sink for sink in sinks if sink['name']==default and (not requested.get('card') or sink['cardName']==requested['card'])),None)
-        if selected is None:
-            # Startup may have several HDMI/speaker sinks while the configured
-            # default is the virtual CamillaDSP sink. Prefer the saved device;
-            # never silently choose an unrelated card.
-            preferred=str(requested.get('card') or '')
-            candidates=[x for x in sinks if x.get('cardName')==preferred] if preferred else sinks
-            if len(candidates)==1:selected=candidates[0]
-            elif not explicit and candidates:
-                graph=pw_graph()
-                by_name={pw_props(x).get('node.name'):pw_props(x) for x in pw_objects('Node',graph)}
-                def priority(row):
-                    props=by_name.get(row['name'],{})
-                    try:return int(props.get('priority.session') or 0)
-                    except (ValueError,TypeError):return 0
-                ranked=sorted(candidates,key=priority,reverse=True)
-                if len(ranked)==1 or priority(ranked[0])>priority(ranked[1]):selected=ranked[0]
-            if selected is None:raise RuntimeError('Select a playback output')
-    owner=sink_owner(selected,cards)
-    if owner is None:raise RuntimeError('Selected sink has no output-device owner')
-    if requested.get('card') and requested['card']!=owner['name'] and explicit:
-        raise RuntimeError('Selected output belongs to a different device')
-    return {'card':owner['name'],'profile':str(owner['activeProfile']),
-            'sink':selected['name'],'port':str(requested.get('port') or ''),
-            'label':selected['label'],'sinkCard':owner['name'],
-            'sinkProfile':str(owner['activeProfile'])}
+        selected_pair=next((pair for pair in physical if pair[1]['name']==default),None)
+    if selected_pair is None:
+        graph=pw_graph()
+        by_name={pw_props(x).get('node.name'):pw_props(x) for x in pw_objects('Node',graph)}
+        def priority(pair):
+            props=by_name.get(pair[1]['name'],{})
+            try:return int(props.get('priority.session') or 0)
+            except (ValueError,TypeError):return 0
+        # Stable physical fallback. Topology order breaks equal priorities;
+        # software-only rows never enter this list.
+        selected_pair=sorted(physical,key=priority,reverse=True)[0]
+    owner,selected=selected_pair
+    route={'card':owner['name'],'profile':str(owner['activeProfile']),
+           'sink':selected['name'],'port':str(requested.get('port') or ''),
+           'label':selected['label'],'sinkCard':owner['name'],
+           'sinkProfile':str(owner['activeProfile'])}
+    return route
 
 def activate_output(request,mode='laptop_laptop',password=None,origin='web',token=None):
     if not isinstance(request,dict):raise ValueError('Invalid output request')
