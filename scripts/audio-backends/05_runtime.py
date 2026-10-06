@@ -159,10 +159,6 @@ def ensure():
     STATE.mkdir(parents=True,exist_ok=True)
     SWITCH_STATE.mkdir(parents=True,exist_ok=True)
     MUSIC.mkdir(parents=True,exist_ok=True)
-    # Both launchers must be safe on a clean account. Persist only the neutral
-    # logical master here; topology, filter and mode remain live/default driven.
-    if not MASTER_VOLUME.exists():
-        atomic(MASTER_VOLUME,'100.00%\n')
     legacy=HOME/'.local/state/sway/audio'
     old_server=legacy/'camilladsp-webremote'
     # One-time migration. Never resurrect a deliberately cleared stop marker.

@@ -268,12 +268,13 @@ def media_change():
         return
     global MASTER_RESTORING
     pause_for_normalization()
+    saved_master=save_master_after_pause()
     previous_restoring=MASTER_RESTORING
     MASTER_RESTORING=True
     MEDIA_TRANSACTION.active=True
     try:
         yield
-        if not STOPPED.exists():normalize_audio_volumes()
+        if not STOPPED.exists():normalize_audio_volumes(saved_master)
     finally:
         try:pause_for_normalization()
         finally:

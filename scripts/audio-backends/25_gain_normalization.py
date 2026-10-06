@@ -28,19 +28,30 @@ def pause_for_normalization():
         except (OSError,RuntimeError,subprocess.TimeoutExpired):
             # An unsupported or vanished player must not abort a working route.
             continue
+def save_master_after_pause():
+    # This is the only transaction snapshot point: media is paused and no
+    # route/filter/input/output mutation has run yet.
+    value=float(master_volume())
+    if not math.isfinite(value) or not 0<=value<=100:
+        raise RuntimeError('Current master volume is outside 0-100%')
+    MASTER_VOLUME.parent.mkdir(parents=True,exist_ok=True)
+    atomic(MASTER_VOLUME,f'{value:.2f}%\n')
+    return value
+
 def pause_for_audio_stop():
     ensure()
     # Preserve the queue before pausing; restoration must remain paused.
     save_mpv_queue(force=True)
     pause_for_normalization()
+    return save_master_after_pause()
 
 @contextmanager
 def audio_start_change():
-    pause_for_audio_stop()
+    saved_master=pause_for_audio_stop()
     MEDIA_TRANSACTION.starting=True
     try:
         yield
-        if not STOPPED.exists():normalize_audio_volumes()
+        if not STOPPED.exists():normalize_audio_volumes(saved_master)
     finally:
         try:pause_for_normalization()
         finally:MEDIA_TRANSACTION.starting=False
@@ -103,7 +114,7 @@ def _alsa_zero_raw_value(card,numid):
         finally:lib.snd_ctl_elem_id_free(ident)
     finally:lib.snd_ctl_close(ctl)
 
-def normalize_audio_volumes():
+def normalize_audio_volumes(saved_master):
     # Gain transaction only. Player pausing belongs to the caller.
     errors=[]
     try:cards=Path('/proc/asound/cards').read_text()
@@ -167,33 +178,22 @@ def normalize_audio_volumes():
     # Never restore the master if any ALSA gain failed verification.
     if errors:raise RuntimeError('Audio normalization incomplete: '+'; '.join(errors[:8])+
                                  (f'; {len(errors)-8} more' if len(errors)>8 else ''))
-    # The only PipeWire write in normalization is the logical master, last.
-    # First startup has no persisted master yet. Use the gain subsystem's safe
-    # restoring fallback and persist it before applying it to any live path.
-    try:
-        try:
-            value=float(MASTER_VOLUME.read_text().strip().rstrip('%'))
-            if not math.isfinite(value) or not 0<=value<=100:raise ValueError('saved master outside 0-100%')
-        except (OSError,ValueError):
-            value=master_volume()
-            MASTER_VOLUME.parent.mkdir(parents=True,exist_ok=True)
-            atomic(MASTER_VOLUME,f'{value:.2f}%\n')
-        target=getattr(MEDIA_TRANSACTION,'stage_sink',None) or master_sink()
-        if target=='@DEFAULT_SINK@':target=pw_default()
-        inactive=saved_output_route().get('sink') if target=='camilladsp' else 'camilladsp'
-        if inactive and inactive!=target:
-            try:inactive_node=pw_sink(inactive)
-            except RuntimeError:inactive_node=None
-            if inactive_node is not None:
-                unity=run([exe('wpctl'),'set-volume',str(inactive_node['id']),'100%'],False,8,media_env())
-                if unity.returncode:raise RuntimeError(unity.stderr.strip() or 'Could not set inactive playback sink to unity')
-        result=run([exe('wpctl'),'set-volume',str(pw_sink(target)['id']),f'{value:.2f}%'],False,8,media_env())
-        if result.returncode:raise RuntimeError(result.stderr.strip() or 'Could not restore saved master')
-        sync_mpv_for_audio_path(value)
-    except (RuntimeError,OSError,ValueError,subprocess.TimeoutExpired) as error:
-        errors.append('saved master: '+str(error))
-    if errors:raise RuntimeError('Audio normalization incomplete: '+'; '.join(errors[:8])+
-                                 (f'; {len(errors)-8} more' if len(errors)>8 else ''))
+    value=float(saved_master)
+    if not math.isfinite(value) or not 0<=value<=100:
+        raise RuntimeError('Saved master volume is outside 0-100%')
+    # Normalize every non-master PipeWire gain before restoring the master.
+    target=getattr(MEDIA_TRANSACTION,'stage_sink',None) or master_sink()
+    if target=='@DEFAULT_SINK@':target=pw_default()
+    inactive=saved_output_route().get('sink') if target=='camilladsp' else 'camilladsp'
+    if inactive and inactive!=target:
+        try:inactive_node=pw_sink(inactive)
+        except RuntimeError:inactive_node=None
+        if inactive_node is not None:
+            unity=run([exe('wpctl'),'set-volume',str(inactive_node['id']),'100%'],False,8,media_env())
+            if unity.returncode:raise RuntimeError(unity.stderr.strip() or 'Could not set inactive playback sink to unity')
+    # Restore is deliberately the final gain operation. Nothing may alter gain
+    # after this call returns.
+    apply_master_volume(value,normalize_sinks=False)
     return {'masterVolume':value}
 def set_master_volume(value):
     global MASTER_WRITE_UNTIL

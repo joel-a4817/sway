@@ -164,10 +164,10 @@ def cleanup():
     # available to Media Control after selecting the clean laptop mode.
     if STOPPED.exists():return
     with LOCK:
-        pause_for_audio_stop()
+        saved_master=pause_for_audio_stop()
         try:
             apply_mode('laptop_laptop')
-            normalize_audio_volumes()
+            normalize_audio_volumes(saved_master)
         except Exception as error:
             print('Could not restore laptop audio during host shutdown: '+str(error),flush=True)
 def sonobus_sway_windows(tree):
@@ -216,7 +216,7 @@ def main():
     SWITCH_STATE.mkdir(parents=True,exist_ok=True)
     startup_lock=(SWITCH_STATE/'media-control.lock').open('a+')
     fcntl.flock(startup_lock,fcntl.LOCK_EX)
-    pause_for_audio_stop()
+    saved_master=pause_for_audio_stop()
     legacy_pid=HOME/'.local/state/sway/audio/camilladsp-webremote/web-server.pid'
     previous=rpid(legacy_pid)
     if previous and previous!=me and alive(previous):
@@ -254,7 +254,7 @@ def main():
     watcher_stop=threading.Event()
     threading.Thread(target=watch_sonobus_workspace,args=(watcher_stop,),daemon=True).start()
     start_runtime()
-    if not STOPPED.exists():normalize_audio_volumes()
+    if not STOPPED.exists():normalize_audio_volumes(saved_master)
     threading.Thread(target=watch_master_volume,args=(watcher_stop,),daemon=True).start()
     threading.Thread(target=watch_output_preview,args=(watcher_stop,),daemon=True).start()
     server=S(('0.0.0.0',PORT),H);SERVERPID.write_text(str(me)+'\n');STOP_CAP.write_text(str(me)+'\n')
@@ -409,8 +409,9 @@ def topology_cli():
         if len(sys.argv)==2 and sys.argv[1]=='--cancel-output-preview':
             print(json.dumps(cancel_output_preview('cli',token=os.environ.get('MEDIA_CONTROL_PICKER_PID')),ensure_ascii=False));return
         if len(sys.argv)==2 and sys.argv[1]=='--interactive-input':
+            saved_master=pause_for_audio_stop()
             try:
-                result=select_input_interactive(finalize=lambda:normalize_audio_volumes() if not STOPPED.exists() else None)
+                result=select_input_interactive(finalize=lambda:normalize_audio_volumes(saved_master) if not STOPPED.exists() else None)
                 print(json.dumps(result,ensure_ascii=False));return
             finally:pause_for_normalization()
         if len(sys.argv)==3 and sys.argv[1]=='--camera-restore-clients':

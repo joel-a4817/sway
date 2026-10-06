@@ -171,11 +171,13 @@ def apply_master_volume(value,normalize_sinks=True):
             if not target or target==name or target==inactive:continue
             result=run(['__wp_control__','set-sink-volume',target,'100%'],False,8,media_env())
             if result.returncode:raise RuntimeError(f'Could not set {target} to 100%: {result.stderr.strip()}')
-    result=run(['__wp_control__','set-sink-volume',name,f'{value:.2f}%'],False,8,media_env())
-    if result.returncode:raise RuntimeError(f'Could not set {name} to {value:.2f}%: {result.stderr.strip()}')
-    sync_mpv_for_audio_path(value)
+    # CamillaDSP Main is a normalization stage, so set it before restoring
+    # the logical master. The master sink and direct-ALSA MPV are restored last.
     if alive(rpid(CAMPID),'camilladsp'):
         if selected_filter()!=NO_FILTER:wait_for_camilla_config(profile(selected_filter()))
         try:camilla_command({'SetVolume':0.0})
         except (OSError,ValueError) as error:raise RuntimeError(f'Could not set CamillaDSP Main to unity: {error}') from error
+    result=run(['__wp_control__','set-sink-volume',name,f'{value:.2f}%'],False,8,media_env())
+    if result.returncode:raise RuntimeError(f'Could not set {name} to {value:.2f}%: {result.stderr.strip()}')
+    sync_mpv_for_audio_path(value)
 
