@@ -1,8 +1,8 @@
 AUDIO_STOPPED_FILE="$HOME_DIR/.local/state/sway/camilladsp-webremote/audio-stopped"
 if [[ -e "$AUDIO_STOPPED_FILE" ]]; then
-    AUDIO_TOGGLE_LABEL='Start audio'
+    AUDIO_TOGGLE_LABEL='Start media services'
 else
-    AUDIO_TOGGLE_LABEL='Stop audio'
+    AUDIO_TOGGLE_LABEL='Stop media services'
 fi
 
 ARGS=(-t warning -y overlay -m 'Media control')
@@ -64,11 +64,11 @@ case "$selected" in
     }
     printf '%s\n' "$toggle_result" >>"$ACTION_LOG"
     if [[ "$(jq -r 'if has("stopped") then (.stopped|tostring) else empty end' <<<"$toggle_result" 2>/dev/null)" == 'true' ]]; then
-        wrap_line 'Audio stopped.'
+        wrap_line 'Media services stopped.'
     elif [[ "$(jq -r 'if has("stopped") then (.stopped|tostring) else empty end' <<<"$toggle_result" 2>/dev/null)" == 'false' ]]; then
-        wrap_line 'Audio started.'
+        wrap_line 'Media services started.'
     else
-        wrap_line 'Audio changed state, but the resulting state was not reported.' >&2
+        wrap_line 'Media services changed state, but the resulting state was not reported.' >&2
         exit 1
     fi
     exit 0 ;;
@@ -128,7 +128,7 @@ fi
 export MEDIA_CONTROL_PICKER_PID=$$
 OUTPUT_PREVIEW_ACTIVE=1
 # Refresh after the Swaynag selection, without changing the live graph.
-TOPOLOGY_JSON="$(output_topology)" || { echo "Start audio services before choosing a playback output." >&2; exit 1; }
+TOPOLOGY_JSON="$(output_topology)" || { echo "Start media services before choosing a playback output." >&2; exit 1; }
 # Device selection is a real output apply, exactly like the web picker.
 # Reuse the active profile if usable, otherwise the remembered usable profile,
 # then the first exposed usable profile. The paired controller owns pause and

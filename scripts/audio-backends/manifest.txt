@@ -1,6 +1,5 @@
 00_context.py
 05_runtime.py
-06_physical_readiness.py
 10_engine_filters.py
 15_engine_process.py
 20_gain_volume.py

@@ -1217,7 +1217,7 @@ body {
       Restart VNC
      </button>
      <button class="action accent-red" id="audio-toggle" type="button">
-      Stop audio
+      Stop media services
      </button>
     </div>
    </section>
@@ -1836,7 +1836,7 @@ document.querySelectorAll('[data-cmd]').forEach(button=>button.onclick=async()=>
 $('#repeat').onclick=async()=>{try{const data=await api('/api/player');await post('/api/player/repeat',{mode:{off:'all',all:'one',one:'off'}[data.repeat]||'off'});await pollLocal()}catch(error){note(error.message,true)}};
 $('#shuffle').onclick=async()=>{try{await busy($('#shuffle'),()=>post('/api/player/shuffle'),'Shuffling remaining queue…','Remaining queue shuffled.',true)}catch(error){note(error.message,true)}};
 for(const [id,command] of [['system-previous','previous'],['system-toggle','toggle'],['system-next','next']])$('#'+id).onclick=async()=>{if(command!=='toggle'){const media=state.system;media.skipPending=true;media.skipFrom=media.trackKey;media.skipStarted=performance.now();media.skipWarned=false;resetSystemPosition()}else{state.system.skipPending=false}try{await busy($('#'+id),()=>post('/api/system-media',{command}),'…',null,false);await pollSystem(true)}catch(error){if(command!=='toggle')systemPositionError('System media skip failed: '+(error?.message||String(error)));else note(error.message,true)}};
-$('#audio-toggle').onclick=async()=>{try{await busy($('#audio-toggle'),()=>post('/api/audio-toggle'),'Switching audio services…','Audio services updated',true);await refreshStatic()}catch(error){note(error.message,true)}};
+$('#audio-toggle').onclick=async()=>{try{await busy($('#audio-toggle'),()=>post('/api/audio-toggle'),'Switching media services…','Media services updated',true);await refreshStatic()}catch(error){note(error.message,true)}};
 $('#restart-sonobus').onclick=()=>busy($('#restart-sonobus'),()=>post('/api/restart-sonobus'),'Restarting SonoBus…','SonoBus restarted',true).then(refreshVolatile).catch(error=>note(error.message,true));
 $('#restart-airplay').onclick=()=>busy($('#restart-airplay'),()=>post('/api/restart-airplay'),'Restarting AirPlay…','AirPlay restarted',true).then(refreshVolatile).catch(error=>note(error.message,true));
 $('#restart-vnc').onclick=()=>busy($('#restart-vnc'),()=>post('/api/restart-vnc'),'Restarting VNC…','VNC restarted').catch(error=>note(error.message,true));
@@ -1890,7 +1890,7 @@ function renderPlaylistSnapshot(playlists){
 }
 function updatePlaylistCover(player){if(!player?.playlist||!player.playing)return;for(const button of document.querySelectorAll('#playlists [data-playlist-name]')){if(button.dataset.playlistName!==player.playlist)continue;const old=button.querySelector('.item-cover .cover-art');if(!old)continue;const url=player.cover||'';if(url&&old.tagName==='IMG'&&old.getAttribute('src')===url)return;if(!url&&old.classList.contains('cover-fallback'))return;old.replaceWith(coverNode(url))}}
 function renderVolatile(data){
-  $('#audio-toggle').textContent=data.mode.mode==='stopped'?'Start audio':'Stop audio';
+  $('#audio-toggle').textContent=data.mode.mode==='stopped'?'Start media services':'Stop media services';
   if(data.awayDisplay){const button=$('#away-display-toggle');button.textContent=data.awayDisplay.displayOff?'Show lock screen':data.awayDisplay.away?'Unlock desktop':'Away and display off';button.setAttribute('aria-pressed',String(!!data.awayDisplay.active));button.classList.toggle('mode-active',!!data.awayDisplay.active)}
   if(data.profiles)renderActiveProfile(data.profiles);
   renderSonobusStatus(data.mode,data.groups);
