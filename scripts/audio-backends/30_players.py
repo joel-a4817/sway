@@ -126,10 +126,28 @@ def restore_mpv_queue():
 def stop_mpv():
     save_mpv_queue(force=True)
     killpidfile(MPVPID,'mpv');MPVSOCK.unlink(missing_ok=True)
+def mpv_output_args():
+    # Direct No-filter Laptop-only playback has no consumer on camilladsp_input.
+    # Follow the physical PipeWire default in that one path; every filtered or
+    # shared route continues to use the stable direct-ALSA DSP ingress.
+    if _direct_no_filter_path():
+        return ['--ao=pipewire']
+    return ['--ao=alsa','--audio-device=alsa/camilladsp_input',
+            '--audio-samplerate=96000','--audio-channels=stereo','--audio-format=s32']
+def mpv_output_matches(pid=None):
+    pid=rpid(MPVPID) if pid is None else pid
+    if not alive(pid,'mpv'):return False
+    try:
+        args={part.decode('utf-8','replace') for part in Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0') if part}
+    except OSError:return False
+    wanted=mpv_output_args()
+    return all(argument in args for argument in wanted) and not (
+        wanted==['--ao=pipewire'] and '--audio-device=alsa/camilladsp_input' in args)
 def ensure_mpv():
-    if alive(rpid(MPVPID),'mpv') and MPVSOCK.exists():return
+    pid=rpid(MPVPID)
+    if alive(pid,'mpv') and MPVSOCK.exists() and mpv_output_matches(pid):return
     stop_mpv();log=MPVLOG.open('ab',buffering=0)
-    cmd=[exe('mpv'),'--idle=yes','--no-video','--no-terminal','--keep-open=no','--ao=alsa','--audio-device=alsa/camilladsp_input','--audio-samplerate=96000','--audio-channels=stereo','--audio-format=s32',f'--input-ipc-server={MPVSOCK}',f'--volume={(master_volume() if selected_filter()!=NO_FILTER and alive(rpid(CAMPID),'camilladsp') else 100.0):.2f}','--volume-max=100']
+    cmd=[exe('mpv'),'--idle=yes','--no-video','--no-terminal','--keep-open=no',*mpv_output_args(),f'--input-ipc-server={MPVSOCK}',f'--volume={(master_volume() if _shared_system_path() else 100.0):.2f}','--volume-max=100']
     try:q=subprocess.Popen(cmd,stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
     finally:log.close()
     MPVPID.write_text(f'{q.pid}\n');deadline=time.monotonic()+5

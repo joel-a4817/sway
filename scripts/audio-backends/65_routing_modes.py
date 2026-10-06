@@ -56,6 +56,7 @@ def mode_state():
 def apply_mode(name,password=None,restore_camilla=True,output=None,output_resolved=False):
     if name not in MODES:raise ValueError('Invalid audio mode')
     label,source,local,sono=MODES[name];policy=MODE_POLICIES[name]
+    mpv_was_running=alive(rpid(MPVPID),'mpv')
     if STOPPED.exists():ensure_pipewire_ready()
     direct=(selected_filter()==NO_FILTER and source=='system' and not sono and local)
     if selected_filter()==NO_FILTER:
@@ -106,7 +107,9 @@ def apply_mode(name,password=None,restore_camilla=True,output=None,output_resolv
     elif sonopids():stop_sonobus()
     MODE.write_text(name+'\n')
     STOPPED.unlink(missing_ok=True)
-    if source=='system' and not direct and QUEUE_FILE.is_file() and not alive(rpid(MPVPID),'mpv'):
+    if source=='system' and (mpv_was_running or QUEUE_FILE.is_file()):
+        # AO selection is fixed at MPV startup. Recreate MPV only when the
+        # active graph needs a different backend; queue restoration stays paused.
         try:ensure_mpv()
         except (OSError,RuntimeError):pass
     return mode_state()
