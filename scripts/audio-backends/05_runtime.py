@@ -234,6 +234,16 @@ def ensure_system_audio_exposed():
             return
         time.sleep(.1)
     raise RuntimeError('Persistent CamillaDSP system-audio sink did not appear')
+def disable_system_audio_exposure():
+    """Remove the virtual desktop sink before committing direct playback."""
+    if run(['systemctl','--user','is-active','--quiet',SYSTEM_AUDIO_SERVICE],False,5).returncode==0:
+        user_service('stop',SYSTEM_AUDIO_SERVICE)
+    deadline=time.monotonic()+5
+    while time.monotonic()<deadline:
+        try:pw_sink('camilladsp')
+        except RuntimeError:return
+        time.sleep(.1)
+    raise RuntimeError('CamillaDSP system-audio sink remained exposed after service stop')
 AIRPLAY_SERVICES=('nqptp.service','shairport-sync.service')
 def airplay_health():
     result=run(['systemctl','is-active',*AIRPLAY_SERVICES],False,5)
@@ -265,11 +275,9 @@ def apply_source_services(source,direct=False):
         if any(run(['systemctl','is-active','--quiet',service],False,5).returncode==0
                for service in AIRPLAY_SERVICES):airplay(False)
         if direct:
-            # Direct No-filter playback does not use the virtual DSP desktop
-            # sink. Leaving its service active lets WirePlumber recreate or
-            # reclaim CamillaDSP_System_Audio after the physical commit.
-            if run(['systemctl','--user','is-active','--quiet',SYSTEM_AUDIO_SERVICE],False,5).returncode==0:
-                user_service('stop',SYSTEM_AUDIO_SERVICE)
+            # Direct No-filter playback must remove the virtual sink before
+            # selecting and persisting the physical baseline.
+            disable_system_audio_exposure()
         elif run(['systemctl','--user','is-active','--quiet',SYSTEM_AUDIO_SERVICE],False,5).returncode:
             user_service('start',SYSTEM_AUDIO_SERVICE)
     else:raise ValueError('Invalid audio source')

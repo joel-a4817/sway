@@ -84,10 +84,8 @@ def start_runtime(force=False):
     startup_output=_physical_output_route(saved_route if saved_route.get('card') else None)
     try:
         if saved==NO_FILTER and not saved_route.get('card'):
-            # A clean state has one explicit baseline: No filter plus a live
-            # physical output. Apply it before any virtual DSP sink can become
-            # a persistent default merely because its service was exposed.
-            startup_output=apply_physical_no_filter_fallback(startup_output)
+            # Server clean-start uses the same baseline repair as Media Control.
+            startup_output=ensure_physical_audio_baseline(force=True)['route']
         else:
             apply_mode(mode,restore_camilla=False,output=startup_output,output_resolved=True)
     except RuntimeError as error:
@@ -294,6 +292,11 @@ def topology_cli():
         if len(sys.argv)==2 and sys.argv[1]=='--audio-toggle':
             print(json.dumps(toggle_audio_services()))
             return
+        if len(sys.argv)==2 and sys.argv[1]=='--ensure-audio-baseline':
+            if alive(rpid(SERVERPID)) and rpid(SERVERPID)!=os.getpid():
+                data=local_api_post('/api/ensure-audio-baseline',timeout=90,error='Audio baseline repair failed')
+            else:data=ensure_physical_audio_baseline()
+            print(json.dumps(data,ensure_ascii=False));return
         if len(sys.argv)==3 and sys.argv[1]=='--restart-service':
             name=sys.argv[2]
             paths={'1':'/api/restart-camilladsp','2':'/api/restart-sonobus',

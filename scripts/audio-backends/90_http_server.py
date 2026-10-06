@@ -55,6 +55,7 @@ class H(BaseHTTPRequestHandler):
             elif p=='/api/groups/save':r=save_group(d)
             elif p=='/api/select':r=switch_profile(d.get('profile'))
             elif p=='/api/audio-toggle':r=toggle_audio_services()
+            elif p=='/api/ensure-audio-baseline':r=ensure_physical_audio_baseline()
             elif p=='/api/restart-sonobus':r=restart_sonobus_action(d.get('password'))
             elif p=='/api/restart-airplay':r=restart_airplay()
             elif p=='/api/restart-vnc':r=restart_vnc()

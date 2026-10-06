@@ -155,7 +155,14 @@ trap 'exit 131' QUIT
 
 TOPOLOGY_SCRIPT="$HOME_DIR/.config/sway/scripts/network/camilladsp-server-sonobus.py"
 [[ -f "$TOPOLOGY_SCRIPT" ]] || { echo "Missing paired server: $TOPOLOGY_SCRIPT" >&2; exit 1; }
-# Opening Media Control is read-only; actions perform their own required transactions.
+# A deleted baseline is repaired through the same backend used by server startup.
+if [[ ! -s "$REMOTE_STATE/active-profile" || ! -s "$REMOTE_STATE/mode" || ! -s "$REMOTE_STATE/local-output-route.json" ]]; then
+    python3 "$TOPOLOGY_SCRIPT" --ensure-audio-baseline >>"$ACTION_LOG" 2>&1 || {
+        cat "$ACTION_LOG" >&2
+        exit 1
+    }
+fi
+# Once a baseline exists, opening Media Control is read-only.
 output_topology() { python3 "$TOPOLOGY_SCRIPT" --output-topology; }
 run_quiet_action() {
     local output status

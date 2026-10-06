@@ -14,6 +14,23 @@ def apply_physical_no_filter_fallback(output=None):
     MODE.write_text('laptop_laptop\n')
     return selected
 
+def audio_baseline_missing():
+    route=saved_output_route()
+    return (not ACTIVE.is_file() or not MODE.is_file()
+            or not route.get('card') or not route.get('sink'))
+def ensure_physical_audio_baseline(force=False):
+    """One clean-state baseline shared by server and Media Control."""
+    with LOCK:
+        if STOPPED.exists():return {'repaired':False,'stopped':True}
+        if not force and not audio_baseline_missing():
+            return {'repaired':False,'route':saved_output_route(),'mode':mode_state()}
+        ensure_pipewire_ready()
+        route=apply_physical_no_filter_fallback(None)
+        if selected_filter()!=NO_FILTER or audio_mode()!='laptop_laptop':
+            raise RuntimeError('Clean-state audio baseline did not persist No filter laptop mode')
+        if saved_output_route().get('sink')!=route['sink'] or pw_default()!=route['sink']:
+            raise RuntimeError('Clean-state audio baseline did not persist the physical default')
+        return {'repaired':True,'route':route,'mode':mode_state()}
 def mode_state():
     if STOPPED.exists():
         return {'mode':'stopped','label':'No source selected','source':'',
