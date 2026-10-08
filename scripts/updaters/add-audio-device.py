@@ -54,6 +54,8 @@ DIFFUSE_FIELD_EQ = AUDIO_ROOT / 'diffuse_field_eq_for_in_ear_headphones.wav'
 OE_ADDITIONAL_COMP = AUDIO_ROOT / 'additional_comp_for_over_&_on_ear_headphones.wav'
 H5_WEIGHTED = AUDIO_ROOT / 'H5/2945-weighted-average/H5_2945_Weighted_Power_Average_UNNORMALIZED.wav'
 H5_MATRIX = AUDIO_ROOT / 'H5/2945-diffuse-matrix/H5_2945_Diffuse_Field_Matrix_4ch_FLOAT.wav'
+OE_BODY_WEIGHTED = AUDIO_ROOT / 'OE-body-field/Generic_OE_Body_Weighted_Average_2ch_FLOAT.wav'
+OE_BODY_MATRIX = AUDIO_ROOT / 'OE-body-field/Generic_OE_Body_Diffuse_Matrix_4ch_FLOAT.wav'
 
 HPCFS = (
     {
@@ -238,12 +240,13 @@ def make_stereo_profile(index, item, hpcf_path, preamp_db):
     label = str(item['label']).strip()
     filename = f'{slugify(label)}-{kind.casefold()}.yml'
     title = yaml_string(f'{label} ({kind})')
-    h5 = yaml_string(H5_WEIGHTED)
+    field_path = OE_BODY_WEIGHTED if kind == 'OE' else H5_WEIGHTED
+    h5 = yaml_string(field_path)
     hpcf = yaml_string(hpcf_path)
     loudness_reference, loudness_low, loudness_high, _ = loudness_settings(item)
     config = f'''---
 title: {title}
-description: "H5 2945-point weighted stereo average with anechoic headphone correction; no crossfeed"
+description: "Kind-appropriate diffuse-field stereo average with anechoic headphone correction; no crossfeed"
 devices:
   samplerate: {SAMPLE_RATE}
   chunksize: 1024
@@ -314,12 +317,13 @@ def make_crossfeed_profile(index, item, hpcf_path, preamp_db):
     label = str(item['label']).strip()
     filename = f'{slugify(label)}-{kind.casefold()}-crossfeed.yml'
     title = yaml_string(f'{label} ({kind}) - Crossfeed')
-    matrix = yaml_string(H5_MATRIX)
+    matrix_path = OE_BODY_MATRIX if kind == 'OE' else H5_MATRIX
+    matrix = yaml_string(matrix_path)
     hpcf = yaml_string(hpcf_path)
     loudness_reference, loudness_low, loudness_high, _ = loudness_settings(item)
     config = f'''---
 title: {title}
-description: "H5 2945-point diffuse-field 2x2 matrix with anechoic headphone correction"
+description: "Kind-appropriate diffuse-field 2x2 matrix with anechoic headphone correction"
 devices:
   samplerate: {SAMPLE_RATE}
   chunksize: 1024
@@ -478,6 +482,12 @@ def rebuild_all_filters():
         raise SystemExit(f'Missing H5 weighted stereo average: {H5_WEIGHTED}')
     if not H5_MATRIX.is_file():
         raise SystemExit(f'Missing H5 diffuse matrix: {H5_MATRIX}')
+    needs_ie = any(str(item.get('kind', '')).upper() == 'IE' for item in HPCFS)
+    needs_oe = any(str(item.get('kind', '')).upper() == 'OE' for item in HPCFS)
+    if needs_oe and not OE_BODY_WEIGHTED.is_file():
+        raise SystemExit(f'Missing generic OE body-field stereo average: {OE_BODY_WEIGHTED}')
+    if needs_oe and not OE_BODY_MATRIX.is_file():
+        raise SystemExit(f'Missing generic OE body-field matrix: {OE_BODY_MATRIX}')
     if not DIFFUSE_FIELD_EQ.is_file():
         raise SystemExit(f'Missing diffuse-field EQ: {DIFFUSE_FIELD_EQ}')
     if not HPCF_DIFFUSE.is_dir():
@@ -500,7 +510,6 @@ def rebuild_all_filters():
         devices.append((item, source, anechoic_path(item)))
 
     diffuse_eq, diffuse_rate = sf.read(DIFFUSE_FIELD_EQ, always_2d=True, dtype='float64')
-    needs_oe = any(str(item.get('kind', '')).upper() == 'OE' for item, _, _ in devices)
     if needs_oe and not OE_ADDITIONAL_COMP.is_file():
         raise SystemExit(f'Missing over/on-ear additional compensation: {OE_ADDITIONAL_COMP}')
     oe_comp = oe_comp_rate = None
@@ -521,8 +530,11 @@ def rebuild_all_filters():
         validation_generated = []
         for index, (item, staged, destination) in enumerate(staged_hpcfs, 1):
             _, _, _, loudness_headroom = loudness_settings(item)
-            stereo_gain = stereo_cascade_gain(H5_WEIGHTED, staged, loudness_headroom)
-            crossfeed_gain = matrix_cascade_gain(H5_MATRIX, staged, loudness_headroom)
+            kind = str(item.get('kind', '')).upper()
+            stereo_field = OE_BODY_WEIGHTED if kind == 'OE' else H5_WEIGHTED
+            matrix_field = OE_BODY_MATRIX if kind == 'OE' else H5_MATRIX
+            stereo_gain = stereo_cascade_gain(stereo_field, staged, loudness_headroom)
+            crossfeed_gain = matrix_cascade_gain(matrix_field, staged, loudness_headroom)
             generated.extend((
                 make_stereo_profile(index, item, destination, stereo_gain),
                 make_crossfeed_profile(index, item, destination, crossfeed_gain),
