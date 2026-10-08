@@ -60,14 +60,14 @@ HPCFS = (
         'kind': 'IE',
     },
     {
-        'file': 'CMF_by_Nothing_Buds_Pro_2_Sample_A.wav',
-        'label': 'CMF Buds Pro 2',
-        'kind': 'IE',
-    },
-    {
         'file': 'HyperX_Cloud_III_Average.wav',
         'label': 'HyperX Cloud III',
         'kind': 'OE',
+    },
+    {
+        'file': 'CMF_by_Nothing_Buds_Pro_2_Sample_A.wav',
+        'label': 'CMF Buds Pro 2',
+        'kind': 'IE',
     },
 )
 
