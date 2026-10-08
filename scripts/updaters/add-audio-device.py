@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Manage diffuse-field HpCF devices and rebuild H5 CamillaDSP profiles."""
 import ast
+import math
 import re
 import numpy as np
 import soundfile as sf
@@ -52,6 +53,7 @@ HPCF_ANECHOIC = AUDIO_ROOT / 'hpcfs-anechoic'
 DIFFUSE_FIELD_EQ = AUDIO_ROOT / 'diffuse_field_eq_for_in_ear_headphones.wav'
 OE_ADDITIONAL_COMP = AUDIO_ROOT / 'additional_comp_for_over_&_on_ear_headphones.wav'
 H5_WEIGHTED = AUDIO_ROOT / 'H5/2945-weighted-average/H5_2945_Weighted_Power_Average_UNNORMALIZED.wav'
+H5_MATRIX = AUDIO_ROOT / 'H5/2945-diffuse-matrix/H5_2945_Diffuse_Field_Matrix_4ch_FLOAT.wav'
 
 HPCFS = (
     {
@@ -138,22 +140,45 @@ def make_anechoic_hpcf(diffuse_hpcf, destination, diffuse_eq, diffuse_rate,
     sf.write(destination, output, rate, subtype='FLOAT')
     return destination
 
-def cascade_gain(h5_path, hpcf_path):
+def stereo_cascade_gain(h5_path, hpcf_path):
+    """Strict no-clipping gain for independent stereo H5 and HpCF paths."""
     h5, h5_rate = sf.read(h5_path, always_2d=True, dtype='float64')
     hpcf, hpcf_rate = sf.read(hpcf_path, always_2d=True, dtype='float64')
     if h5_rate != SAMPLE_RATE or hpcf_rate != SAMPLE_RATE:
-        raise RuntimeError('H5 and HpCF must both be 96000 Hz')
+        raise RuntimeError('H5 weighted average and HpCF must both be 96000 Hz')
     if h5.shape[1] != 2 or hpcf.shape[1] != 2:
-        raise RuntimeError('H5 and HpCF must both be stereo')
-    nfft = next_pow2(max(N_FFT, len(h5) + len(hpcf) - 1))
-    frequency = np.fft.rfftfreq(nfft, 1.0 / SAMPLE_RATE)
-    audible = (frequency >= 10.0) & (frequency <= 19000.0)
-    peaks = []
-    for channel in range(2):
-        cascade = np.abs(np.fft.rfft(h5[:, channel], nfft) * np.fft.rfft(hpcf[:, channel], nfft))
-        peaks.append(float(np.max(20.0 * np.log10(np.maximum(cascade[audible], np.finfo(float).tiny)))))
-    preamp_db = -round(max(peaks), 1)
-    return preamp_db
+        raise RuntimeError('H5 weighted average and anechoic HpCF must be stereo')
+    left = np.convolve(h5[:, 0], hpcf[:, 0])
+    right = np.convolve(h5[:, 1], hpcf[:, 1])
+    bound = max(float(np.sum(np.abs(left))), float(np.sum(np.abs(right))))
+    if not np.isfinite(bound) or bound <= 0.0:
+        raise RuntimeError('Final stereo H5 and HpCF cascade has an invalid peak bound')
+    exact = min(0.0, -20.0 * np.log10(bound))
+    return math.floor(exact * 1_000_000.0) / 1_000_000.0
+
+def matrix_cascade_gain(matrix_path, hpcf_path):
+    """Closest gain to 0 dB with a strict bounded full-scale input guarantee."""
+    matrix, matrix_rate = sf.read(matrix_path, always_2d=True, dtype='float64')
+    hpcf, hpcf_rate = sf.read(hpcf_path, always_2d=True, dtype='float64')
+    if matrix_rate != SAMPLE_RATE or hpcf_rate != SAMPLE_RATE:
+        raise RuntimeError('H5 matrix and HpCF must both be 96000 Hz')
+    if matrix.shape[1] != 4:
+        raise RuntimeError('H5 matrix must have channels LL, R-to-L, L-to-R, RR')
+    if hpcf.shape[1] != 2:
+        raise RuntimeError('Anechoic HpCF must be stereo')
+    paths = (
+        np.convolve(matrix[:, 0], hpcf[:, 0]),
+        np.convolve(matrix[:, 1], hpcf[:, 0]),
+        np.convolve(matrix[:, 2], hpcf[:, 1]),
+        np.convolve(matrix[:, 3], hpcf[:, 1]),
+    )
+    left = float(np.sum(np.abs(paths[0])) + np.sum(np.abs(paths[1])))
+    right = float(np.sum(np.abs(paths[2])) + np.sum(np.abs(paths[3])))
+    bound = max(left, right)
+    if not np.isfinite(bound) or bound <= 0.0:
+        raise RuntimeError('Final matrix and HpCF cascade has an invalid peak bound')
+    exact = min(0.0, -20.0 * np.log10(bound))
+    return math.floor(exact * 1_000_000.0) / 1_000_000.0
 
 def filterless_text():
     return f'''---
@@ -175,7 +200,8 @@ devices:
 pipeline: []
 '''
 
-def make_profile(index, item, hpcf_path, preamp_db):
+def make_stereo_profile(index, item, hpcf_path, preamp_db):
+    """Normal stereo profile: H5 tonal average with no channel crossfeed."""
     kind = str(item['kind']).upper()
     label = str(item['label']).strip()
     filename = f'{slugify(label)}-{kind.casefold()}.yml'
@@ -184,7 +210,7 @@ def make_profile(index, item, hpcf_path, preamp_db):
     hpcf = yaml_string(hpcf_path)
     config = f'''---
 title: {title}
-description: "H5 2945-direction weighted power average with anechoic headphone correction"
+description: "H5 2945-point weighted stereo average with anechoic headphone correction; no crossfeed"
 devices:
   samplerate: {SAMPLE_RATE}
   chunksize: 1024
@@ -226,7 +252,7 @@ filters:
   auto_gain:
     type: Gain
     parameters:
-      gain: {preamp_db:.1f}
+      gain: {preamp_db:.6f}
       scale: dB
 pipeline:
   - type: Filter
@@ -235,6 +261,147 @@ pipeline:
   - type: Filter
     channels: [1]
     names: [h5_right, hpcf_right]
+  - type: Filter
+    channels: [0, 1]
+    names: [auto_gain]
+'''
+    return CAMILLA_ROOT / filename, config
+
+def make_crossfeed_profile(index, item, hpcf_path, preamp_db):
+    kind = str(item['kind']).upper()
+    label = str(item['label']).strip()
+    filename = f'{slugify(label)}-{kind.casefold()}-crossfeed.yml'
+    title = yaml_string(f'{label} ({kind}) - Crossfeed')
+    matrix = yaml_string(H5_MATRIX)
+    hpcf = yaml_string(hpcf_path)
+    config = f'''---
+title: {title}
+description: "H5 2945-point diffuse-field 2x2 matrix with anechoic headphone correction"
+devices:
+  samplerate: {SAMPLE_RATE}
+  chunksize: 1024
+  capture:
+    type: Alsa
+    channels: 2
+    device: "hw:Loopback,1,0"
+    format: S32_LE
+  playback:
+    type: Alsa
+    channels: 2
+    device: "{CAMILLA_PLAYBACK_DEVICE}"
+    format: {CAMILLA_PLAYBACK_FORMAT}
+mixers:
+  matrix_branches:
+    channels:
+      in: 2
+      out: 4
+    mapping:
+      - dest: 0
+        sources:
+          - channel: 0
+            gain: 0
+            inverted: false
+      - dest: 1
+        sources:
+          - channel: 1
+            gain: 0
+            inverted: false
+      - dest: 2
+        sources:
+          - channel: 0
+            gain: 0
+            inverted: false
+      - dest: 3
+        sources:
+          - channel: 1
+            gain: 0
+            inverted: false
+  matrix_sum:
+    channels:
+      in: 4
+      out: 2
+    mapping:
+      - dest: 0
+        sources:
+          - channel: 0
+            gain: 0
+            inverted: false
+          - channel: 1
+            gain: 0
+            inverted: false
+      - dest: 1
+        sources:
+          - channel: 2
+            gain: 0
+            inverted: false
+          - channel: 3
+            gain: 0
+            inverted: false
+filters:
+  matrix_ll:
+    type: Conv
+    parameters:
+      type: Wav
+      filename: {matrix}
+      channel: 0
+  matrix_rl:
+    type: Conv
+    parameters:
+      type: Wav
+      filename: {matrix}
+      channel: 1
+  matrix_lr:
+    type: Conv
+    parameters:
+      type: Wav
+      filename: {matrix}
+      channel: 2
+  matrix_rr:
+    type: Conv
+    parameters:
+      type: Wav
+      filename: {matrix}
+      channel: 3
+  hpcf_left:
+    type: Conv
+    parameters:
+      type: Wav
+      filename: {hpcf}
+      channel: 0
+  hpcf_right:
+    type: Conv
+    parameters:
+      type: Wav
+      filename: {hpcf}
+      channel: 1
+  auto_gain:
+    type: Gain
+    parameters:
+      gain: {preamp_db:.6f}
+      scale: dB
+pipeline:
+  - type: Mixer
+    name: matrix_branches
+  - type: Filter
+    channels: [0]
+    names: [matrix_ll]
+  - type: Filter
+    channels: [1]
+    names: [matrix_rl]
+  - type: Filter
+    channels: [2]
+    names: [matrix_lr]
+  - type: Filter
+    channels: [3]
+    names: [matrix_rr]
+  - type: Mixer
+    name: matrix_sum
+  - type: Filter
+    channels: [0]
+    names: [hpcf_left]
+  - type: Filter
+    channels: [1]
+    names: [hpcf_right]
   - type: Filter
     channels: [0, 1]
     names: [auto_gain]
@@ -256,7 +423,9 @@ def anechoic_path(item):
 
 def rebuild_all_filters():
     if not H5_WEIGHTED.is_file():
-        raise SystemExit(f'Missing H5 weighted average: {H5_WEIGHTED}')
+        raise SystemExit(f'Missing H5 weighted stereo average: {H5_WEIGHTED}')
+    if not H5_MATRIX.is_file():
+        raise SystemExit(f'Missing H5 diffuse matrix: {H5_MATRIX}')
     if not DIFFUSE_FIELD_EQ.is_file():
         raise SystemExit(f'Missing diffuse-field EQ: {DIFFUSE_FIELD_EQ}')
     if not HPCF_DIFFUSE.is_dir():
@@ -298,9 +467,16 @@ def rebuild_all_filters():
         generated = []
         validation_generated = []
         for index, (item, staged, destination) in enumerate(staged_hpcfs, 1):
-            gain = cascade_gain(H5_WEIGHTED, staged)
-            generated.append(make_profile(index, item, destination, gain))
-            validation_generated.append(make_profile(index, item, staged, gain))
+            stereo_gain = stereo_cascade_gain(H5_WEIGHTED, staged)
+            crossfeed_gain = matrix_cascade_gain(H5_MATRIX, staged)
+            generated.extend((
+                make_stereo_profile(index, item, destination, stereo_gain),
+                make_crossfeed_profile(index, item, destination, crossfeed_gain),
+            ))
+            validation_generated.extend((
+                make_stereo_profile(index, item, staged, stereo_gain),
+                make_crossfeed_profile(index, item, staged, crossfeed_gain),
+            ))
         candidates = [(CAMILLA_ROOT / '00-filterless.yml', filterless_text()), *generated]
         validation_candidates = [(CAMILLA_ROOT / '00-filterless.yml', filterless_text()), *validation_generated]
 
