@@ -145,7 +145,12 @@ def release_audio_for_output_switch():
     with LOCK:
         STOP_ACK.unlink(missing_ok=True)
         try:
-            stop_local_monitor();stop_mpv();stop_sonobus();stop_bypass();stop_camilla(include_stale=True)
+            stop_local_monitor()
+            stop_mpv()
+            run(['pkill', '-x', 'mpv'], False, 5)
+            stop_sonobus()
+            stop_bypass()
+            stop_camilla(include_stale=True)
             airplay(False)
         except Exception as error:
             (STATE/'audio-start-error').write_text(str(error)+'\n')
