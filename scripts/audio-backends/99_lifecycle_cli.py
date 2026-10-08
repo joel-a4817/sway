@@ -425,11 +425,10 @@ def topology_cli():
         if len(sys.argv)==2 and sys.argv[1]=='--cancel-output-preview':
             print(json.dumps(cancel_output_preview('cli',token=os.environ.get('MEDIA_CONTROL_PICKER_PID')),ensure_ascii=False));return
         if len(sys.argv)==2 and sys.argv[1]=='--interactive-input':
-            saved_master=pause_for_audio_stop()
-            try:
-                result=select_input_interactive(finalize=lambda:normalize_audio_volumes(saved_master) if not STOPPED.exists() else None)
-                print(json.dumps(result,ensure_ascii=False));return
-            finally:pause_for_normalization()
+            # Input routing owns capture topology only; it must not pause media
+            # or enter the playback/capture gain-normalization transaction.
+            result=select_input_interactive()
+            print(json.dumps(result,ensure_ascii=False));return
         if len(sys.argv)==3 and sys.argv[1]=='--camera-restore-clients':
             print(json.dumps(restore_camera_clients(json.loads(sys.argv[2])),ensure_ascii=False));return
         if len(sys.argv)==3 and sys.argv[1]=='--camera-selection-status':

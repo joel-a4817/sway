@@ -344,12 +344,12 @@ def select_input_interactive(finalize=None):
             profile=(_pick_input('Audio input | Profile',live['profiles'],live['activeProfile'])
                      if live['profiles'] else {'index':live['activeProfile'],'name':'current'})
             if profile['index'] is not None and _input_card(card)['activeProfile']!=profile['index'] and not card.startswith('virtual:'):
-                with media_change():_input_set_profile(card,profile['index'])
+                _input_set_profile(card,profile['index'])
             current=_input_card(card)
             routes=[r for r in current['routes'] if _available_option(r) and (not r['profiles'] or profile['index'] is None or str(profile['index']) in {str(x) for x in r['profiles']})]
             route=_pick_input('Audio input | Route',routes,current['activeRoutes'][0] if current['activeRoutes'] else None) if routes else None
             if route and route['index'] not in _input_card(card)['activeRoutes']:
-                with media_change():_input_set_route(card,route['index'])
+                _input_set_route(card,route['index'])
             current=_input_card(card)
             if saved_output.get('card')==card:verify_preserved_output(saved_output)
             candidates=[row for row in current['sources'] if _input_selectable_option(row)]
@@ -361,74 +361,75 @@ def select_input_interactive(finalize=None):
                 raise RuntimeError('Selected source disappeared before port selection')
             ports,old_port=_input_ports(chosen_source)
             port=_pick_input('Audio input | Port',ports,old_port) if ports else None
-            with media_change():
-                if port:
-                    r=run([exe('pactl'),'set-source-port',chosen_source,port['name']],False,8,media_env())
-                    if r.returncode:raise RuntimeError(r.stderr.strip() or 'Input port failed')
-                    if _input_ports(chosen_source)[1]!=port['name']:raise RuntimeError('Input port not confirmed')
-                graph=pw_graph();device_id=None if card.startswith('virtual:') else pw_device(card,graph)['id']
-                node=next((n for n in pw_objects('Node',graph) if pw_props(n).get('media.class')=='Audio/Source' and pw_props(n).get('node.name')==chosen_source and (device_id is None or str(device_id)==str(pw_props(n).get('device.id')))),None)
-                if node is None and not card.startswith('virtual:'):
-                    raise RuntimeError('Selected source disappeared')
-                command=([exe('wpctl'),'set-default',str(node['id'])] if node is not None else
-                         [exe('pactl'),'set-default-source',chosen_source])
-                r=run(command,False,8,media_env())
-                if r.returncode:raise RuntimeError(r.stderr.strip() or 'Input default failed')
-                if run([exe('pactl'),'get-default-source'],False,5,media_env()).stdout.strip()!=chosen_source:
-                    raise RuntimeError('Input default not confirmed')
-                r=run([exe('pactl'),'-f','json','list','source-outputs'],False,8,media_env())
-                if r.returncode:raise RuntimeError('Cannot enumerate recording streams')
-                for item in json.loads(r.stdout):
-                    index=item.get('index')
-                    if not isinstance(index,int):continue
-                    if index not in prior_streams:raise RuntimeError('Recording stream appeared after input snapshot: '+str(index))
-                    r=run([exe('pactl'),'move-source-output',str(index),chosen_source],False,8,media_env())
-                    if r.returncode:raise RuntimeError('Recording stream '+str(index)+' could not be moved')
-                    moved.append(index)
-                r=run([exe('pactl'),'-f','json','list','source-outputs'],False,8,media_env())
-                if r.returncode:raise RuntimeError('Cannot verify recording streams')
-                source_rows=run([exe('pactl'),'-f','json','list','sources'],False,8,media_env())
-                if source_rows.returncode:raise RuntimeError('Cannot verify selected source index')
-                pulse_source=next((x for x in json.loads(source_rows.stdout) if x.get('name')==chosen_source),None)
-                if pulse_source is None:raise RuntimeError('Selected source vanished during verification')
-                target=pulse_source['index']
-                verified_streams={item.get('index'):item for item in json.loads(r.stdout)}
-                for index in moved:
-                    if index not in verified_streams:raise RuntimeError('Recording stream '+str(index)+' disappeared during verification')
-                for item in verified_streams.values():
-                    if item.get('index') in moved and str(item.get('source'))!=str(target):
-                        raise RuntimeError('Recording stream '+str(item['index'])+' did not reach selected source')
-                # Native PipeWire capture streams are not necessarily visible to pactl.
-                # Verify the complete live graph, and retarget any remaining active stream.
-                graph=pw_graph()
-                for stream in pw_objects('Node',graph):
-                    if pw_props(stream).get('media.class')!='Stream/Input/Audio':continue
-                    if node is None:
-                        if any(str((link.get('info') or {}).get('input-node-id'))==str(stream['id'])
-                               for link in pw_objects('Link',graph)):
-                            raise RuntimeError('Native recording stream cannot be retargeted to a Pulse-only monitor source')
-                        continue
-                    sid=stream['id']
-                    links=[x for x in pw_objects('Link',graph) if str((x.get('info') or {}).get('input-node-id'))==str(sid)]
-                    if not links:continue
-                    sources={str((x.get('info') or {}).get('output-node-id')) for x in links}
-                    if sources=={str(node['id'])}:continue
-                    if len(sources)!=1:raise RuntimeError('Recording stream '+str(sid)+' has multiple source targets')
-                    old_node=prior_native.get(sid)
-                    if old_node is None:raise RuntimeError('Recording stream appeared after input snapshot: '+str(sid))
-                    result=run([exe('pw-metadata'),'-n','default',str(sid),'target.node',str(node['id']),'Spa:Id'],False,8,media_env())
-                    if result.returncode:raise RuntimeError('Recording stream '+str(sid)+' cannot be retargeted')
-                    native_moved.append((sid,old_node))
-                    deadline=time.monotonic()+3
-                    while time.monotonic()<deadline:
-                        now=pw_graph()
-                        if not any(n['id']==sid for n in pw_objects('Node',now)):
-                            raise RuntimeError('Recording stream '+str(sid)+' disappeared during selection')
-                        targets={str((x.get('info') or {}).get('output-node-id')) for x in pw_objects('Link',now)
-                                 if str((x.get('info') or {}).get('input-node-id'))==str(sid)}
-                        if targets=={str(node['id'])}:break
-                        time.sleep(.1)
-                    else:raise RuntimeError('Recording stream '+str(sid)+' link not confirmed')
+            # Capture selection is not a playback-gain transaction. Keep
+            # players running and do not normalize playback or capture gains.
+            if port:
+                r=run([exe('pactl'),'set-source-port',chosen_source,port['name']],False,8,media_env())
+                if r.returncode:raise RuntimeError(r.stderr.strip() or 'Input port failed')
+                if _input_ports(chosen_source)[1]!=port['name']:raise RuntimeError('Input port not confirmed')
+            graph=pw_graph();device_id=None if card.startswith('virtual:') else pw_device(card,graph)['id']
+            node=next((n for n in pw_objects('Node',graph) if pw_props(n).get('media.class')=='Audio/Source' and pw_props(n).get('node.name')==chosen_source and (device_id is None or str(device_id)==str(pw_props(n).get('device.id')))),None)
+            if node is None and not card.startswith('virtual:'):
+                raise RuntimeError('Selected source disappeared')
+            command=([exe('wpctl'),'set-default',str(node['id'])] if node is not None else
+                     [exe('pactl'),'set-default-source',chosen_source])
+            r=run(command,False,8,media_env())
+            if r.returncode:raise RuntimeError(r.stderr.strip() or 'Input default failed')
+            if run([exe('pactl'),'get-default-source'],False,5,media_env()).stdout.strip()!=chosen_source:
+                raise RuntimeError('Input default not confirmed')
+            r=run([exe('pactl'),'-f','json','list','source-outputs'],False,8,media_env())
+            if r.returncode:raise RuntimeError('Cannot enumerate recording streams')
+            for item in json.loads(r.stdout):
+                index=item.get('index')
+                if not isinstance(index,int):continue
+                if index not in prior_streams:raise RuntimeError('Recording stream appeared after input snapshot: '+str(index))
+                r=run([exe('pactl'),'move-source-output',str(index),chosen_source],False,8,media_env())
+                if r.returncode:raise RuntimeError('Recording stream '+str(index)+' could not be moved')
+                moved.append(index)
+            r=run([exe('pactl'),'-f','json','list','source-outputs'],False,8,media_env())
+            if r.returncode:raise RuntimeError('Cannot verify recording streams')
+            source_rows=run([exe('pactl'),'-f','json','list','sources'],False,8,media_env())
+            if source_rows.returncode:raise RuntimeError('Cannot verify selected source index')
+            pulse_source=next((x for x in json.loads(source_rows.stdout) if x.get('name')==chosen_source),None)
+            if pulse_source is None:raise RuntimeError('Selected source vanished during verification')
+            target=pulse_source['index']
+            verified_streams={item.get('index'):item for item in json.loads(r.stdout)}
+            for index in moved:
+                if index not in verified_streams:raise RuntimeError('Recording stream '+str(index)+' disappeared during verification')
+            for item in verified_streams.values():
+                if item.get('index') in moved and str(item.get('source'))!=str(target):
+                    raise RuntimeError('Recording stream '+str(item['index'])+' did not reach selected source')
+            # Native PipeWire capture streams are not necessarily visible to pactl.
+            # Verify the complete live graph, and retarget any remaining active stream.
+            graph=pw_graph()
+            for stream in pw_objects('Node',graph):
+                if pw_props(stream).get('media.class')!='Stream/Input/Audio':continue
+                if node is None:
+                    if any(str((link.get('info') or {}).get('input-node-id'))==str(stream['id'])
+                           for link in pw_objects('Link',graph)):
+                        raise RuntimeError('Native recording stream cannot be retargeted to a Pulse-only monitor source')
+                    continue
+                sid=stream['id']
+                links=[x for x in pw_objects('Link',graph) if str((x.get('info') or {}).get('input-node-id'))==str(sid)]
+                if not links:continue
+                sources={str((x.get('info') or {}).get('output-node-id')) for x in links}
+                if sources=={str(node['id'])}:continue
+                if len(sources)!=1:raise RuntimeError('Recording stream '+str(sid)+' has multiple source targets')
+                old_node=prior_native.get(sid)
+                if old_node is None:raise RuntimeError('Recording stream appeared after input snapshot: '+str(sid))
+                result=run([exe('pw-metadata'),'-n','default',str(sid),'target.node',str(node['id']),'Spa:Id'],False,8,media_env())
+                if result.returncode:raise RuntimeError('Recording stream '+str(sid)+' cannot be retargeted')
+                native_moved.append((sid,old_node))
+                deadline=time.monotonic()+3
+                while time.monotonic()<deadline:
+                    now=pw_graph()
+                    if not any(n['id']==sid for n in pw_objects('Node',now)):
+                        raise RuntimeError('Recording stream '+str(sid)+' disappeared during selection')
+                    targets={str((x.get('info') or {}).get('output-node-id')) for x in pw_objects('Link',now)
+                             if str((x.get('info') or {}).get('input-node-id'))==str(sid)}
+                    if targets=={str(node['id'])}:break
+                    time.sleep(.1)
+                else:raise RuntimeError('Recording stream '+str(sid)+' link not confirmed')
             if saved_output.get('card')==card:verify_preserved_output(saved_output)
             choices=_read_json(SWITCH_STATE/'input-last-choices.json',{})
             if not isinstance(choices,dict):choices={}
