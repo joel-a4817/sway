@@ -227,21 +227,10 @@ def main():
     if _saved_master_volume() is None:
         seed_master_from_physical_output()
     saved_master=pause_for_audio_stop()
-    legacy_pid=HOME/'.local/state/sway/audio/camilladsp-webremote/web-server.pid'
-    previous=rpid(legacy_pid)
-    if previous and previous!=me and alive(previous):
-        try:os.kill(previous,signal.SIGTERM)
-        except OSError:pass
-        deadline=time.monotonic()+10
-        while alive(previous) and time.monotonic()<deadline:time.sleep(.05)
-        if alive(previous):raise RuntimeError('Previous legacy webremote instance did not exit')
-    ensure();old=rpid(SERVERPID)
-    if old and old!=me and alive(old):
-        try:os.kill(old,signal.SIGTERM)
-        except OSError:pass
-        deadline=time.monotonic()+10
-        while alive(old) and time.monotonic()<deadline:time.sleep(.05)
-        if alive(old):raise RuntimeError('Previous webremote instance did not complete audio shutdown; refusing unsafe replacement')
+    # The server launcher has already terminated and verified any previous
+    # launcher instance before this backend is loaded. Clear stale bookkeeping;
+    # backend startup must not perform a second process-replacement pass.
+    ensure()
     SERVERPID.unlink(missing_ok=True)
     if alive(rpid(BYPASSPID)):stop_bypass()
     # First replacement of an older server may leave its tracked engine alive.

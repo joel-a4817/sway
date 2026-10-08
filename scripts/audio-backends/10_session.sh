@@ -8,12 +8,8 @@ LEGACY_STATE="$HOME_DIR/.local/state/sway/audio"
 
 # Prevent overlapping selectors from changing the graph concurrently.
 mkdir -p "$STATE_DIR" "$REMOTE_STATE"
-# Do not migrate an active old server's PID/markers: restart the paired server first.
-legacy_server_pid="$(cat "$LEGACY_STATE/camilladsp-webremote/web-server.pid" 2>/dev/null || true)"
-if [[ "$legacy_server_pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$legacy_server_pid" 2>/dev/null; then
-    echo 'Restart the updated webremote server before using the updated media-control.' >&2
-    exit 1
-fi
+# Process replacement belongs to the installed launchers. This sourced
+# backend owns session locking, migration, rollback and cleanup only.
 # First-run migration: copy persistent values without overwriting new state.
 if [[ ! -e "$STATE_DIR/state-migrated" && -d "$LEGACY_STATE" ]]; then
     for old in "$LEGACY_STATE"/*; do
@@ -37,20 +33,6 @@ OWNER_FILE="$STATE_DIR/media-control-owner"
 LOCK_FILE="$STATE_DIR/media-control.lock"
 exec 8>"$LAUNCH_LOCK"
 flock -x 8 || exit 1
-# Match a switch process by its script argument, not by its terminal or audio engine.
-SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
-switch_process() {
-    local pid="$1" arg comm
-    [[ "$pid" =~ ^[1-9][0-9]*$ && "$pid" != "$$" && -r "/proc/$pid/cmdline" ]] || return 1
-    comm="$(cat "/proc/$pid/comm" 2>/dev/null)"
-    [[ "$comm" == bash ]] || return 1
-    local -a args=()
-    mapfile -d '' -t args <"/proc/$pid/cmdline" 2>/dev/null || return 1
-    # The script must be Bash's script operand, not a path in unrelated arguments.
-    arg="${args[1]:-}"
-    [[ "$arg" == "$SCRIPT_PATH" ]] && return 0
-    [[ "$(readlink -f -- "$arg" 2>/dev/null)" == "$SCRIPT_PATH" ]]
-}
 process_start() {
     local stat
     stat="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1
@@ -58,27 +40,6 @@ process_start() {
     set -- $stat
     printf '%s\n' "${20:-}"
 }
-# Replace only a verified switch process. The /proc start time protects
-# against PID reuse; the scan also covers the first launch after upgrading.
-for entry in /proc/[0-9]*; do
-    previous="${entry##*/}"
-    switch_process "$previous" || continue
-    [[ "$(stat -c %u "$entry" 2>/dev/null)" == "$(id -u)" ]] || continue
-    start="$(process_start "$previous")"
-    [[ -n "$start" ]] || continue
-    # Older copies do not handle USR2 and would leave their Swaynag child behind.
-    while read -r child; do
-        [[ "$child" =~ ^[1-9][0-9]*$ ]] && kill -TERM "$child" 2>/dev/null || true
-    done < <(pgrep -P "$previous" -x swaynag 2>/dev/null || true)
-    kill -USR2 "$previous" 2>/dev/null || kill -TERM "$previous" 2>/dev/null || true
-    for ((i=0;i<30;i++)); do
-        switch_process "$previous" || break
-        sleep 0.1
-    done
-    if switch_process "$previous" && [[ "$(process_start "$previous")" == "$start" ]]; then
-        kill -KILL "$previous" 2>/dev/null || true
-    fi
-done
 exec 9>"$LOCK_FILE"
 if ! flock -w 10 9; then
     echo 'Previous media-control or webremote startup still holds the audio lock.' >&2
