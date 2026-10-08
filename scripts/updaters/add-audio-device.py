@@ -60,16 +60,25 @@ HPCFS = (
         'file': 'Apple_EarPods_Ahastyle_Covers_Custom_Average_A+B.wav',
         'label': 'Apple Earpods Silicone Covers',
         'kind': 'IE',
+        'loudness_reference_db': -6.0,
+        'loudness_low_boost_db': 6.0,
+        'loudness_high_boost_db': 4.0,
     },
     {
         'file': 'CMF_by_Nothing_Buds_Pro_2_Sample_A.wav',
         'label': 'CMF Buds Pro 2',
         'kind': 'IE',
+        'loudness_reference_db': -6.0,
+        'loudness_low_boost_db': 6.0,
+        'loudness_high_boost_db': 4.0,
     },
     {
         'file': 'HyperX_Cloud_III_Average.wav',
         'label': 'HyperX Cloud III',
         'kind': 'OE',
+        'loudness_reference_db': 0.0,
+        'loudness_low_boost_db': 7.0,
+        'loudness_high_boost_db': 5.0,
     },
 )
 
@@ -140,7 +149,30 @@ def make_anechoic_hpcf(diffuse_hpcf, destination, diffuse_eq, diffuse_rate,
     sf.write(destination, output, rate, subtype='FLOAT')
     return destination
 
-def stereo_cascade_gain(h5_path, hpcf_path):
+def loudness_defaults(kind):
+    kind = str(kind).upper()
+    if kind == 'IE':
+        return -6.0, 6.0, 4.0
+    if kind == 'OE':
+        return 0.0, 7.0, 5.0
+    raise RuntimeError(f'Unsupported headphone kind for loudness: {kind}')
+
+def loudness_settings(item):
+    default_reference, default_low, default_high = loudness_defaults(item.get('kind'))
+    reference = float(item.get('loudness_reference_db', default_reference))
+    low = float(item.get('loudness_low_boost_db', default_low))
+    high = float(item.get('loudness_high_boost_db', default_high))
+    if not all(np.isfinite(value) for value in (reference, low, high)):
+        raise RuntimeError(f'Non-finite loudness settings for {item.get("label")}')
+    if low < 0.0 or high < 0.0 or low > 20.0 or high > 20.0:
+        raise RuntimeError(f'Loudness boosts must be between 0 and 20 dB for {item.get("label")}')
+    if reference < -100.0 or reference > 20.0:
+        raise RuntimeError(f'Loudness reference must be between -100 and 20 dB for {item.get("label")}')
+    # Both shelves can be active simultaneously. Reserving their sum is a
+    # conservative static headroom allowance for the configured maximum boost.
+    return reference, low, high, low + high
+
+def stereo_cascade_gain(h5_path, hpcf_path, loudness_headroom_db=0.0):
     """Strict no-clipping gain for independent stereo H5 and HpCF paths."""
     h5, h5_rate = sf.read(h5_path, always_2d=True, dtype='float64')
     hpcf, hpcf_rate = sf.read(hpcf_path, always_2d=True, dtype='float64')
@@ -153,10 +185,10 @@ def stereo_cascade_gain(h5_path, hpcf_path):
     bound = max(float(np.sum(np.abs(left))), float(np.sum(np.abs(right))))
     if not np.isfinite(bound) or bound <= 0.0:
         raise RuntimeError('Final stereo H5 and HpCF cascade has an invalid peak bound')
-    exact = min(0.0, -20.0 * np.log10(bound))
+    exact = min(0.0, -20.0 * np.log10(bound) - float(loudness_headroom_db))
     return math.floor(exact * 1_000_000.0) / 1_000_000.0
 
-def matrix_cascade_gain(matrix_path, hpcf_path):
+def matrix_cascade_gain(matrix_path, hpcf_path, loudness_headroom_db=0.0):
     """Closest gain to 0 dB with a strict bounded full-scale input guarantee."""
     matrix, matrix_rate = sf.read(matrix_path, always_2d=True, dtype='float64')
     hpcf, hpcf_rate = sf.read(hpcf_path, always_2d=True, dtype='float64')
@@ -177,7 +209,7 @@ def matrix_cascade_gain(matrix_path, hpcf_path):
     bound = max(left, right)
     if not np.isfinite(bound) or bound <= 0.0:
         raise RuntimeError('Final matrix and HpCF cascade has an invalid peak bound')
-    exact = min(0.0, -20.0 * np.log10(bound))
+    exact = min(0.0, -20.0 * np.log10(bound) - float(loudness_headroom_db))
     return math.floor(exact * 1_000_000.0) / 1_000_000.0
 
 def filterless_text():
@@ -208,6 +240,7 @@ def make_stereo_profile(index, item, hpcf_path, preamp_db):
     title = yaml_string(f'{label} ({kind})')
     h5 = yaml_string(H5_WEIGHTED)
     hpcf = yaml_string(hpcf_path)
+    loudness_reference, loudness_low, loudness_high, _ = loudness_settings(item)
     config = f'''---
 title: {title}
 description: "H5 2945-point weighted stereo average with anechoic headphone correction; no crossfeed"
@@ -254,6 +287,12 @@ filters:
     parameters:
       gain: {preamp_db:.6f}
       scale: dB
+  dynamic_loudness:
+    type: Loudness
+    parameters:
+      reference_level: {loudness_reference:.6f}
+      low_boost: {loudness_low:.6f}
+      high_boost: {loudness_high:.6f}
 pipeline:
   - type: Filter
     channels: [0]
@@ -264,6 +303,9 @@ pipeline:
   - type: Filter
     channels: [0, 1]
     names: [auto_gain]
+  - type: Filter
+    channels: [0, 1]
+    names: [dynamic_loudness]
 '''
     return CAMILLA_ROOT / filename, config
 
@@ -274,6 +316,7 @@ def make_crossfeed_profile(index, item, hpcf_path, preamp_db):
     title = yaml_string(f'{label} ({kind}) - Crossfeed')
     matrix = yaml_string(H5_MATRIX)
     hpcf = yaml_string(hpcf_path)
+    loudness_reference, loudness_low, loudness_high, _ = loudness_settings(item)
     config = f'''---
 title: {title}
 description: "H5 2945-point diffuse-field 2x2 matrix with anechoic headphone correction"
@@ -379,6 +422,12 @@ filters:
     parameters:
       gain: {preamp_db:.6f}
       scale: dB
+  dynamic_loudness:
+    type: Loudness
+    parameters:
+      reference_level: {loudness_reference:.6f}
+      low_boost: {loudness_low:.6f}
+      high_boost: {loudness_high:.6f}
 pipeline:
   - type: Mixer
     name: matrix_branches
@@ -405,6 +454,9 @@ pipeline:
   - type: Filter
     channels: [0, 1]
     names: [auto_gain]
+  - type: Filter
+    channels: [0, 1]
+    names: [dynamic_loudness]
 '''
     return CAMILLA_ROOT / filename, config
 
@@ -443,6 +495,7 @@ def rebuild_all_filters():
             raise SystemExit(f'Missing diffuse HpCF WAV: {source}')
         if label.casefold() in labels or os.path.normcase(str(source)) in sources:
             raise SystemExit(f'Duplicate HpCF device: {label} / {source}')
+        loudness_settings(item)
         labels.add(label.casefold()); sources.add(os.path.normcase(str(source)))
         devices.append((item, source, anechoic_path(item)))
 
@@ -467,8 +520,9 @@ def rebuild_all_filters():
         generated = []
         validation_generated = []
         for index, (item, staged, destination) in enumerate(staged_hpcfs, 1):
-            stereo_gain = stereo_cascade_gain(H5_WEIGHTED, staged)
-            crossfeed_gain = matrix_cascade_gain(H5_MATRIX, staged)
+            _, _, _, loudness_headroom = loudness_settings(item)
+            stereo_gain = stereo_cascade_gain(H5_WEIGHTED, staged, loudness_headroom)
+            crossfeed_gain = matrix_cascade_gain(H5_MATRIX, staged, loudness_headroom)
             generated.extend((
                 make_stereo_profile(index, item, destination, stereo_gain),
                 make_crossfeed_profile(index, item, destination, crossfeed_gain),
@@ -556,9 +610,13 @@ def load(text):
 def render(entries):
     lines=['HPCFS = (']
     for item in entries:
+        default_reference, default_low, default_high = loudness_defaults(item.get('kind'))
         lines += ['    {',f"        'file': {str(item['file'])!r},",
                   f"        'label': {str(item['label'])!r},",
                   f"        'kind': {str(item['kind'])!r},",
+                  f"        'loudness_reference_db': {float(item.get('loudness_reference_db', default_reference))!r},",
+                  f"        'loudness_low_boost_db': {float(item.get('loudness_low_boost_db', default_low))!r},",
+                  f"        'loudness_high_boost_db': {float(item.get('loudness_high_boost_db', default_high))!r},",
                   '    },']
     return '\n'.join([*lines,')'])
 
@@ -576,7 +634,10 @@ def new_entry():
     label=ask('Profile name')
     kind=('IE','OE')[choose('Choose type',('In ear (IE)','Over ear / on ear (OE)'))]
     stored=path.name if path.parent==HPCF_DIFFUSE.resolve() else str(path)
-    return {'file':stored,'label':label,'kind':kind,'resolved':path}
+    reference, low, high = loudness_defaults(kind)
+    return {'file':stored,'label':label,'kind':kind,'resolved':path,
+            'loudness_reference_db':reference,'loudness_low_boost_db':low,
+            'loudness_high_boost_db':high}
 def validate_unique(entries,skip=None):
     labels=set();paths=set()
     for index,item in enumerate(entries):
@@ -657,7 +718,7 @@ def clean_devices(text):
 
 def add(text):
     node,entries=load(text);entry=new_entry()
-    trial=[*entries,{key:entry[key] for key in ('file','label','kind')}];validate_unique(trial)
+    trial=[*entries,{key:entry[key] for key in ('file','label','kind','loudness_reference_db','loudness_low_boost_db','loudness_high_boost_db')}];validate_unique(trial)
     print('\nAdd review')
     row(1,f"HpCF: {entry['resolved']}")
     row(2,f"Profile name: {entry['label']}")
@@ -680,12 +741,23 @@ def edit(text):
         path=(candidate if candidate.is_absolute() else HPCF_DIFFUSE/candidate).resolve()
     if ask_edit('Profile name',label):
         label=ask('Profile name',label)
+    original_kind = kind
     if ask_edit('Type',kind):
         kind=('IE','OE')[choose('Choose type',('In ear (IE)','Over ear / on ear (OE)'))]
     if not path.is_file():raise RuntimeError(f'HpCF file does not exist: {path}')
     if path.suffix.casefold()!='.wav':raise RuntimeError('HpCF must be a WAV file')
     stored=path.name if path.parent==HPCF_DIFFUSE.resolve() else str(path)
-    trial=list(entries);trial[index]={'file':stored,'label':label,'kind':kind}
+    if kind != original_kind:
+        reference, low, high = loudness_defaults(kind)
+    else:
+        default_reference, default_low, default_high = loudness_defaults(kind)
+        reference = float(current.get('loudness_reference_db', default_reference))
+        low = float(current.get('loudness_low_boost_db', default_low))
+        high = float(current.get('loudness_high_boost_db', default_high))
+    trial=list(entries);trial[index]={'file':stored,'label':label,'kind':kind,
+        'loudness_reference_db':reference,
+        'loudness_low_boost_db':low,
+        'loudness_high_boost_db':high}
     validate_unique(trial)
     print('\nEdit review')
     row(1,f'HpCF: {path}')
