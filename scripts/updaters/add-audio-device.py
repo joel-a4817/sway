@@ -58,19 +58,16 @@ HPCFS = (
         'file': 'Apple_EarPods_Ahastyle_Covers_Custom_Average_A+B.wav',
         'label': 'Apple Earpods Silicone Covers',
         'kind': 'IE',
-        'bluetooth': False,
     },
     {
         'file': 'CMF_by_Nothing_Buds_Pro_2_Sample_A.wav',
         'label': 'CMF Buds Pro 2',
         'kind': 'IE',
-        'bluetooth': True,
     },
     {
         'file': 'HyperX_Cloud_III_Average.wav',
         'label': 'HyperX Cloud III',
         'kind': 'OE',
-        'bluetooth': False,
     },
 )
 
@@ -386,7 +383,7 @@ def render(entries):
         lines += ['    {',f"        'file': {str(item['file'])!r},",
                   f"        'label': {str(item['label'])!r},",
                   f"        'kind': {str(item['kind'])!r},",
-                  f"        'bluetooth': {bool(item.get('bluetooth', False))!r},",'    },']
+                  '    },']
     return '\n'.join([*lines,')'])
 
 def replace_block(text,node,entries):
@@ -402,9 +399,8 @@ def new_entry():
     if path.suffix.casefold()!='.wav':raise RuntimeError('HpCF must be a WAV file')
     label=ask('Profile name')
     kind=('IE','OE')[choose('Choose type',('In ear (IE)','Over ear / on ear (OE)'))]
-    bluetooth=choose('Bluetooth?',('No','Yes'))==1
     stored=path.name if path.parent==HPCF_DIFFUSE.resolve() else str(path)
-    return {'file':stored,'label':label,'kind':kind,'bluetooth':bluetooth,'resolved':path}
+    return {'file':stored,'label':label,'kind':kind,'resolved':path}
 def validate_unique(entries,skip=None):
     labels=set();paths=set()
     for index,item in enumerate(entries):
@@ -485,12 +481,11 @@ def clean_devices(text):
 
 def add(text):
     node,entries=load(text);entry=new_entry()
-    trial=[*entries,{key:entry[key] for key in ('file','label','kind','bluetooth')}];validate_unique(trial)
+    trial=[*entries,{key:entry[key] for key in ('file','label','kind')}];validate_unique(trial)
     print('\nAdd review')
     row(1,f"HpCF: {entry['resolved']}")
     row(2,f"Profile name: {entry['label']}")
     row(3,f"Type: {entry['kind']}")
-    row(4,f"Bluetooth: {'Yes' if entry['bluetooth'] else 'No'}")
     if choose('Save this device?',('No','Yes'))==0:return
     backup=save(text,replace_block(text,node,trial))
     print(f"\nAdded {entry['label']}.\nBackup: {backup}")
@@ -503,7 +498,6 @@ def edit(text):
     path=configured_path(current)
     label=str(current.get('label','')).strip()
     kind=str(current.get('kind','')).upper()
-    bluetooth=bool(current.get('bluetooth',False))
     if ask_edit('HpCF',str(path)):
         raw=ask('HpCF WAV filename or absolute path',str(path))
         candidate=Path(raw).expanduser()
@@ -512,18 +506,15 @@ def edit(text):
         label=ask('Profile name',label)
     if ask_edit('Type',kind):
         kind=('IE','OE')[choose('Choose type',('In ear (IE)','Over ear / on ear (OE)'))]
-    if ask_edit('Bluetooth','Yes' if bluetooth else 'No'):
-        bluetooth=choose('Choose Bluetooth setting',('No','Yes'))==1
     if not path.is_file():raise RuntimeError(f'HpCF file does not exist: {path}')
     if path.suffix.casefold()!='.wav':raise RuntimeError('HpCF must be a WAV file')
     stored=path.name if path.parent==HPCF_DIFFUSE.resolve() else str(path)
-    trial=list(entries);trial[index]={'file':stored,'label':label,'kind':kind,'bluetooth':bluetooth}
+    trial=list(entries);trial[index]={'file':stored,'label':label,'kind':kind}
     validate_unique(trial)
     print('\nEdit review')
     row(1,f'HpCF: {path}')
     row(2,f'Profile name: {label}')
     row(3,f'Type: {kind}')
-    row(4,f"Bluetooth: {'Yes' if bluetooth else 'No'}")
     if choose('Save these edits?',('No','Yes'))==0:
         print('No files changed.');return
     backup=save(text,replace_block(text,node,trial))
@@ -538,7 +529,6 @@ def remove(text):
     row(1,f"HpCF: {configured_path(removed)}")
     row(2,f"Profile name: {removed.get('label')}")
     row(3,f"Type: {removed.get('kind')}")
-    row(4,f"Bluetooth: {'Yes' if removed.get('bluetooth',False) else 'No'}")
     if choose('Remove this device?',('No','Yes'))==0:return
     backup=save(text,replace_block(text,node,entries))
     print(f"\nRemoved {removed.get('label')}.\nBackup: {backup}")

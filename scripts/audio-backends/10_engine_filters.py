@@ -44,7 +44,7 @@ def _device_labels():
         label=str(row.get('label') or '').strip();kind=str(row.get('kind') or '').upper()
         if label and kind in ('IE','OE'):
             slug=re.sub(r'[^a-z0-9]+','-',label.casefold()).strip('-')
-            labels[(kind,slug)]={'label':label,'mediaControl':not bool(row.get('bluetooth',False))}
+            labels[(kind,slug)]={'label':label}
     return labels
 
 def listening_filters():
@@ -79,7 +79,7 @@ def listening_filters():
         if not matches and delay=='0000':matches=[name for name,key in candidates if key.endswith(suffix)]
         label=item.parent.name if item.parent!=PROFILES else (matches[0] if len(matches)==1 else stem)
         result[item.name]={'group':group,'label':label,
-                           'mediaControl':bool((configured or {}).get('mediaControl',True))}
+                           'mediaControl':True}
     return result
 
 def profile(name):
