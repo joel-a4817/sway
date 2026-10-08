@@ -19,14 +19,30 @@ def audio_baseline_missing():
     return (not ACTIVE.is_file() or not MODE.is_file()
             or not route.get('card') or not route.get('sink'))
 def ensure_physical_audio_baseline(force=False):
-    """One clean-state baseline shared by server and Media Control."""
+    """Build a deterministic clean-state baseline from live physical audio."""
     with LOCK:
         if STOPPED.exists():return {'repaired':False,'stopped':True}
         if not force and not audio_baseline_missing():
             return {'repaired':False,'route':saved_output_route(),'mode':mode_state()}
+        ensure_pipewire_ready()
+        # State deletion removes both the selected route and persisted master.
+        # Resolve a physical sink first, then snapshot that sink's actual live
+        # volume before media_change() asks for an authoritative master. This
+        # avoids PipeWire default ambiguity without inventing 50% or 100%.
+        candidate=_physical_output_route(None)
+        if _saved_master_volume() is None:
+            result=run(['__wp_control__','get-sink-volume',candidate['sink']],False,5,media_env())
+            match=re.search(r'(\d+(?:\.\d+)?)%',result.stdout)
+            if result.returncode or not match:
+                raise RuntimeError(result.stderr.strip() or
+                                   'Could not read clean-state physical master volume')
+            live=float(match.group(1))
+            if not math.isfinite(live) or not 0<=live<=100:
+                raise RuntimeError('Clean-state physical master volume is outside 0-100%')
+            MASTER_VOLUME.parent.mkdir(parents=True,exist_ok=True)
+            atomic(MASTER_VOLUME,f'{live:.2f}%\n')
         with media_change():
-            ensure_pipewire_ready()
-            route=apply_physical_no_filter_fallback(None)
+            route=apply_physical_no_filter_fallback(candidate)
         if selected_filter()!=NO_FILTER or audio_mode()!='laptop_laptop':
             raise RuntimeError('Clean-state audio baseline did not persist No filter laptop mode')
         if saved_output_route().get('sink')!=route['sink'] or pw_default()!=route['sink']:

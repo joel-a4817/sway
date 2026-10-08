@@ -62,7 +62,29 @@ def normalize_with_media():
         if STOPPED.exists():return {'skipped':'audio stopped'}
         if getattr(MEDIA_TRANSACTION,'active',False) or getattr(MEDIA_TRANSACTION,'starting',False):
             return {'deferred':'normalization belongs to active transaction'}
-        with media_change():return {'normalized':True}
+        # Menu-open normalization is maintenance, not a routing transaction.
+        # If no master has ever been persisted and the live graph cannot name
+        # one authoritative sink, changing any gain would be unsafe. Leave the
+        # graph untouched and allow Media Control to open.
+        if _saved_master_volume() is None:
+            try:_live_master_volume()
+            except (OSError,RuntimeError,ValueError,subprocess.TimeoutExpired) as error:
+                return {'skipped':'master unavailable','detail':str(error)}
+        try:
+            with media_change():return {'normalized':True}
+        except RuntimeError as error:
+            # Recheck because PipeWire defaults can disappear between the
+            # readiness probe and the transaction snapshot. Suppress only the
+            # no-master/no-authoritative-sink condition; all other gain and
+            # readback failures remain fatal and named.
+            missing=_saved_master_volume() is None
+            unavailable=(str(error) in ('Could not identify the current default sink',
+                                        'No unambiguous live master sink is available') or
+                         str(error).startswith('Master volume is unavailable from both live audio and persisted state:'))
+            if missing and unavailable:
+                return {'skipped':'master unavailable','detail':str(error)}
+            raise
+
 def _alsa_raw_gain_rows(text):
     # Raw card controls can expose gain stages absent from the simple mixer.
     for block in re.split(r'(?=^numid=\d+,)',text,flags=re.M):

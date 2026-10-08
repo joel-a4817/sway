@@ -44,38 +44,62 @@ def master_sink():
         except RuntimeError:pass
     return '@DEFAULT_SINK@'
 
+def _saved_master_volume():
+    try:value=float(MASTER_VOLUME.read_text().strip().rstrip('%'))
+    except (OSError,ValueError):return None
+    if not math.isfinite(value) or not 0<=value<=100:
+        return None
+    return value
+
+def _live_master_volume():
+    # Avoid @DEFAULT_SINK@ when PipeWire metadata is temporarily ambiguous.
+    # Prefer the path's explicit master, then the saved physical sink. If there
+    # is exactly one exposed sink, it is unambiguous even without a default.
+    target=master_sink()
+    if target=='@DEFAULT_SINK@':
+        rows=_pipewire_json('sinks')
+        names=[str(row.get('name') or '') for row in rows if row.get('name')]
+        saved=saved_output_route().get('sink')
+        if saved and saved in names:target=saved
+        elif _shared_system_path() and 'camilladsp' in names:target='camilladsp'
+        elif len(names)==1:target=names[0]
+        else:raise RuntimeError('No unambiguous live master sink is available')
+    result=run(['__wp_control__','get-sink-volume',target],False,5,media_env())
+    match=re.search(r'(\d+(?:\.\d+)?)%',result.stdout)
+    if result.returncode or not match:
+        raise RuntimeError(result.stderr.strip() or 'Could not read the live master volume')
+    value=float(match.group(1))
+    if not math.isfinite(value) or not 0<=value<=100:
+        raise RuntimeError('Live master volume is outside 0-100%')
+    return value
+
 def master_volume():
     _ensure_no_filter_physical_default()
-    # A recreated sink starts at 100%. Until route restoration completes,
-    # only the persisted master is authoritative.
-    if MASTER_RESTORING or STOPPED.exists() or (STATE/'output-preview').exists():
-        try:return max(0.0,min(100.0,float(MASTER_VOLUME.read_text().strip().rstrip('%'))))
-        except (OSError,ValueError):return 50.0
-    # The Sway volume keys and both web sliders share the DEFAULT PipeWire sink.
-    # Read the live value so external pipewire key presses appear in both sliders.
+    protected=(MASTER_RESTORING or STOPPED.exists() or (STATE/'output-preview').exists())
+    if protected:
+        saved=_saved_master_volume()
+        if saved is not None:return saved
+        # With no persisted master, use the actual live gain. Never invent 50%.
+        return _live_master_volume()
     try:
-        result=run(['__wp_control__','get-sink-volume',master_sink()],False,5,media_env())
-        match=re.search(r'(\d+(?:\.\d+)?)%',result.stdout)
-        if result.returncode==0 and match:
-            value=max(0.0,min(100.0,float(match.group(1))))
-            MASTER_VOLUME.parent.mkdir(parents=True,exist_ok=True)
-            with LOCK:
-                try:saved=float(MASTER_VOLUME.read_text().strip().rstrip('%'))
-                except (OSError,ValueError):saved=None
-                # Recheck under the lock: a poll may have read 100% just
-                # before stop/restart acquired it.
-                if MASTER_RESTORING or STOPPED.exists() or (STATE/'output-preview').exists():
-                    return max(0.0,min(100.0,saved)) if saved is not None else 50.0
-                if time.monotonic()<MASTER_WRITE_UNTIL:
-                    return max(0.0,min(100.0,saved)) if saved is not None else value
-                if saved is None or abs(saved-value)>=.5:
-                    atomic(MASTER_VOLUME,f'{value:.2f}%\n')
-                    sync_mpv_for_audio_path(value)
-            return value
-    except (OSError,FileNotFoundError,subprocess.TimeoutExpired):pass
-    try:return max(0.0,min(100.0,float(MASTER_VOLUME.read_text().strip().rstrip('%'))))
-    except (OSError,ValueError):return 50.0
-
+        value=_live_master_volume()
+        MASTER_VOLUME.parent.mkdir(parents=True,exist_ok=True)
+        with LOCK:
+            saved=_saved_master_volume()
+            # Recheck under the lock: a poll may have read a newly recreated
+            # sink just before a route transaction acquired it.
+            if MASTER_RESTORING or STOPPED.exists() or (STATE/'output-preview').exists():
+                return saved if saved is not None else value
+            if time.monotonic()<MASTER_WRITE_UNTIL:
+                return saved if saved is not None else value
+            if saved is None or abs(saved-value)>=.5:
+                atomic(MASTER_VOLUME,f'{value:.2f}%\n')
+                sync_mpv_for_audio_path(value)
+        return value
+    except (OSError,FileNotFoundError,subprocess.TimeoutExpired,RuntimeError) as live_error:
+        saved=_saved_master_volume()
+        if saved is not None:return saved
+        raise RuntimeError('Master volume is unavailable from both live audio and persisted state: '+str(live_error)) from live_error
 
 def _ws_read(sock, size):
     data=b''
