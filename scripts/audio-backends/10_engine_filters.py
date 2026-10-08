@@ -47,39 +47,29 @@ def _device_labels():
             labels[(kind,slug)]={'label':label}
     return labels
 
+def _profile_title(path):
+    """Read the user-facing YAML title without loading or executing the config."""
+    try:
+        for line in path.read_text(encoding='utf-8').splitlines()[:40]:
+            match=re.match(r'^\s*title\s*:\s*(.*?)\s*$',line,re.I)
+            if not match:continue
+            value=match.group(1).strip()
+            if len(value)>=2 and value[0]==value[-1] and value[0] in ('"',"'"):
+                value=value[1:-1]
+            return value.replace('\\"','"').replace('\\\\','\\').strip()
+    except OSError:pass
+    return ''
+
 def listening_filters():
-    """Resolve current IE/OE profile labels while retaining YAML filenames as IDs."""
-    folders={}
-    if BRIR_DIR.is_dir():
-        for folder in BRIR_DIR.iterdir():
-            if not folder.is_dir():continue
-            parts=_folder_parts(folder.name)
-            if not parts:continue
-            delay,kind,label=parts
-            folders.setdefault((delay,kind),[]).append((folder.name,_filter_key(label)))
-    exact_labels=_device_labels()
-    result={NO_FILTER:{'group':'Other','label':'No filter (bypass CamillaDSP)','mediaControl':True}}
+    """Return flat user-facing labels while retaining YAML filenames as IDs."""
+    result={NO_FILTER:{'group':'','label':'No filter (bypass CamillaDSP)','mediaControl':True}}
     for item in profiles():
-        stem=item.stem
-        if stem.casefold()=='00-filterless':
-            result[item.name]={'group':'Other','label':'Filterless','mediaControl':True}
-            continue
-        match=_PROFILE_RE.match(stem)
-        if not match:
-            result[item.name]={'group':'Other','label':stem,'mediaControl':True}
-            continue
-        kind,device,delay,slug=match.groups();kind=(kind or '').upper()
-        device_slug=device.casefold()
-        configured=exact_labels.get((kind,device_slug)) if kind else None
-        group=(configured or {}).get('label') or device.replace('-',' ').strip().title()
-        if kind:group+=' ('+kind+')'
-        candidates=folders.get((delay,kind),[]) or folders.get((delay,''),[])
-        suffix=_filter_key(slug)
-        matches=[name for name,key in candidates if key==suffix]
-        if not matches and delay=='0000':matches=[name for name,key in candidates if key.endswith(suffix)]
-        label=item.parent.name if item.parent!=PROFILES else (matches[0] if len(matches)==1 else stem)
-        result[item.name]={'group':group,'label':label,
-                           'mediaControl':True}
+        title=_profile_title(item)
+        if item.stem.casefold()=='00-filterless':
+            label=title or 'Filterless'
+        else:
+            label=title or item.stem
+        result[item.name]={'group':'','label':label,'mediaControl':True}
     return result
 
 def profile(name):

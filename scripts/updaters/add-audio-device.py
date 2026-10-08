@@ -60,14 +60,14 @@ HPCFS = (
         'kind': 'IE',
     },
     {
-        'file': 'HyperX_Cloud_III_Average.wav',
-        'label': 'HyperX Cloud III',
-        'kind': 'OE',
-    },
-    {
         'file': 'CMF_by_Nothing_Buds_Pro_2_Sample_A.wav',
         'label': 'CMF Buds Pro 2',
         'kind': 'IE',
+    },
+    {
+        'file': 'HyperX_Cloud_III_Average.wav',
+        'label': 'HyperX Cloud III',
+        'kind': 'OE',
     },
 )
 
@@ -176,10 +176,10 @@ pipeline: []
 '''
 
 def make_profile(index, item, hpcf_path, preamp_db):
-    kind = str(item['kind']).lower()
+    kind = str(item['kind']).upper()
     label = str(item['label']).strip()
-    filename = f'{index:02d}-{kind}-{slugify(label)}-0000ms-h5-average.yml'
-    title = yaml_string(f'{label} - H5 weighted average')
+    filename = f'{slugify(label)}-{kind.casefold()}.yml'
+    title = yaml_string(f'{label} ({kind})')
     h5 = yaml_string(H5_WEIGHTED)
     hpcf = yaml_string(hpcf_path)
     config = f'''---

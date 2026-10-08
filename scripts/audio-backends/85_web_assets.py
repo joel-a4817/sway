@@ -1517,7 +1517,7 @@ function renderTimeline(media,position,duration){
 }
 function renderActiveProfile(data){
   const info=data.filters?.[data.active];
-  $('#active-profile').textContent=data.active?(info?.group||'Other'):'No profile';
+  $('#active-profile').textContent=data.active?(info?.label||data.active):'No profile';
   $('#active-state').textContent=data.active?((info?.label||data.active)+' · '+(data.active==='__no_filter__'?'Bypassed':data.running?'Running':'Stopped')):'Stopped'
 }
 function renderSonobusStatus(mode,groups){
@@ -1825,26 +1825,18 @@ let staticRefreshRunning=false,volatileRefreshRunning=false,profileSnapshot=null
 function renderProfileSnapshot(data){
   const query=$('#profile-search').value.toLowerCase(),root=$('#profile-list');
   renderActiveProfile(data);root.replaceChildren();
-  const groups=new Map();
+  const list=document.createElement('div');list.className='list';
   for(const name of data.profiles||[]){
-    const info=data.filters?.[name]||{group:'Other',label:name};
-    if(![name,info.group,info.label].some(value=>value.toLowerCase().includes(query)))continue;
-    if(!groups.has(info.group))groups.set(info.group,[]);
-    groups.get(info.group).push({name,label:info.label});
+    const info=data.filters?.[name]||{label:name};
+    if(![name,info.label].some(value=>value.toLowerCase().includes(query)))continue;
+    const button=document.createElement('button');
+    button.className='item'+(name===data.active?' active':'');
+    const title=document.createElement('span');title.className='name';title.textContent=info.label;
+    button.append(title);
+    button.onclick=async()=>{try{await busy(button,()=>post('/api/select',{profile:name}),'Switching profile…','Profile activated',true);await refreshStatic()}catch(error){note(error.message,true)}};
+    list.append(button);
   }
-  for(const [group,items] of groups){
-    const heading=document.createElement('div');heading.className='section-title';heading.textContent=group;root.append(heading);
-    const list=document.createElement('div');list.className='list';
-    for(const {name,label} of items){
-      const button=document.createElement('button');
-      button.className='item'+(name===data.active?' active':'');
-      const title=document.createElement('span');title.className='name';title.textContent=label;
-      button.append(title);
-      button.onclick=async()=>{try{await busy(button,()=>post('/api/select',{profile:name}),'Switching profile…','Profile activated',true);await refreshStatic()}catch(error){note(error.message,true)}};
-      list.append(button);
-    }
-    root.append(list);
-  }
+  root.append(list);
 }
 function playlistAction(playlist,shuffle){
   const button=document.createElement('button');button.type='button';button.className='playlist-icon';

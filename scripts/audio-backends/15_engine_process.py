@@ -139,9 +139,16 @@ def stop_camilla(include_stale=False):
         raise RuntimeError('Tracked CamillaDSP process did not stop; refusing another start')
     CAMPID.unlink(missing_ok=True)
 def stop_camilla_for_no_filter():
-    """No filter must never coexist with a CamillaDSP process."""
+    """Stop the sole owned engine even when all tracking state was deleted."""
     stop_camilla(include_stale=True)
     remaining=other_camilla_processes()
+    if not remaining:return
+    if len(remaining)==1 and owned_camilla_engine(remaining[0]):
+        # Both server startup and Media Control reach this shared path. Adopt
+        # the verified survivor only long enough for the normal tracked stop.
+        CAMPID.write_text(str(remaining[0])+'\n')
+        stop_camilla(include_stale=True)
+        remaining=other_camilla_processes()
     if remaining:
         raise RuntimeError('CamillaDSP still running while applying No filter (PID '+
                            ', '.join(map(str,remaining))+')')
@@ -174,8 +181,20 @@ def other_camilla_processes():
         except OSError:pass
     return found
 
+def owned_camilla_engine(pid):
+    """Recognize the one local engine without relying on deleted state files."""
+    try:
+        entry=Path(f'/proc/{pid}')
+        if entry.stat().st_uid!=os.getuid():return False
+        args=[part.decode('utf-8') for part in (entry/'cmdline').read_bytes().split(b'\0') if part]
+        if not args or Path(args[0]).resolve()!=CAMILLA.resolve():return False
+        if f'--port={CAM_WS_PORT}' not in args:return False
+        with socket.create_connection(('127.0.0.1',CAM_WS_PORT),timeout=.5):pass
+        return True
+    except (OSError,ValueError,RuntimeError,socket.timeout):return False
+
 def reusable_camilla(pid):
-    """Recognize this engine by executable and websocket, not its launch profile."""
+    """Recognize this engine by executable, websocket and active profile."""
     try:
         args=[part.decode('utf-8') for part in Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0') if part]
         if not args or Path(args[0]).resolve()!=CAMILLA.resolve():return False

@@ -221,6 +221,11 @@ def main():
     SWITCH_STATE.mkdir(parents=True,exist_ok=True)
     startup_lock=(SWITCH_STATE/'media-control.lock').open('a+')
     fcntl.flock(startup_lock,fcntl.LOCK_EX)
+    # Server and Media Control share the same clean-state master bootstrap.
+    # With all state deleted, seed from a real physical sink before pausing or
+    # normalizing; do not depend on ambiguous PipeWire default metadata.
+    if _saved_master_volume() is None:
+        seed_master_from_physical_output()
     saved_master=pause_for_audio_stop()
     legacy_pid=HOME/'.local/state/sway/audio/camilladsp-webremote/web-server.pid'
     previous=rpid(legacy_pid)
@@ -249,13 +254,27 @@ def main():
     if running:
         if len(running)!=1:
             raise RuntimeError('Multiple CamillaDSP engines found; refusing unsafe startup')
-        verified=reusable_camilla(running[0])
-        if not verified or selected_filter()==NO_FILTER:
-            raise RuntimeError('Unverified CamillaDSP engine is running; refusing unsafe startup')
-        if rpid(CAMPID)!=running[0]:
-            CAMPID.write_text(str(running[0])+'\n')
-        if selected_filter()!=verified.name:
-            raise RuntimeError('Surviving CamillaDSP config differs from selected profile; refusing unsafe startup')
+        pid=running[0]
+        verified=reusable_camilla(pid)
+        clean_state=(selected_filter()==NO_FILTER and not ACTIVE.exists())
+        if clean_state:
+            # Deleting state removes the selected profile and tracked PID, but
+            # does not stop an already-running engine. Verify that the sole
+            # survivor is this user's exact CamillaDSP binary and websocket,
+            # adopt it only for shutdown, then rebuild the No-filter baseline.
+            if not owned_camilla_engine(pid):
+                raise RuntimeError('Foreign CamillaDSP engine is running; refusing unsafe startup')
+            CAMPID.write_text(str(pid)+'\n')
+            stop_local_monitor()
+            stop_camilla(include_stale=True)
+            running=[]
+        else:
+            if not verified or selected_filter()==NO_FILTER:
+                raise RuntimeError('Unverified CamillaDSP engine is running; refusing unsafe startup')
+            if rpid(CAMPID)!=pid:
+                CAMPID.write_text(str(pid)+'\n')
+            if selected_filter()!=verified.name:
+                raise RuntimeError('Surviving CamillaDSP config differs from selected profile; refusing unsafe startup')
     watcher_stop=threading.Event()
     threading.Thread(target=watch_sonobus_workspace,args=(watcher_stop,),daemon=True).start()
     start_runtime()

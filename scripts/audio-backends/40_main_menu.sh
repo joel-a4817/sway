@@ -78,9 +78,8 @@ case "$selected" in
     mapfile -t filters < <(jq -r --argjson info "$info" '.[] | select(($info[.] | if has("mediaControl") then .mediaControl else true end) == true)' <<<"$profiles")
     ((${#filters[@]})) || { echo 'No listening filters found.' >&2; exit 1; }
     filter_device_label() {
-        local filter="$1" room_label="$2" group
-        group="$(jq -r --arg f "$filter" '.[$f].group // "Other"' <<<"$info")"
-        [[ "$group" == Other ]] && printf '%s\n' "$room_label" || printf '%s | %s\n' "$group" "$room_label"
+        local filter="$1" profile_label="$2"
+        printf '%s\n' "$profile_label"
     }
     labels=()
     for filter in "${filters[@]}"; do
