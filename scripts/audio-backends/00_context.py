@@ -8,7 +8,7 @@ from functools import lru_cache, wraps
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 
-HOME=Path.home(); PROFILES=HOME/'Documents/prefs/audio-filters'; MUSIC=HOME/'Downloads/Music'
+HOME=Path.home(); PROFILES=HOME/'Documents/prefs/audio/filters'; MUSIC=HOME/'Downloads/Music'
 SCRIPTS=HOME/'.config/sway/scripts'; UPDATERS=SCRIPTS/'updaters'
 ADD_AUDIO_DEVICE=UPDATERS/'add-audio-device.py'
 DEVICE_LOCK=SCRIPTS/'device-lock.py'
