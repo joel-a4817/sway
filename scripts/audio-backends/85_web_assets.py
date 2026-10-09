@@ -1192,8 +1192,8 @@ body {
      <button class="action accent-orange" id="restart-airplay">
       Restart AirPlay
      </button>
-     <button class="action accent-blue" id="restart-vnc">
-      Stop VNC / Start VNC
+     <button aria-pressed="false" class="action accent-blue" id="restart-vnc">
+      Start VNC
      </button>
      <button class="action accent-red" id="audio-toggle" type="button">
       Stop audio
@@ -1526,6 +1526,16 @@ function renderSonobusStatus(mode,groups){
   $('#sonobus-status').textContent=(mode.sonobus?'Process running':'Process stopped')+
   (selected?' • Profile: '+groups.active+' • User: '+selected.username:'')
 }
+function renderVncState(data){
+  const button=$('#restart-vnc'),running=!!data?.running;
+  button.textContent=running?'Stop VNC':'Start VNC';
+  button.setAttribute('aria-pressed',String(running));
+  button.classList.toggle('mode-active',running);
+}
+async function refreshVncState(){
+  try{renderVncState(await api('/api/vnc-state'))}
+  catch(error){console.warn('VNC state refresh failed',error)}
+}
 async function busy(button,work,label='Working…',doneLabel='Done',feedback=false){if(button.disabled)return;const original=button.innerHTML;button.disabled=true;button.classList.add('busy');if(!button.classList.contains('transport'))button.textContent=label;if(feedback)showTaskFeedback(label,'working');try{const result=await work();if(feedback&&doneLabel)showTaskFeedback(doneLabel,'done');return result}catch(error){showTaskFeedback(error?.message||String(error),'error');throw error}finally{button.disabled=false;button.classList.remove('busy');button.innerHTML=original}}
 function setPlayIcon(shape,button,playing){if(!shape||!button)return;shape.setAttribute('d',playing?'M8 5h3v14H8z M14 5h3v14h-3z':'M8 5.5 19 12 8 18.5z');button.setAttribute('aria-label',playing?'Pause':'Play');button.classList.toggle('playing',playing)}
 function setSystemAvailability(data){for(const id of ['system-previous','system-toggle','system-next'])$('#'+id).disabled=!data.available;$('#system-seek').disabled=!data.available||!data.seekable}
@@ -1818,7 +1828,11 @@ for(const [id,command] of [['system-previous','previous'],['system-toggle','togg
 $('#audio-toggle').onclick=async()=>{try{await busy($('#audio-toggle'),()=>post('/api/audio-toggle'),'Switching audio services…','Audio services updated',true);await refreshStatic()}catch(error){note(error.message,true)}};
 $('#restart-sonobus').onclick=()=>busy($('#restart-sonobus'),()=>post('/api/restart-sonobus'),'Restarting SonoBus…','SonoBus restarted',true).then(refreshVolatile).catch(error=>note(error.message,true));
 $('#restart-airplay').onclick=()=>busy($('#restart-airplay'),()=>post('/api/restart-airplay'),'Restarting AirPlay…','AirPlay restarted',true).then(refreshVolatile).catch(error=>note(error.message,true));
-$('#restart-vnc').onclick=()=>busy($('#restart-vnc'),()=>post('/api/restart-vnc'),'Toggling VNC…','VNC toggled').catch(error=>note(error.message,true));
+$('#restart-vnc').onclick=()=>busy(
+  $('#restart-vnc'),
+  async()=>{const result=await post('/api/restart-vnc');renderVncState(result);return result},
+  'Toggling VNC…','VNC state updated',true
+).catch(error=>{note(error.message,true);refreshVncState()});
 $('#profile-search').oninput=()=>{if(profileSnapshot)renderProfileSnapshot(profileSnapshot);else refreshStatic()};
 bindSeek(state.local,'/api/player/seek');bindSeek(state.system,'/api/system-media/seek');bindVolume(state.local,'/api/player/volume');bindVolume(state.system,'/api/system-volume');
 let staticRefreshRunning=false,volatileRefreshRunning=false,profileSnapshot=null;
@@ -1876,7 +1890,7 @@ function renderVolatile(data){
 async function refreshStatic(){if(staticRefreshRunning)return;staticRefreshRunning=true;try{const data=await api('/api/state');profileSnapshot=data.profiles;renderProfileSnapshot(data.profiles);renderPlaylistSnapshot(data.playlists);loadGroups(data);renderVolatile(data);renderSystem(data.systemMedia);return data}catch(error){note(error.message,true)}finally{staticRefreshRunning=false}}
 async function refreshVolatile(){if(volatileRefreshRunning||document.hidden)return;volatileRefreshRunning=true;try{renderVolatile(await api('/api/volatile'));}catch(error){console.warn('volatile refresh failed',error)}finally{volatileRefreshRunning=false}}
 refreshAll=async()=>refreshStatic();
-refreshStatic();window.addEventListener('pageshow',event=>{if(event.persisted){refreshStatic();refreshVolatile()}});document.addEventListener('visibilitychange',()=>{if(!document.hidden){renewVisibleOutput();refreshStatic();refreshVolatile()}});async function renewVisibleOutput(){if(!outputPreviewToken||$('#output-modal').classList.contains('hidden'))return;try{await post('/api/output-preview-renew',{token:outputPreviewToken})}catch(error){$('#output-modal').classList.add('hidden');pendingMode=null;outputTopology=null;outputPreviewToken=null;showOutputStep('card');showTaskFeedback('Output selection expired; reopen it. '+error.message,'error')}}setInterval(()=>{if(!document.hidden)renewVisibleOutput()},15000);setInterval(refreshVolatile,1000);setInterval(()=>{if(!document.hidden)pollSystem()},1000);setInterval(tickSystem,250);
+refreshStatic();refreshVncState();window.addEventListener('pageshow',event=>{if(event.persisted){refreshStatic();refreshVolatile();refreshVncState()}});document.addEventListener('visibilitychange',()=>{if(!document.hidden){renewVisibleOutput();refreshStatic();refreshVolatile()}});async function renewVisibleOutput(){if(!outputPreviewToken||$('#output-modal').classList.contains('hidden'))return;try{await post('/api/output-preview-renew',{token:outputPreviewToken})}catch(error){$('#output-modal').classList.add('hidden');pendingMode=null;outputTopology=null;outputPreviewToken=null;showOutputStep('card');showTaskFeedback('Output selection expired; reopen it. '+error.message,'error')}}setInterval(()=>{if(!document.hidden)renewVisibleOutput()},15000);setInterval(refreshVolatile,1000);setInterval(()=>{if(!document.hidden)refreshVncState()},3000);setInterval(()=>{if(!document.hidden)pollSystem()},1000);setInterval(tickSystem,250);
   </script>
  </body>
 </html>

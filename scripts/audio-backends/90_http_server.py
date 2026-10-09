@@ -30,6 +30,7 @@ class H(BaseHTTPRequestHandler):
             elif p=='/api/profiles':r={'profiles':[NO_FILTER]+[x.name for x in profiles()],'filters':listening_filters(),'active':active(),'running':alive(rpid(CAMPID),'camilladsp')}
             elif p=='/api/mode':r=mode_state()
             elif p=='/api/away-display':r=away_display_state()
+            elif p=='/api/vnc-state':r=vnc_state()
             elif p=='/api/outputs':r=output_state()
             elif p=='/api/system-media':r=system_state()
             elif p=='/api/player':r=player_state()

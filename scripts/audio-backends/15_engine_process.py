@@ -298,10 +298,20 @@ def media_transaction(function):
         with media_change():return function(*args,**kwargs)
     return wrapped
 
+def vnc_state():
+    running=run(['systemctl','--user','is-active','--quiet',
+                 'camilladsp-wayvnc.service'],False,5).returncode==0
+    return {'running':running}
+
 @media_transaction
 def restart_vnc():
-    user_service('restart','camilladsp-wayvnc.service')
-    return {'restarted':True}
+    # Keep the externally used helper/endpoint name, but toggle actual state.
+    before=vnc_state()['running']
+    user_service('stop' if before else 'start','camilladsp-wayvnc.service')
+    after=vnc_state()['running']
+    if after==before:
+        raise RuntimeError('VNC did not '+('stop' if before else 'start'))
+    return {'running':after,'action':'started' if after else 'stopped'}
 
 @media_transaction
 def restart_airplay():
