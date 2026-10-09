@@ -303,9 +303,8 @@ def vnc_state():
                  'camilladsp-wayvnc.service'],False,5).returncode==0
     return {'running':running}
 
-@media_transaction
 def restart_vnc():
-    # Keep the externally used helper/endpoint name, but toggle actual state.
+    # VNC is independent of audio and server lifecycle; do not enter media_change().
     before=vnc_state()['running']
     user_service('stop' if before else 'start','camilladsp-wayvnc.service')
     after=vnc_state()['running']

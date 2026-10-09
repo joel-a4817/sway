@@ -4,9 +4,16 @@ if [[ -e "$AUDIO_STOPPED_FILE" ]]; then
 else
     AUDIO_TOGGLE_LABEL='Stop audio'
 fi
+VNC_STATUS="$(python3 "$TOPOLOGY_SCRIPT" --vnc-status 2>>"$ACTION_LOG" || true)"
+if [[ "$(jq -r '.running // false' <<<"$VNC_STATUS" 2>/dev/null)" == true ]]; then
+    VNC_TOGGLE_LABEL='Stop VNC'
+else
+    VNC_TOGGLE_LABEL='Start VNC'
+fi
 
 ARGS=(-t warning -y overlay -m 'Media control')
 ARGS+=( -z "$AUDIO_TOGGLE_LABEL" "printf '%s\n' audio-toggle > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
+ARGS+=( -z "$VNC_TOGGLE_LABEL" "printf '%s\n' vnc-toggle > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
 ARGS+=( -z 'CamillaDSP filters' "printf '%s\n' select-filter > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
 ARGS+=( -z 'Audio input' "printf '%s\n' select-input > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
 ARGS+=( -z 'Camera' "printf '%s\n' select-camera > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
@@ -69,6 +76,23 @@ case "$selected" in
         wrap_line 'Audio started.'
     else
         wrap_line 'Audio changed state, but the resulting state was not reported.' >&2
+        exit 1
+    fi
+    exit 0 ;;
+ vnc-toggle)
+    flock -u 9
+    toggle_result="$(python3 "$TOPOLOGY_SCRIPT" --vnc-toggle 2>&1)" || {
+        status=$?
+        printf '%s\n' "$toggle_result" >&2
+        exit "$status"
+    }
+    printf '%s\n' "$toggle_result" >>"$ACTION_LOG"
+    if [[ "$(jq -r 'if has("running") then (.running|tostring) else empty end' <<<"$toggle_result" 2>/dev/null)" == 'true' ]]; then
+        wrap_line 'VNC started.'
+    elif [[ "$(jq -r 'if has("running") then (.running|tostring) else empty end' <<<"$toggle_result" 2>/dev/null)" == 'false' ]]; then
+        wrap_line 'VNC stopped.'
+    else
+        wrap_line 'VNC changed state, but the resulting state was not reported.' >&2
         exit 1
     fi
     exit 0 ;;

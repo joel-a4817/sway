@@ -306,6 +306,17 @@ def topology_cli():
         if len(sys.argv)==2 and sys.argv[1]=='--audio-toggle':
             print(json.dumps(toggle_audio_services()))
             return
+        if len(sys.argv)==2 and sys.argv[1]=='--vnc-status':
+            print(json.dumps(vnc_state()))
+            return
+        if len(sys.argv)==2 and sys.argv[1]=='--vnc-toggle':
+            if alive(rpid(SERVERPID)) and rpid(SERVERPID)!=os.getpid():
+                result=local_api_post('/api/restart-vnc',timeout=40,
+                                      error='VNC toggle failed')
+            else:
+                result=restart_vnc()
+            print(json.dumps(result))
+            return
         if len(sys.argv)==2 and sys.argv[1]=='--ensure-audio-baseline':
             if alive(rpid(SERVERPID)) and rpid(SERVERPID)!=os.getpid():
                 data=local_api_post('/api/ensure-audio-baseline',timeout=90,error='Audio baseline repair failed')
