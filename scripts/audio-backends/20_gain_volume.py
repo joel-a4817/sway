@@ -73,6 +73,44 @@ def _live_master_volume():
         raise RuntimeError('Live master volume is outside 0-100%')
     return value
 
+def capture_default_sink_master():
+    """Capture and persist the live PipeWire default sink volume via wpctl.
+
+    This is the first operation of a gain-normalization transaction. It bypasses
+    master_volume() protection/fallback logic so a stale master-volume file can
+    never replace the actual pre-normalization gain.
+    """
+    global MASTER_WRITE_UNTIL
+    result=run([exe('wpctl'),'get-volume','@DEFAULT_AUDIO_SINK@'],False,8,media_env())
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or 'Could not read current default sink volume with wpctl')
+    match=re.search(r'Volume:\s*([0-9]+(?:\.[0-9]+)?)',result.stdout)
+    if not match:
+        raise RuntimeError('Could not parse current default sink volume from wpctl: '+result.stdout.strip())
+    value=float(match.group(1))*100.0
+    if not math.isfinite(value) or not 0<=value<=100:
+        raise RuntimeError('Current default sink volume is outside 0-100%')
+    MASTER_VOLUME.parent.mkdir(parents=True,exist_ok=True)
+    MASTER_WRITE_UNTIL=time.monotonic()+5.0
+    atomic(MASTER_VOLUME,f'{value:.2f}%\n')
+    return value
+
+def restore_default_sink_master(value):
+    """Restore the captured master to the then-current default sink via wpctl."""
+    value=float(value)
+    result=run([exe('wpctl'),'set-volume','@DEFAULT_AUDIO_SINK@',f'{value:.2f}%'],False,8,media_env())
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or 'Could not restore current default sink volume with wpctl')
+    check=run([exe('wpctl'),'get-volume','@DEFAULT_AUDIO_SINK@'],False,8,media_env())
+    match=re.search(r'Volume:\s*([0-9]+(?:\.[0-9]+)?)',check.stdout)
+    if check.returncode or not match:
+        raise RuntimeError(check.stderr.strip() or 'Could not verify restored default sink volume with wpctl')
+    actual=float(match.group(1))*100.0
+    if abs(actual-value)>0.11:
+        raise RuntimeError(f'Default sink master readback was {actual:.2f}%, expected {value:.2f}%')
+    sync_mpv_for_audio_path(value)
+    return value
+
 def master_volume():
     _ensure_no_filter_physical_default()
     protected=(MASTER_RESTORING or STOPPED.exists() or (STATE/'output-preview').exists())
@@ -201,7 +239,24 @@ def apply_master_volume(value,normalize_sinks=True):
         if selected_filter()!=NO_FILTER:wait_for_camilla_config(profile(selected_filter()))
         try:camilla_command({'SetVolume':0.0})
         except (OSError,ValueError) as error:raise RuntimeError(f'Could not set CamillaDSP Main to unity: {error}') from error
-    result=run(['__wp_control__','set-sink-volume',name,f'{value:.2f}%'],False,8,media_env())
-    if result.returncode:raise RuntimeError(f'Could not set {name} to {value:.2f}%: {result.stderr.strip()}')
+    last_error=''
+    for attempt in range(2):
+        # pw_sink performs the bounded exposure/profile recovery for an expected
+        # sink. Re-resolve it before each write because node IDs may be recreated.
+        pw_sink(name)
+        result=run(['__wp_control__','set-sink-volume',name,f'{value:.2f}%'],False,8,media_env())
+        if result.returncode:
+            last_error=result.stderr.strip()
+            if attempt==0:time.sleep(.15);continue
+            raise RuntimeError(f'Could not set {name} to {value:.2f}%: {last_error}')
+        check=run(['__wp_control__','get-sink-volume',name],False,8,media_env())
+        match=re.search(r'(\d+(?:\.\d+)?)%',check.stdout)
+        if check.returncode or not match:
+            last_error=check.stderr.strip() or 'master readback unavailable'
+        elif abs(float(match.group(1))-value)<=0.11:
+            break
+        else:last_error=f'master readback was {match.group(1)}%'
+        if attempt==0:time.sleep(.15)
+    else:raise RuntimeError(f'Could not verify {name} at {value:.2f}%: {last_error}')
     sync_mpv_for_audio_path(value)
 

@@ -136,7 +136,13 @@ def _alsa_zero_raw_value(card,numid):
         finally:lib.snd_ctl_elem_id_free(ident)
     finally:lib.snd_ctl_close(ctl)
 
-def normalize_audio_volumes(saved_master):
+def normalize_audio_volumes(saved_master=None):
+    # Capture the real current default sink before any gain mutation. Never trust
+    # a caller snapshot or stale master-volume file for this transaction.
+    global MASTER_RESTORING
+    captured_master=capture_default_sink_master()
+    saved_master=captured_master
+    MASTER_RESTORING=True
     # Gain transaction only. Player pausing belongs to the caller.
     errors=[]
     try:cards=Path('/proc/asound/cards').read_text()
@@ -197,9 +203,9 @@ def normalize_audio_volumes(saved_master):
             found=re.search(r'^\s*: values=([-\d,]+)',check.stdout,re.M) if not check.returncode else None
             if not found or [int(v) for v in found.group(1).split(',')]!=[target]*count:
                 errors.append(f'ALSA card {card} {ident}: raw 0dB not verified')
-    # Never restore the master if any ALSA gain failed verification.
-    if errors:raise RuntimeError('Audio normalization incomplete: '+'; '.join(errors[:8])+
-                                 (f'; {len(errors)-8} more' if len(errors)>8 else ''))
+    # Preserve the ALSA verification report, but never strand the logical
+    # master at a temporary route/sink value. Master restoration is always the
+    # final gain operation; any normalization defect is raised afterwards.
     value=float(saved_master)
     if not math.isfinite(value) or not 0<=value<=100:
         raise RuntimeError('Saved master volume is outside 0-100%')
@@ -213,9 +219,16 @@ def normalize_audio_volumes(saved_master):
         if inactive_node is not None:
             unity=run([exe('wpctl'),'set-volume',str(inactive_node['id']),'100%'],False,8,media_env())
             if unity.returncode:raise RuntimeError(unity.stderr.strip() or 'Could not set inactive playback sink to unity')
-    # Restore is deliberately the final gain operation. Nothing may alter gain
-    # after this call returns.
-    apply_master_volume(value,normalize_sinks=False)
+    # Restore is deliberately the final gain operation. Use wpctl against the
+    # current default sink, not route heuristics or the stale persisted value.
+    try:
+        restore_default_sink_master(value)
+    finally:
+        MASTER_RESTORING=False
+    if errors:
+        raise RuntimeError('Audio normalization incomplete after master restore: '+
+                           '; '.join(errors[:8])+
+                           (f'; {len(errors)-8} more' if len(errors)>8 else ''))
     return {'masterVolume':value}
 def set_master_volume(value):
     global MASTER_WRITE_UNTIL

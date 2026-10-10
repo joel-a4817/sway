@@ -1,8 +1,40 @@
+def recover_highest_priority_physical_output():
+    """Apply and persist the best currently available physical output line."""
+    topology=audio_topology()
+    candidates=[]
+    for card_order,card in enumerate(topology['cards']):
+        if card.get('internal'):continue
+        for profile_order,profile_row in enumerate(card.get('profiles',[])):
+            if not _available_option(profile_row) or profile_row['name'].strip().lower()=='off':continue
+            try:priority=int(profile_row.get('priority') or 0)
+            except (TypeError,ValueError):priority=0
+            candidates.append((priority,-card_order,-profile_order,card['name'],profile_row['index']))
+    if not candidates:raise RuntimeError('No available physical playback profile')
+    _,_,_,card_name,profile_index=max(candidates)
+    set_output_profile(card_name,profile_index,topology)
+    current=_find_card(audio_topology(),card_name)
+    routes=[row for row in current['routes'] if _available_option(row)
+            and row['name'].strip().lower() not in ('off','[out] off')
+            and (not row['profiles'] or current['activeProfile'] in row['profiles'])]
+    if routes:
+        def route_priority(row):
+            try:return int(row.get('priority') or 0)
+            except (TypeError,ValueError):return 0
+        chosen_route=max(enumerate(routes),key=lambda item:(route_priority(item[1]),-item[0]))[1]
+        set_output_route(card_name,chosen_route['index'])
+    route=choose_output_route({'card':card_name,'_remembered':True})
+    remember_output(route)
+    _write_json(LOCALSINK,route)
+    return route
+
 def restore_saved_output_for_startup(route):
     route=dict(route or {})
     card=route.get('card');profile_value=route.get('profile')
-    if not card or not profile_value:return route
-    set_output_profile(card,profile_value)
+    if not card or not profile_value:return recover_highest_priority_physical_output()
+    try:
+        set_output_profile(card,profile_value)
+    except (ValueError,RuntimeError):
+        return recover_highest_priority_physical_output()
     current=_find_card(audio_topology(),card)
     compatible=[row for row in current['routes'] if _available_option(row)
                 and row['name'].strip().lower() not in ('off','[out] off')
@@ -78,8 +110,8 @@ def start_runtime(force=False):
     saved_route=saved_output_route()
     if saved_route['card'] and saved_route['profile']:
         try:saved_route=restore_saved_output_for_startup(saved_route)
-        except (RuntimeError,ValueError,OSError) as error:
-            print('Saved output pending: '+str(error),flush=True)
+        except (RuntimeError,ValueError,OSError):
+            saved_route=recover_highest_priority_physical_output()
     # Resolve a physical route even when every state file was deleted.
     startup_output=_physical_output_route(saved_route if saved_route.get('card') else None)
     try:
@@ -130,6 +162,7 @@ def stop_audio_services(mark_stopped=True,stop_pipewire=True):
         try:
             stop_local_monitor()
             stop_mpv()
+            stop_all_mpv()
             stop_sonobus()
             stop_bypass()
             stop_camilla(include_stale=True)

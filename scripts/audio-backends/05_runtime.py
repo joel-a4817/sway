@@ -45,10 +45,27 @@ def pw_device(name,graph=None):
     return device
 
 def pw_sink(name,graph=None):
-    nodes=pw_objects('Node',graph)
-    found=next((x for x in nodes if pw_props(x).get('node.name')==name and pw_props(x).get('media.class')=='Audio/Sink'),None)
-    if found is None:raise RuntimeError('Playback sink unavailable: '+str(name))
-    return found
+    def find(current):
+        return next((x for x in pw_objects('Node',current)
+                     if pw_props(x).get('node.name')==name
+                     and pw_props(x).get('media.class')=='Audio/Sink'),None)
+    found=find(graph)
+    if found is not None:return found
+    # A missing expected sink is recoverable. Re-expose the owned virtual sink,
+    # or reactivate the saved physical card/profile/route, then re-read the graph.
+    if graph is None and not STOPPED.exists():
+        if name=='camilladsp':
+            ensure_system_audio_exposed()
+        else:
+            saved=saved_output_route()
+            if saved.get('sink')==name and saved.get('card') and saved.get('profile'):
+                restore_saved_output_for_startup(saved)
+        deadline=time.monotonic()+6
+        while time.monotonic()<deadline:
+            found=find(pw_graph())
+            if found is not None:return found
+            time.sleep(.1)
+    raise RuntimeError('Playback sink unavailable after recovery: '+str(name))
 
 def pw_default(graph=None):
     graph=pw_graph() if graph is None else graph
@@ -226,13 +243,26 @@ def ensure_system_audio_exposed():
         time.sleep(.1)
     raise RuntimeError('Persistent CamillaDSP system-audio sink did not appear')
 def disable_system_audio_exposure():
-    """Remove the virtual desktop sink before committing direct playback."""
+    """Remove the virtual desktop sink before committing direct playback.
+
+    This disappearance check must never call pw_sink(), because pw_sink()
+    deliberately recovers expected missing sinks. Inspect the live graph directly
+    so stopping the exposure service cannot restart itself, including after the
+    state directory has been deleted and no STOPPED marker exists yet.
+    """
     if run(['systemctl','--user','is-active','--quiet',SYSTEM_AUDIO_SERVICE],False,5).returncode==0:
         user_service('stop',SYSTEM_AUDIO_SERVICE)
     deadline=time.monotonic()+5
     while time.monotonic()<deadline:
-        try:pw_sink('camilladsp')
-        except RuntimeError:return
+        try:
+            exposed=any(
+                pw_props(node).get('node.name')=='camilladsp'
+                and pw_props(node).get('media.class')=='Audio/Sink'
+                for node in pw_objects('Node')
+            )
+        except (RuntimeError,OSError,subprocess.TimeoutExpired):
+            exposed=True
+        if not exposed:return
         time.sleep(.1)
     raise RuntimeError('CamillaDSP system-audio sink remained exposed after service stop')
 AIRPLAY_SERVICES=('nqptp.service','shairport-sync.service')

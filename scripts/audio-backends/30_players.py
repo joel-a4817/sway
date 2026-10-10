@@ -124,8 +124,36 @@ def restore_mpv_queue():
     mpv_direct(['set_property','pause',True])
 
 def stop_mpv():
+    # Preserve queue, selected item, playback position, repeat state and volume
+    # before terminating the backend-owned player.
     save_mpv_queue(force=True)
     killpidfile(MPVPID,'mpv');MPVSOCK.unlink(missing_ok=True)
+
+def stop_all_mpv():
+    """Terminate every MPV process owned by this user and verify exit.
+
+    Full audio shutdown uses this after stop_mpv() has saved the managed queue.
+    Output/filter transitions keep using targeted stop_mpv() so unrelated MPV
+    sessions are not destroyed during ordinary routing changes.
+    """
+    owner=str(os.getuid())
+    run([exe('pkill'),'-TERM','-u',owner,'-x','mpv'],False,5)
+    deadline=time.monotonic()+3
+    while time.monotonic()<deadline:
+        remaining=run([exe('pgrep'),'-u',owner,'-x','mpv'],False,3)
+        if remaining.returncode!=0:
+            MPVPID.unlink(missing_ok=True);MPVSOCK.unlink(missing_ok=True)
+            return
+        time.sleep(.05)
+    run([exe('pkill'),'-KILL','-u',owner,'-x','mpv'],False,5)
+    deadline=time.monotonic()+2
+    while time.monotonic()<deadline:
+        remaining=run([exe('pgrep'),'-u',owner,'-x','mpv'],False,3)
+        if remaining.returncode!=0:
+            MPVPID.unlink(missing_ok=True);MPVSOCK.unlink(missing_ok=True)
+            return
+        time.sleep(.05)
+    raise RuntimeError('MPV processes remained after full audio shutdown')
 def mpv_output_args():
     # Direct No-filter Laptop-only playback has no consumer on camilladsp_input.
     # Follow the physical PipeWire default in that one path; every filtered or
