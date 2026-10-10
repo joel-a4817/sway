@@ -1004,8 +1004,9 @@ body {
 #pc .mpv-gain-labels { display:flex; justify-content:space-between; font-size:.74rem; color:var(--muted); margin:.1rem 2.3rem 0; }
 #pc .mpv-gain-wrap { position:relative; flex:1; display:flex; align-items:center; }
 #pc .mpv-gain-wrap .range { width:100%; }
-#pc .mpv-unity-mark { position:absolute; left:76.9230769%; top:50%; width:12px; height:1.45rem; transform:translate(-50%,-50%); border:0; border-radius:6px; background:currentColor; opacity:.65; cursor:pointer; padding:0; z-index:2; }
-#pc .mpv-unity-mark:hover,#pc .mpv-unity-mark:focus-visible { opacity:1; outline:2px solid var(--accent); outline-offset:2px; }
+#pc .mpv-unity-mark { position:absolute; left:76.9230769%; top:50%; width:2px; height:1.15rem; transform:translate(-50%,-50%); background:currentColor; opacity:.55; pointer-events:none; border-radius:1px; }
+#pc .mpv-unity-reset { border:0; background:transparent; color:inherit; font:inherit; padding:0; cursor:pointer; text-decoration:underline; text-underline-offset:2px; }
+#pc .mpv-unity-reset:hover,#pc .mpv-unity-reset:focus-visible { color:var(--accent); outline:none; }
 #pc .range-row .volume-icon {
   color:#bfe9df;
 }
@@ -1380,13 +1381,13 @@ body {
       </span>
       <div class="mpv-gain-wrap">
        <input aria-label="MPV gain" class="range" id="mpv-gain" max="130" min="0" step="1" type="range" value="100"/>
-       <button aria-label="Set MPV gain to 100% unity" class="mpv-unity-mark" id="mpv-unity" title="Set MPV gain to 100%"></button>
+       <span aria-hidden="true" class="mpv-unity-mark"></span>
       </div>
       <span aria-hidden="true" class="volume-icon">
        <svg fill="currentColor" viewbox="0 0 24 24"><path d="M2 9v6h4l5 4V5L6 9H2z"></path><path d="M14 8.2a5 5 0 0 1 0 7.6l1.4 1.4a7 7 0 0 0 0-10.4L14 8.2z"></path></svg>
       </span>
      </div>
-     <div class="mpv-gain-labels"><span>0%</span><span>100% unity</span><span>130%</span></div>
+     <div class="mpv-gain-labels"><span>0%</span><button class="mpv-unity-reset" id="mpv-unity-reset" type="button">100% unity</button><span>130%</span></div>
      <div class="grid two">
       <button class="action" id="repeat">
        Repeat Off
@@ -1677,7 +1678,7 @@ function bindVolume(media,url){
   control.onchange=()=>{clearTimeout(media.volumeTimer);send()}
 }
 function bindMpvGain(){
-  const media=state.local,control=media.mpvGain,unity=$('#mpv-unity');
+  const media=state.local,control=media.mpvGain,unityReset=$('#mpv-unity-reset');
   const send=()=>{
     const value=Math.max(0,Math.min(130,Number(control.value)||0));
     media.mpvGainHold=performance.now()+1500;media.mpvGainPending=value;
@@ -1690,7 +1691,7 @@ function bindMpvGain(){
   };
   control.oninput=()=>{media.mpvGainHold=performance.now()+1500;fill(control,Number(control.value),130);clearTimeout(media.mpvGainTimer);media.mpvGainTimer=setTimeout(send,90)};
   control.onchange=()=>{clearTimeout(media.mpvGainTimer);send()};
-  unity.onclick=()=>{clearTimeout(media.mpvGainTimer);control.value='100';fill(control,100,130);send()};
+  unityReset.onclick=()=>{clearTimeout(media.mpvGainTimer);control.value='100';fill(control,100,130);send()};
 }
 function coverNode(url,large=false){const node=document.createElement(url?'img':'div');node.className='cover-art'+(large?' large':'')+(url?'':' cover-fallback');if(url){node.src=url;node.loading=large?'eager':'lazy';node.alt='Album cover';node.onerror=()=>{const fallback=coverNode('',large);fallback.id=node.id;fallback.dataset.failedCover=url;node.replaceWith(fallback)}}else{node.textContent='♫';node.setAttribute('aria-label','No album art')}return node}
 let localNowArtworkURL='';
