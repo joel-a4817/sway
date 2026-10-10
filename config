@@ -65,9 +65,6 @@ for_window [app_id="glide"] opacity 0.85, mark --add opacity-dimmed
 for_window [app_id="anki"] opacity 0.85, mark --add opacity-dimmed
 for_window [app_id="signal"] opacity 0.85, mark --add opacity-dimmed
 for_window [app_id="$term"] opacity 0.85, mark --add opacity-dimmed
-for_window [class="coda-qt"] opacity 0.85, mark --add opacity-dimmed
-for_window [title="^Collabora Office"] opacity 0.85, mark --add opacity-dimmed
-for_window [title="Collabora Office*"] opacity 0.85, mark --add opacity-dimmed
 for_window [app_id="discord"] opacity 0.85, mark --add opacity-dimmed
 for_window [app_id="Antra"] opacity 0.85, mark --add opacity-dimmed
 
@@ -136,7 +133,6 @@ bindsym --no-repeat $mod+Mod1+x fullscreen disable; exec kamoso
 bindsym --no-repeat $mod+Mod1+w fullscreen disable; exec karere
 bindsym --no-repeat $mod+Mod1+a fullscreen disable; exec anki
 bindsym --no-repeat $mod+Mod1+d fullscreen disable; exec discord
-bindsym --no-repeat $mod+Mod1+c fullscreen disable; exec coda-qt
 bindsym --no-repeat $mod+Mod1+s fullscreen disable; exec signal-desktop
 bindsym --no-repeat $mod+Mod1+m fullscreen disable; exec prismlauncher
 bindsym --no-repeat $mod+Mod1+k fullscreen disable; exec kicad
