@@ -1,6 +1,9 @@
 def _ensure_no_filter_physical_default():
     """Keep desktop volume keys on the active physical sink in direct bypass."""
-    if not _direct_no_filter_path() or STOPPED.exists():
+    if (not _direct_no_filter_path() or STOPPED.exists()
+            or OUTPUT_PREVIEW.exists()):
+        # Device/Profile/Route preview owns the temporary physical graph. The
+        # previously committed sink may legitimately disappear between stages.
         return None
     physical=saved_output_route().get('sink')
     if not physical or physical=='camilladsp':

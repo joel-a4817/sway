@@ -417,7 +417,10 @@ def output_state():
     return topology
 def start_local_monitor(route=None,resolved=False,persist=True):
     selected=route if resolved else choose_output_route(route)
-    sink=selected['sink'];pw_sink(sink)
+    sink=selected['sink']
+    # Selection and startup must pass a complete live route. Do not silently
+    # replace an explicitly staged route with an older remembered route here.
+    pw_sink(sink)
     stop_local_monitor()
     command='set -o pipefail; "$1" -q -D camilladsp_output_shared -r 96000 -f S32_LE -c 2 -t raw | "$2" --playback --device="$3" --rate=96000 --format=s32le --channels=2'
     args=[exe('bash'),'-c',command,'monitor',exe('arecord'),exe('pacat'),sink]

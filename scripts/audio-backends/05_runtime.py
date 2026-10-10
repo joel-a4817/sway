@@ -57,9 +57,9 @@ def pw_sink(name,graph=None):
         if name=='camilladsp':
             ensure_system_audio_exposed()
         else:
-            saved=saved_output_route()
-            if saved.get('sink')==name and saved.get('card') and saved.get('profile'):
-                restore_saved_output_for_startup(saved)
+            # Physical sinks are recovered by the complete output-line owner.
+            # A node lookup cannot replace its caller's stale sink string.
+            raise RuntimeError('Playback sink unavailable: '+str(name))
         deadline=time.monotonic()+6
         while time.monotonic()<deadline:
             found=find(pw_graph())
