@@ -137,11 +137,12 @@ def _alsa_zero_raw_value(card,numid):
     finally:lib.snd_ctl_close(ctl)
 
 def normalize_audio_volumes(saved_master=None):
-    # Capture the real current default sink before any gain mutation. Never trust
-    # a caller snapshot or stale master-volume file for this transaction.
+    # Routing/filter transactions pass the master captured before their first
+    # mutation. Preserve that snapshot so a recreated 100% sink cannot replace
+    # the persisted logical master. Standalone normalization captures live state.
     global MASTER_RESTORING
-    captured_master=capture_default_sink_master()
-    saved_master=captured_master
+    if saved_master is None:
+        saved_master=capture_default_sink_master()
     MASTER_RESTORING=True
     # Gain transaction only. Player pausing belongs to the caller.
     errors=[]

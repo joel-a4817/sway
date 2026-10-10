@@ -1004,7 +1004,7 @@ body {
 #pc .mpv-gain-labels { display:flex; justify-content:space-between; font-size:.74rem; color:var(--muted); margin:.1rem 2.3rem 0; }
 #pc .mpv-gain-wrap { position:relative; flex:1; display:flex; align-items:center; }
 #pc .mpv-gain-wrap .range { width:100%; }
-#pc .mpv-unity-mark { position:absolute; left:76.9230769%; top:50%; width:2px; height:1.15rem; transform:translate(-50%,-50%); background:currentColor; opacity:.55; pointer-events:none; border-radius:1px; }
+#pc .mpv-unity-mark { position:absolute; left:calc(10.5px + (100% - 21px) * 0.769230769); top:50%; width:2px; height:1.15rem; transform:translate(-50%,-50%); background:currentColor; opacity:.55; pointer-events:none; border-radius:1px; }
 #pc .mpv-unity-reset { border:0; background:transparent; color:inherit; font:inherit; padding:0; cursor:pointer; text-decoration:underline; text-underline-offset:2px; }
 #pc .mpv-unity-reset:hover,#pc .mpv-unity-reset:focus-visible { color:var(--accent); outline:none; }
 #pc .range-row .volume-icon {
@@ -1387,7 +1387,7 @@ body {
        <svg fill="currentColor" viewbox="0 0 24 24"><path d="M2 9v6h4l5 4V5L6 9H2z"></path><path d="M14 8.2a5 5 0 0 1 0 7.6l1.4 1.4a7 7 0 0 0 0-10.4L14 8.2z"></path></svg>
       </span>
      </div>
-     <div class="mpv-gain-labels"><span>0%</span><button class="mpv-unity-reset" id="mpv-unity-reset" type="button">100% unity</button><span>130%</span></div>
+     <div class="mpv-gain-labels"><span>0%</span><button class="mpv-unity-reset" id="mpv-unity-reset" type="button">100%</button><span>130%</span></div>
      <div class="grid two">
       <button class="action" id="repeat">
        Repeat Off
