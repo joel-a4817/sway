@@ -226,9 +226,13 @@ def apply_master_volume(value,normalize_sinks=True):
     # the same logical master; downstream physical outputs remain at unity.
     inactive=saved_output_route().get('sink') if name=='camilladsp' else 'camilladsp'
     if inactive and inactive!=name:
-        try:pw_sink(inactive)
-        except RuntimeError:inactive=None
-        if inactive:
+        # Optional inactive stages must never be recovered. In direct No-filter
+        # mode, pw_sink('camilladsp') would restart the virtual sink service after
+        # apply_mode() deliberately removed it.
+        inactive_node=next((node for node in pw_objects('Node',pw_graph())
+                            if pw_props(node).get('node.name')==inactive
+                            and pw_props(node).get('media.class')=='Audio/Sink'),None)
+        if inactive_node is not None:
             result=run(['__wp_control__','set-sink-volume',inactive,'100%'],False,8,media_env())
             if result.returncode:raise RuntimeError(f'Could not set {inactive} to 100%: {result.stderr.strip()}')
     if normalize_sinks:

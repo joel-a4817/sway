@@ -215,8 +215,12 @@ def normalize_audio_volumes(saved_master=None):
     if target=='@DEFAULT_SINK@':target=pw_default()
     inactive=saved_output_route().get('sink') if target=='camilladsp' else 'camilladsp'
     if inactive and inactive!=target:
-        try:inactive_node=pw_sink(inactive)
-        except RuntimeError:inactive_node=None
+        # This is an optional inactive stage. Inspect only the live graph: using
+        # pw_sink() here would recreate the CamillaDSP virtual sink after a
+        # direct No-filter switch and steal persistence back from the physical sink.
+        inactive_node=next((node for node in pw_objects('Node',pw_graph())
+                            if pw_props(node).get('node.name')==inactive
+                            and pw_props(node).get('media.class')=='Audio/Sink'),None)
         if inactive_node is not None:
             unity=run([exe('wpctl'),'set-volume',str(inactive_node['id']),'100%'],False,8,media_env())
             if unity.returncode:raise RuntimeError(unity.stderr.strip() or 'Could not set inactive playback sink to unity')
