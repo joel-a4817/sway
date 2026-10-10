@@ -15,9 +15,21 @@ def apply_physical_no_filter_fallback(output=None):
     return selected
 
 def audio_baseline_missing():
+    """Return true when persisted state is absent or contradicts the live graph."""
     route=saved_output_route()
-    return (not ACTIVE.is_file() or not MODE.is_file()
-            or not route.get('card') or not route.get('sink'))
+    if (not ACTIVE.is_file() or not MODE.is_file()
+            or not route.get('card') or not route.get('sink')):
+        return True
+    try:
+        live=choose_output_route(dict(route,_remembered=True))
+        if live.get('sink')!=route.get('sink'):
+            return True
+        pw_sink(route['sink'])
+    except (OSError,RuntimeError,ValueError):
+        return True
+    if selected_filter()==NO_FILTER and other_camilla_processes():
+        return True
+    return False
 def seed_master_from_physical_output(route=None):
     """Persist the real physical sink gain when no logical master exists."""
     saved=_saved_master_volume()
@@ -49,6 +61,9 @@ def ensure_physical_audio_baseline(force=False):
             route=apply_physical_no_filter_fallback(candidate)
         if selected_filter()!=NO_FILTER or audio_mode()!='laptop_laptop':
             raise RuntimeError('Clean-state audio baseline did not persist No filter laptop mode')
+        remaining=other_camilla_processes()
+        if remaining:
+            raise RuntimeError('CamillaDSP survived No filter baseline: PID '+', '.join(map(str,remaining)))
         if saved_output_route().get('sink')!=route['sink'] or pw_default()!=route['sink']:
             raise RuntimeError('Clean-state audio baseline did not persist the physical default')
         return {'repaired':True,'route':route,'mode':mode_state()}
