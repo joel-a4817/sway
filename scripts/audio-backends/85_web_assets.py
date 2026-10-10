@@ -1374,13 +1374,13 @@ body {
        </svg>
       </span>
      </div>
-     <div class="label mpv-gain-control">MPV gain</div>
+     <div class="label mpv-gain-control">MPV volume</div>
      <div class="range-row">
       <span aria-hidden="true" class="volume-icon">
        <svg fill="currentColor" viewbox="0 0 24 24"><path d="M3 9v6h4l5 4V5L7 9H3z"></path></svg>
       </span>
       <div class="mpv-gain-wrap">
-       <input aria-label="MPV gain" class="range" id="mpv-gain" max="130" min="0" step="1" type="range" value="100"/>
+       <input aria-label="MPV volume" class="range" id="mpv-gain" max="130" min="0" step="1" type="range" value="100"/>
        <span aria-hidden="true" class="mpv-unity-mark"></span>
       </div>
       <span aria-hidden="true" class="volume-icon">
