@@ -285,10 +285,164 @@ def main():
         server.server_close();cleanup()
         if rpid(SERVERPID)==me:SERVERPID.unlink(missing_ok=True)
         if rpid(STOP_CAP)==me:STOP_CAP.unlink(missing_ok=True)
+def local_api_post(path,payload=None,timeout=90,error='Request failed'):
+    from urllib.request import Request,urlopen
+    from urllib.error import HTTPError,URLError
+    request=Request(f'http://127.0.0.1:{PORT}{path}',data=json.dumps(payload or {}).encode(),
+                    headers={'Content-Type':'application/json'},method='POST')
+    try:
+        with urlopen(request,timeout=timeout) as response:data=json.load(response)
+    except HTTPError as failure:
+        try:detail=json.load(failure).get('error')
+        except (ValueError,TypeError):detail=None
+        raise RuntimeError(detail or error) from failure
+    except URLError as failure:raise RuntimeError('Webremote is unavailable: '+str(failure)) from failure
+    if not data.get('ok'):raise RuntimeError(data.get('error') or error)
+    return data
 
 def topology_cli():
-    """Reject command-line actions; v4 is controlled only by its HTTP API."""
     import sys
-    print('Command-line options are disabled; use the CamillaDSP Studio web interface.',
-          file=sys.stderr)
-    raise SystemExit(2)
+    try:
+        ensure()
+        if len(sys.argv)==2 and sys.argv[1]=='--audio-toggle':
+            print(json.dumps(toggle_audio_services()))
+            return
+        if len(sys.argv)==2 and sys.argv[1]=='--vnc-status':
+            print(json.dumps(vnc_state()))
+            return
+        if len(sys.argv)==2 and sys.argv[1]=='--vnc-toggle':
+            if alive(rpid(SERVERPID)) and rpid(SERVERPID)!=os.getpid():
+                result=local_api_post('/api/restart-vnc',timeout=40,
+                                      error='VNC toggle failed')
+            else:
+                result=restart_vnc()
+            print(json.dumps(result))
+            return
+        if len(sys.argv)==2 and sys.argv[1]=='--ensure-audio-baseline':
+            if alive(rpid(SERVERPID)) and rpid(SERVERPID)!=os.getpid():
+                data=local_api_post('/api/ensure-audio-baseline',timeout=90,error='Audio baseline repair failed')
+            else:data=ensure_physical_audio_baseline()
+            print(json.dumps(data,ensure_ascii=False));return
+        if len(sys.argv)==3 and sys.argv[1]=='--restart-service':
+            name=sys.argv[2]
+            paths={'1':'/api/restart-camilladsp','2':'/api/restart-sonobus',
+                   '3':'/api/restart-airplay','4':'/api/restart-vnc'}
+            if name not in paths:raise ValueError('Choose restart 1, 2, 3 or 4')
+            if not alive(rpid(SERVERPID)):
+                if name=='1':result=restart_camilla()
+                elif name=='2':result=restart_sonobus_action()
+                elif name=='3':result=restart_airplay()
+                else:result=restart_vnc()
+                print(json.dumps(result));return
+            data=local_api_post(paths[name],timeout=40,error='Restart failed')
+            print(json.dumps(data));return
+        if len(sys.argv)==2 and sys.argv[1]=='--toggle-away-display':
+            print(json.dumps(toggle_away_display()));return
+        if len(sys.argv)==2 and sys.argv[1]=='--away-display-status':
+            print(json.dumps(away_display_state()));return
+        if len(sys.argv)==3 and sys.argv[1]=='--select-filter':
+            requested=sys.argv[2]
+            available={NO_FILTER,*[item.name for item in profiles()]}
+            if requested not in available:raise ValueError('Selected filter is not available')
+            if STOPPED.exists():
+                ACTIVE.write_text(requested+'\n')
+                data={'profile':requested,'stopped':True}
+            else:
+                current=selected_filter()
+                # No filter is an idempotent repair operation: its state label
+                # can survive while PipeWire still defaults to the virtual DSP
+                # sink. Always rebuild the bypass and physical default.
+                if requested==NO_FILTER or requested!=current:
+                    switch_profile(requested)
+                data={'profile':selected_filter(),'stopped':False}
+            print(json.dumps(data,ensure_ascii=False));return
+        if len(sys.argv)==2 and sys.argv[1]=='--normalize-menu-open':
+            if STOPPED.exists():
+                print(json.dumps({'skipped':'audio stopped'}));return
+            print(json.dumps(normalize_with_media()));return
+        if len(sys.argv)==2 and sys.argv[1]=='--normalize-audio':
+            print(json.dumps(normalize_with_media()));return
+        if len(sys.argv)==3 and sys.argv[1]=='--profile-path':
+            print(profile(sys.argv[2]));return
+        if len(sys.argv)==2 and sys.argv[1]=='--dsp-profiles':
+            print(json.dumps([NO_FILTER]+[item.name for item in profiles()],ensure_ascii=False));return
+        if len(sys.argv)==2 and sys.argv[1]=='--dsp-filter-info':
+            print(json.dumps(listening_filters(),ensure_ascii=False));return
+        if len(sys.argv)==2 and sys.argv[1]=='--selected-filter':
+            print(selected_filter());return
+        if len(sys.argv)==3 and sys.argv[1]=='--remember-output':
+            route=json.loads(sys.argv[2]);
+            if not isinstance(route,dict) or not all(isinstance(route.get(key),str) and route[key] for key in ('card','profile','sink')):raise ValueError('Invalid output route')
+            remember_output(route);print(json.dumps(route));return
+        if len(sys.argv)==3 and sys.argv[1]=='--remembered-profile':
+            print(remembered_card_profile(sys.argv[2]));return
+        if len(sys.argv)==4 and sys.argv[1]=='--remembered-sink':
+            route=remembered_output(sys.argv[2],sys.argv[3])
+            print(route.get('sink',''))
+            return
+        if len(sys.argv)==5 and sys.argv[1]=='--remembered-port':
+            route=remembered_output(sys.argv[2],sys.argv[3])
+            print(route.get('port','') if route.get('sink')==sys.argv[4] else '')
+            return
+        if len(sys.argv)==3 and sys.argv[1]=='--sink-label':
+            name=sys.argv[2];top=audio_topology();live=next((row for card in top['cards'] for row in card['sinks'] if row['name']==name),None)
+            saved=_read_json(LOCALSINK,{})
+            print((live or {}).get('label') or (saved.get('label') if isinstance(saved,dict) and saved.get('sink')==name else '') or name);return
+        if len(sys.argv)==3 and sys.argv[1]=='--switch-output':
+            request=json.loads(sys.argv[2])
+            if not isinstance(request,dict) or not request.get('card') or request.get('profile') is None:
+                raise ValueError('Choose a playback device and profile')
+            server=rpid(SERVERPID)
+            if not alive(server) or server==os.getpid():
+                if STOPPED.exists():raise RuntimeError('Audio is stopped; start audio before selecting an output')
+                print(json.dumps(activate_output(request,mode=audio_mode(),origin='cli',token=os.environ.get('MEDIA_CONTROL_PICKER_PID')),ensure_ascii=False))
+                return
+            data=local_api_post('/api/output-activate',{'output':request,'mode':audio_mode(),'origin':'cli','token':os.environ.get('MEDIA_CONTROL_PICKER_PID')},120,'Output switch failed')
+            print(json.dumps(data,ensure_ascii=False))
+            return
+        if len(sys.argv)==4 and sys.argv[1]=='--output-route':
+            raise ValueError('Choose profile and route together with --switch-output')
+        if len(sys.argv)==3 and sys.argv[1]=='--apply-output-device':
+            card=sys.argv[2]
+            if not alive(rpid(SERVERPID)):
+                print(json.dumps(select_output_device_stage(card,origin='cli',token=os.environ.get('MEDIA_CONTROL_PICKER_PID')),ensure_ascii=False));return
+            data=local_api_post('/api/output-device-stage',{'card':card,'origin':'cli','token':os.environ.get('MEDIA_CONTROL_PICKER_PID')},90,'Playback device stage failed')
+            print(json.dumps(data,ensure_ascii=False));return
+        if (len(sys.argv)==4 and sys.argv[1]=='--apply-output-profile') or (len(sys.argv)==5 and sys.argv[1]=='--apply-output-route'):
+            if not alive(rpid(SERVERPID)):
+                if STOPPED.exists():raise RuntimeError('Audio is stopped; start audio before selecting an output')
+                result=(apply_output_profile_stage(sys.argv[2],sys.argv[3],mode=audio_mode(),origin='cli',token=os.environ.get('MEDIA_CONTROL_PICKER_PID'))
+                        if sys.argv[1]=='--apply-output-profile' else
+                        apply_output_route_stage(sys.argv[2],sys.argv[3],sys.argv[4],mode=audio_mode(),origin='cli',token=os.environ.get('MEDIA_CONTROL_PICKER_PID')))
+                print(json.dumps(result,ensure_ascii=False));return
+            is_profile=sys.argv[1]=='--apply-output-profile'
+            endpoint='/api/output-profile-stage' if is_profile else '/api/output-route-stage'
+            payload={'card':sys.argv[2],'profile':sys.argv[3],'mode':audio_mode(),'origin':'cli','token':os.environ.get('MEDIA_CONTROL_PICKER_PID')}
+            if not is_profile:payload['route']=sys.argv[4]
+            data=local_api_post(endpoint,payload,90,'Output stage failed')
+            print(json.dumps(data,ensure_ascii=False));return
+        if len(sys.argv)==2 and sys.argv[1]=='--begin-output-preview':
+            print(json.dumps(begin_output_preview('cli',int(os.environ['MEDIA_CONTROL_PICKER_PID']),int(os.environ['MEDIA_CONTROL_PICKER_START'])),ensure_ascii=False));return
+        if len(sys.argv)==2 and sys.argv[1]=='--cancel-output-preview':
+            print(json.dumps(cancel_output_preview('cli',token=os.environ.get('MEDIA_CONTROL_PICKER_PID')),ensure_ascii=False));return
+        if len(sys.argv)==2 and sys.argv[1]=='--interactive-input':
+            # Input routing owns capture topology only; it must not pause media
+            # or enter the playback/capture gain-normalization transaction.
+            result=select_input_interactive()
+            print(json.dumps(result,ensure_ascii=False));return
+        if len(sys.argv)==3 and sys.argv[1]=='--camera-restore-clients':
+            print(json.dumps(restore_camera_clients(json.loads(sys.argv[2])),ensure_ascii=False));return
+        if len(sys.argv)==3 and sys.argv[1]=='--camera-selection-status':
+            print(json.dumps(camera_selection_status(int(sys.argv[2])),ensure_ascii=False));return
+        if len(sys.argv)==2 and sys.argv[1]=='--output-topology':
+            print(json.dumps(audio_topology(),ensure_ascii=False));return
+        if len(sys.argv)==4 and sys.argv[1]=='--output-profile':
+            raise ValueError('Choose profile and route together with --switch-output')
+        if len(sys.argv)==3 and sys.argv[1]=='--resolve-output':
+            print(json.dumps(choose_output_route(json.loads(sys.argv[2])),ensure_ascii=False));return
+        raise ValueError('Invalid topology command')
+    except KeyboardInterrupt:
+        print('Selection cancelled',file=sys.stderr);sys.exit(130)
+    except Exception as error:
+        print(str(error),file=sys.stderr)
+        sys.exit(1)
