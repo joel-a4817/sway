@@ -212,7 +212,7 @@ def make_stereo_profile(index, item, hpcf_path, field_path, preamp_db):
     hpcf = yaml_string(hpcf_path)
     config = f'''---
 title: {title}
-description: "H5 2945-point weighted stereo average with anechoic headphone correction; no crossfeed"
+description: "{'Mesh2HRTF earcup' if kind == 'OE' else 'H5 2945-point'} weighted stereo average with anechoic headphone correction; no crossfeed"
 devices:
   samplerate: {SAMPLE_RATE}
   chunksize: 1024
@@ -278,7 +278,7 @@ def make_crossfeed_profile(index, item, hpcf_path, matrix_path, preamp_db):
     hpcf = yaml_string(hpcf_path)
     config = f'''---
 title: {title}
-description: "H5 2945-point diffuse-field 2x2 matrix with anechoic headphone correction"
+description: "{'Mesh2HRTF earcup' if kind == 'OE' else 'H5 2945-point'} diffuse-field 2x2 matrix with anechoic headphone correction"
 devices:
   samplerate: {SAMPLE_RATE}
   chunksize: 1024
