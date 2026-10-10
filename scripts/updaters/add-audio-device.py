@@ -51,7 +51,6 @@ BACKUP_DIR = CONTEXT_PATHS['AUDIO_DEVICE_BACKUPS']
 HPCF_DIFFUSE = AUDIO_ROOT / 'hpcfs-diffuse'
 HPCF_ANECHOIC = AUDIO_ROOT / 'hpcfs-anechoic'
 DIFFUSE_FIELD_EQ = AUDIO_ROOT / 'diffuse_field_eq_for_in_ear_headphones.wav'
-OE_ADDITIONAL_COMP = AUDIO_ROOT / 'additional_comp_for_over_&_on_ear_headphones.wav'
 H5_WEIGHTED = AUDIO_ROOT / 'H5/2945-weighted-average/H5_2945_Weighted_Power_Average_UNNORMALIZED.wav'
 H5_MATRIX = AUDIO_ROOT / 'H5/2945-diffuse-matrix/H5_2945_Diffuse_Field_Matrix_4ch_FLOAT.wav'
 OE_WEIGHTED = AUDIO_ROOT / 'H5 with earcups/mesh2hrtf-weighted-average/Mesh2HRTF_Weighted_Average_2ch_FLOAT.wav'
@@ -116,8 +115,7 @@ def response_magnitude_for_grid(response, response_rate, rate, nfft):
     return np.interp(target_frequency, source_frequency, magnitude,
                      left=magnitude[0], right=magnitude[-1])
 
-def make_anechoic_hpcf(diffuse_hpcf, destination, diffuse_eq, diffuse_rate,
-                        kind, oe_comp=None, oe_comp_rate=None):
+def make_anechoic_hpcf(diffuse_hpcf, destination, diffuse_eq, diffuse_rate):
     audio, rate = sf.read(diffuse_hpcf, always_2d=True, dtype='float64')
     if rate != SAMPLE_RATE:
         raise RuntimeError(f'Expected {SAMPLE_RATE} Hz HpCF, got {rate}: {diffuse_hpcf}')
@@ -126,17 +124,10 @@ def make_anechoic_hpcf(diffuse_hpcf, destination, diffuse_eq, diffuse_rate,
     diffuse_magnitude = response_magnitude_for_grid(diffuse_eq, diffuse_rate, rate, nfft)
     if np.any(diffuse_magnitude == 0.0):
         raise RuntimeError(f'Diffuse-field EQ contains an exact zero and cannot be subtracted: {DIFFUSE_FIELD_EQ}')
-    oe_magnitude = None
-    if kind == 'OE':
-        if oe_comp is None or oe_comp_rate is None:
-            raise RuntimeError(f'Missing over/on-ear additional compensation: {OE_ADDITIONAL_COMP}')
-        oe_magnitude = response_magnitude_for_grid(oe_comp, oe_comp_rate, rate, nfft)
     output = np.zeros_like(audio)
     for channel in range(audio.shape[1]):
         input_magnitude = np.abs(np.fft.rfft(audio[:, channel], nfft))
         target_magnitude = input_magnitude / diffuse_magnitude
-        if oe_magnitude is not None:
-            target_magnitude *= oe_magnitude
         output[:, channel] = minimum_phase_from_magnitude(target_magnitude, nfft, taps)
     destination.parent.mkdir(parents=True, exist_ok=True)
     sf.write(destination, output, rate, subtype='FLOAT')
@@ -454,21 +445,13 @@ def rebuild_all_filters():
         devices.append((item, source, anechoic_path(item)))
 
     diffuse_eq, diffuse_rate = sf.read(DIFFUSE_FIELD_EQ, always_2d=True, dtype='float64')
-    needs_oe = any(str(item.get('kind', '')).upper() == 'OE' for item, _, _ in devices)
-    if needs_oe and not OE_ADDITIONAL_COMP.is_file():
-        raise SystemExit(f'Missing over/on-ear additional compensation: {OE_ADDITIONAL_COMP}')
-    oe_comp = oe_comp_rate = None
-    if needs_oe:
-        oe_comp, oe_comp_rate = sf.read(OE_ADDITIONAL_COMP, always_2d=True, dtype='float64')
     HPCF_ANECHOIC.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=HPCF_ANECHOIC) as temporary_name:
         temporary = Path(temporary_name)
         staged_hpcfs = []
         for item, source, destination in devices:
             staged = temporary / destination.name
-            make_anechoic_hpcf(source, staged, diffuse_eq, diffuse_rate,
-                                str(item.get('kind', '')).upper(),
-                                oe_comp, oe_comp_rate)
+            make_anechoic_hpcf(source, staged, diffuse_eq, diffuse_rate)
             staged_hpcfs.append((item, staged, destination))
 
         generated = []
