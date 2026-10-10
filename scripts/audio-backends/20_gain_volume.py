@@ -190,10 +190,11 @@ def camilla_command(command):
 
 def sync_mpv_for_audio_path(value):
     if not (alive(rpid(MPVPID),'mpv') and MPVSOCK.exists()):return
-    # MPV writes directly to camilladsp_input, bypassing PipeWire sink gain.
-    # Match the logical master whenever the shared Laptop path feeds
-    # CamillaDSP or the No-filter bridge; direct Laptop output stays at unity.
-    wanted=float(value) if _shared_system_path() else 100.0
+    # MPV writes directly to camilladsp_input on shared/filtered paths, so its
+    # software gain must include the logical master there. Direct PipeWire MPV
+    # already receives the sink master and therefore uses only its local trim.
+    trim=mpv_gain()
+    wanted=(float(value)*trim/100.0) if _shared_system_path() else trim
     try:mpv_direct(['set_property','volume',wanted])
     except (OSError,RuntimeError,ValueError) as error:
         raise RuntimeError(f'Could not sync MPV for active audio path: {error}') from error

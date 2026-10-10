@@ -1000,6 +1000,11 @@ body {
   color:#fff0f7;
   box-shadow:inset 0 1px #ffffff35,0 10px 28px #170e235e;
 }
+#pc .mpv-gain-control { margin-top: .7rem; }
+#pc .mpv-gain-labels { display:flex; justify-content:space-between; font-size:.74rem; color:var(--muted); margin:.1rem 2.3rem 0; }
+#pc .mpv-gain-wrap { position:relative; flex:1; display:flex; align-items:center; }
+#pc .mpv-gain-wrap .range { width:100%; }
+#pc .mpv-unity-mark { position:absolute; left:76.9230769%; top:50%; width:2px; height:1.15rem; transform:translate(-1px,-50%); background:currentColor; opacity:.55; pointer-events:none; border-radius:1px; }
 #pc .range-row .volume-icon {
   color:#bfe9df;
 }
@@ -1367,6 +1372,20 @@ body {
        </svg>
       </span>
      </div>
+     <div class="label mpv-gain-control">MPV gain</div>
+     <div class="range-row">
+      <span aria-hidden="true" class="volume-icon">
+       <svg fill="currentColor" viewbox="0 0 24 24"><path d="M3 9v6h4l5 4V5L7 9H3z"></path></svg>
+      </span>
+      <div class="mpv-gain-wrap">
+       <input aria-label="MPV gain" class="range" id="mpv-gain" max="130" min="0" step="1" type="range" value="100"/>
+       <span aria-hidden="true" class="mpv-unity-mark"></span>
+      </div>
+      <span aria-hidden="true" class="volume-icon">
+       <svg fill="currentColor" viewbox="0 0 24 24"><path d="M2 9v6h4l5 4V5L6 9H2z"></path><path d="M14 8.2a5 5 0 0 1 0 7.6l1.4 1.4a7 7 0 0 0 0-10.4L14 8.2z"></path></svg>
+      </span>
+     </div>
+     <div class="mpv-gain-labels"><span>0%</span><span>100% unity</span><span>130%</span></div>
      <div class="grid two">
       <button class="action" id="repeat">
        Repeat Off
@@ -1494,7 +1513,7 @@ const screens=['profiles','audio-options-page','pc','songs','playlist','groups-p
 let all=[],inside=[],current='';
 const state={
   system:{slider:$('#system-seek'),elapsed:$('#system-elapsed'),durationLabel:$('#system-duration'),volume:$('#system-volume'),duration:0,dragging:false,polling:false,repoll:false,clockPosition:0,clockAt:0,clockPlaying:false,lastAvailableAt:0,trackKey:'',skipPending:false,skipFrom:'',skipStarted:0,skipWarned:false,volumeHold:0,volumeTimer:null,volumePending:null},
-  local:{slider:$('#seek'),elapsed:$('#elapsed'),durationLabel:$('#duration'),volume:$('#volume'),duration:0,dragging:false,polling:false,volumeHold:0,volumeTimer:null,volumePending:null}
+  local:{slider:$('#seek'),elapsed:$('#elapsed'),durationLabel:$('#duration'),volume:$('#volume'),mpvGain:$('#mpv-gain'),duration:0,dragging:false,polling:false,volumeHold:0,volumeTimer:null,volumePending:null,mpvGainHold:0,mpvGainTimer:null,mpvGainPending:null}
 };
 const fmt=value=>{const v=Math.max(0,Number(value)||0);return Math.floor(v/60)+':'+String(Math.floor(v)%60).padStart(2,'0')};
 function show(id){screens.forEach(screen=>screen.classList.toggle('hidden',screen.id!==id));scrollTo({top:0,behavior:'smooth'});updateBackToTop()}
@@ -1655,6 +1674,21 @@ function bindVolume(media,url){
     clearTimeout(media.volumeTimer);media.volumeTimer=setTimeout(send,90)
   };
   control.onchange=()=>{clearTimeout(media.volumeTimer);send()}
+}
+function bindMpvGain(){
+  const media=state.local,control=media.mpvGain;
+  const send=()=>{
+    const value=Math.max(0,Math.min(130,Number(control.value)||0));
+    media.mpvGainHold=performance.now()+1500;media.mpvGainPending=value;
+    fill(control,value,130);
+    post('/api/player/mpv-gain',{volume:value}).then(result=>{
+      const actual=Number(result.volume);
+      media.mpvGainPending=null;
+      if(Number.isFinite(actual)){control.value=String(actual);fill(control,actual,130)}
+    }).catch(error=>{media.mpvGainPending=null;note(error.message,true);pollLocal()})
+  };
+  control.oninput=()=>{media.mpvGainHold=performance.now()+1500;fill(control,Number(control.value),130);clearTimeout(media.mpvGainTimer);media.mpvGainTimer=setTimeout(send,90)};
+  control.onchange=()=>{clearTimeout(media.mpvGainTimer);send()};
 }
 function coverNode(url,large=false){const node=document.createElement(url?'img':'div');node.className='cover-art'+(large?' large':'')+(url?'':' cover-fallback');if(url){node.src=url;node.loading=large?'eager':'lazy';node.alt='Album cover';node.onerror=()=>{const fallback=coverNode('',large);fallback.id=node.id;fallback.dataset.failedCover=url;node.replaceWith(fallback)}}else{node.textContent='♫';node.setAttribute('aria-label','No album art')}return node}
 let localNowArtworkURL='';
@@ -1834,7 +1868,7 @@ $('#restart-vnc').onclick=()=>busy(
   'Toggling VNC…','VNC state updated',true
 ).catch(error=>{note(error.message,true);refreshVncState()});
 $('#profile-search').oninput=()=>{if(profileSnapshot)renderProfileSnapshot(profileSnapshot);else refreshStatic()};
-bindSeek(state.local,'/api/player/seek');bindSeek(state.system,'/api/system-media/seek');bindVolume(state.local,'/api/player/volume');bindVolume(state.system,'/api/system-volume');
+bindSeek(state.local,'/api/player/seek');bindSeek(state.system,'/api/system-media/seek');bindVolume(state.local,'/api/player/volume');bindVolume(state.system,'/api/system-volume');bindMpvGain();
 let staticRefreshRunning=false,volatileRefreshRunning=false,profileSnapshot=null;
 function renderProfileSnapshot(data){
   const query=$('#profile-search').value.toLowerCase(),root=$('#profile-list');
@@ -1885,7 +1919,7 @@ function renderVolatile(data){
   $('#source-title').textContent=({ipad_external:'External',laptop_external:'PC',ipad_ipad:'External',ipad_laptop:'PC',ipad_both:'Both',laptop_ipad:'External',laptop_laptop:'PC',laptop_both:'Both'})[data.mode.mode]||data.mode.label;$('#source-details').textContent='CamillaDSP '+(data.mode.engineRunning?'running':'stopped')+' • SonoBus '+(data.mode.sonobus?'on':'off')+' • AirPlay '+(data.mode.airplay?'on':'off')+(data.mode.localWanted?' • Output '+(data.mode.localOutputLabel||'Not selected'):'');
   document.querySelectorAll('[data-mode]').forEach(button=>button.classList.toggle('mode-active',button.dataset.mode===data.mode.mode));const localOutput=!!data.mode.localWanted;$('#open-output').disabled=!localOutput;$('#open-output').setAttribute('aria-disabled',String(!localOutput));$('#output-title').textContent=localOutput?(data.mode.localOutputLabel||'PC output not selected'):'Not used by current output';$('#output-details').textContent=localOutput?'':'Switch audio output to PC or Both before configuring a physical output.';
   updatePlaylistCover(data.player);
-  const local=data.player,lm=state.local;$('#now-title').textContent=local.title||'Nothing playing';updateLocalNowArtwork(local.cover||'');$('#now-details').textContent=[local.artist,local.album].filter(Boolean).join(' • ')||(local.path||'');renderTimeline(lm,local.currentTime,local.duration);if(lm.volumePending===null&&document.activeElement!==lm.volume){displayMasterVolume(local.volume)}$('#shuffle').disabled=!local.canShuffleQueue;$('#repeat').textContent='Repeat '+({off:'Off',all:'All',one:'1'}[local.repeat]||'Off');$('#repeat').classList.toggle('active',local.repeat!=='off');setPlayIcon($('#local-play-shape'),document.querySelector('[data-cmd="toggle"]'),local.playing)
+  const local=data.player,lm=state.local;$('#now-title').textContent=local.title||'Nothing playing';updateLocalNowArtwork(local.cover||'');$('#now-details').textContent=[local.artist,local.album].filter(Boolean).join(' • ')||(local.path||'');renderTimeline(lm,local.currentTime,local.duration);if(lm.volumePending===null&&document.activeElement!==lm.volume){displayMasterVolume(local.volume)}if(lm.mpvGainPending===null&&document.activeElement!==lm.mpvGain){const gain=Number(local.mpvGain);if(Number.isFinite(gain)){lm.mpvGain.value=String(gain);fill(lm.mpvGain,gain,130)}}$('#shuffle').disabled=!local.canShuffleQueue;$('#repeat').textContent='Repeat '+({off:'Off',all:'All',one:'1'}[local.repeat]||'Off');$('#repeat').classList.toggle('active',local.repeat!=='off');setPlayIcon($('#local-play-shape'),document.querySelector('[data-cmd="toggle"]'),local.playing)
 }
 async function refreshStatic(){if(staticRefreshRunning)return;staticRefreshRunning=true;try{const data=await api('/api/state');profileSnapshot=data.profiles;renderProfileSnapshot(data.profiles);renderPlaylistSnapshot(data.playlists);loadGroups(data);renderVolatile(data);renderSystem(data.systemMedia);return data}catch(error){note(error.message,true)}finally{staticRefreshRunning=false}}
 async function refreshVolatile(){if(volatileRefreshRunning||document.hidden)return;volatileRefreshRunning=true;try{renderVolatile(await api('/api/volatile'));}catch(error){console.warn('volatile refresh failed',error)}finally{volatileRefreshRunning=false}}

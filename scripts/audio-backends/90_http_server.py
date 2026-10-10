@@ -73,6 +73,7 @@ class H(BaseHTTPRequestHandler):
             elif p=='/api/player/shuffle':r=shuffle_current_playlist()
             elif p=='/api/player/seek':v=max(0,float(d.get('seconds')));mpv(['seek',v,'absolute+exact']);save_mpv_queue(force=True);r={'seconds':v}
             elif p=='/api/player/volume':r=set_master_volume(d.get('volume'))
+            elif p=='/api/player/mpv-gain':r=set_mpv_gain(d.get('volume'))
             elif p=='/api/player/repeat':r={'mode':set_repeat(d.get('mode'))};save_mpv_queue(force=True)
             elif p=='/api/play/song':r=play_song(d.get('path'))
             elif p=='/api/play/playlist':r=play_list(d.get('name'),bool(d.get('shuffle')))

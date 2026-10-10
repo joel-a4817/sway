@@ -32,6 +32,31 @@ def stop_sonobus():
 
 def saved_mpv_volume():
     return master_volume()
+def mpv_gain():
+    try:value=float(MPV_GAIN.read_text().strip().rstrip('%'))
+    except (OSError,ValueError):value=100.0
+    return value if math.isfinite(value) and 0<=value<=130 else 100.0
+def effective_mpv_volume(master=None):
+    trim=mpv_gain()
+    if _shared_system_path():
+        master=master_volume() if master is None else float(master)
+        return master*trim/100.0
+    return trim
+def set_mpv_gain(value):
+    try:value=float(value)
+    except (TypeError,ValueError):raise ValueError('Invalid MPV gain')
+    if not math.isfinite(value) or not 0<=value<=130:
+        raise ValueError('MPV gain must be between 0 and 130')
+    with PLAYERLOCK:
+        MPV_GAIN.parent.mkdir(parents=True,exist_ok=True)
+        atomic(MPV_GAIN,f'{value:.2f}%\n')
+        ensure_mpv()
+        wanted=effective_mpv_volume()
+        mpv_direct(['set_property','volume',wanted])
+        actual=float(mpv_direct(['get_property','volume']))
+        if abs(actual-wanted)>0.11:
+            raise RuntimeError(f'MPV volume readback was {actual:.2f}%, expected {wanted:.2f}%')
+    return {'volume':value,'effectiveVolume':actual,'unity':100.0,'maximum':130.0}
 def mpv_direct(command):
     request_id=random.randint(1,2_147_000_000)
     with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as client:
@@ -175,7 +200,7 @@ def ensure_mpv():
     pid=rpid(MPVPID)
     if alive(pid,'mpv') and MPVSOCK.exists() and mpv_output_matches(pid):return
     stop_mpv();log=MPVLOG.open('ab',buffering=0)
-    cmd=[exe('mpv'),'--idle=yes','--no-video','--no-terminal','--keep-open=no',*mpv_output_args(),f'--input-ipc-server={MPVSOCK}',f'--volume={(master_volume() if _shared_system_path() else 100.0):.2f}','--volume-max=100']
+    cmd=[exe('mpv'),'--idle=yes','--no-video','--no-terminal','--keep-open=no',*mpv_output_args(),f'--input-ipc-server={MPVSOCK}',f'--volume={effective_mpv_volume():.2f}','--volume-max=130']
     try:q=subprocess.Popen(cmd,stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
     finally:log.close()
     MPVPID.write_text(f'{q.pid}\n');deadline=time.monotonic()+5
@@ -234,13 +259,13 @@ def set_repeat(m):
 def player_state():
     # Read-only status: do not start MPV while opening or polling the library.
     if not (alive(rpid(MPVPID),'mpv') and MPVSOCK.exists()):
-        return {'available':False,'playing':False,'title':'','path':'','artist':'','album':'','currentTime':None,'duration':None,'volume':saved_mpv_volume(),'repeat':'off','canShuffleQueue':False}
+        return {'available':False,'playing':False,'title':'','path':'','artist':'','album':'','currentTime':None,'duration':None,'volume':saved_mpv_volume(),'mpvGain':mpv_gain(),'mpvEffectiveVolume':None,'repeat':'off','canShuffleQueue':False}
     try:
         with PLAYERLOCK:
             values=mpv_properties(['path','playback-time','duration','pause','loop-file','loop-playlist','media-title','metadata/by-key/Artist','metadata/by-key/Album','metadata/by-key/Album_Artist','playlist','playlist-pos'])
             save_mpv_queue(snapshot=values)
     except Exception:
-        return {'available':False,'playing':False,'title':'','path':'','artist':'','album':'','currentTime':None,'duration':None,'volume':saved_mpv_volume(),'repeat':'off','canShuffleQueue':False}
+        return {'available':False,'playing':False,'title':'','path':'','artist':'','album':'','currentTime':None,'duration':None,'volume':saved_mpv_volume(),'mpvGain':mpv_gain(),'mpvEffectiveVolume':None,'repeat':'off','canShuffleQueue':False}
     path=values.get('path') or ''
     loop_file=values.get('loop-file');loop_playlist=values.get('loop-playlist')
     repeat='one' if loop_file not in ('no',False,None,0) else ('all' if loop_playlist not in ('no',False,None,0) else 'off')
@@ -255,7 +280,7 @@ def player_state():
         'cover':cover_url(Path(path)) if path and Path(path).is_file() and MUSIC.resolve() in Path(path).resolve().parents else '',
         'playlist':playlist_for_track(path),
         'currentTime':number(values.get('playback-time')),'duration':number(values.get('duration')),
-        'volume':master_volume(),
+        'volume':master_volume(),'mpvGain':mpv_gain(),'mpvEffectiveVolume':effective_mpv_volume(),
         'repeat':repeat,'canShuffleQueue':len(values.get('playlist') or [])>1,
     }
 
