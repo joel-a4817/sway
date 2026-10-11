@@ -54,19 +54,19 @@ H5_MATRIX = AUDIO_ROOT / 'sofa average/H5_2945_Diffuse_Field_Matrix_4ch_FLOAT.wa
 HPCFS = (
     {
         'file': 'Apple EarPods + AhaStyle - Approximate B&K 5128 - H5 Approx Anechoic HpCF.wav',
-        'label': 'Apple Earpods Silicone Covers',
-    },
-    {
-        'file': 'CMF Buds Pro 2 - B&K 5128 - H5 Approx Anechoic HpCF.wav',
-        'label': 'CMF Buds Pro 2',
-    },
-    {
-        'file': 'HyperX Cloud III - B&K 5128 - H5 Approx Anechoic HpCF.wav',
-        'label': 'HyperX Cloud III',
+        'label': 'earpods + cover',
     },
     {
         'file': 'Apple EarPods - B&K 5128 - H5 Approx Anechoic HpCF.wav',
         'label': 'earpods',
+    },
+    {
+        'file': 'CMF Buds Pro 2 - B&K 5128 - H5 Approx Anechoic HpCF.wav',
+        'label': 'cmf buds pro 2',
+    },
+    {
+        'file': 'HyperX Cloud III - B&K 5128 - H5 Approx Anechoic HpCF.wav',
+        'label': 'cloud iii',
     },
 )
 SAMPLE_RATE = 96000
