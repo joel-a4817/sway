@@ -48,32 +48,23 @@ AUDIO_FILTERS = AUDIO_ROOT / 'filters'
 SCRIPT_DIR = CONTEXT_PATHS['UPDATERS']
 CONFIG_SCRIPT = Path(__file__).resolve()
 BACKUP_DIR = CONTEXT_PATHS['AUDIO_DEVICE_BACKUPS']
-HPCF_DIFFUSE = AUDIO_ROOT / 'hpcfs-diffuse'
-HPCF_ANECHOIC = AUDIO_ROOT / 'hpcfs-anechoic'
-DIFFUSE_FIELD_EQ = AUDIO_ROOT / 'diffuse_field_eq_for_in_ear_headphones.wav'
+HPCF_ANECHOIC = AUDIO_ROOT / 'hpcf anechoic'
 H5_WEIGHTED = AUDIO_ROOT / 'H5/2945-weighted-average/H5_2945_Weighted_Power_Average_UNNORMALIZED.wav'
 H5_MATRIX = AUDIO_ROOT / 'H5/2945-diffuse-matrix/H5_2945_Diffuse_Field_Matrix_4ch_FLOAT.wav'
-OE_WEIGHTED = AUDIO_ROOT / 'H5 with earcups/mesh2hrtf-weighted-average/Mesh2HRTF_Weighted_Average_2ch_FLOAT.wav'
-OE_MATRIX = AUDIO_ROOT / 'H5 with earcups/mesh2hrtf-diffuse-matrix/Mesh2HRTF_Diffuse_Matrix_4ch_FLOAT.wav'
-
 HPCFS = (
     {
-        'file': 'Apple_EarPods_Ahastyle_Covers_Custom_Average_A+B.wav',
+        'file': 'Apple EarPods + AhaStyle - Approximate B&K 5128 - H5 Approx Anechoic HpCF.wav',
         'label': 'Apple Earpods Silicone Covers',
-        'kind': 'IE',
     },
     {
-        'file': 'CMF_by_Nothing_Buds_Pro_2_Sample_A.wav',
+        'file': 'CMF Buds Pro 2 - B&K 5128 - H5 Approx Anechoic HpCF.wav',
         'label': 'CMF Buds Pro 2',
-        'kind': 'IE',
     },
     {
-        'file': 'HyperX_Cloud_III_Average.wav',
+        'file': 'HyperX Cloud III - B&K 5128 - H5 Approx Anechoic HpCF.wav',
         'label': 'HyperX Cloud III',
-        'kind': 'OE',
     },
 )
-
 SAMPLE_RATE = 96000
 N_FFT = 65536
 CAMILLA_PLAYBACK_DEVICE = 'hw:Loopback,0,1'
@@ -92,46 +83,6 @@ def atomic_write(path, text):
     temporary = path.with_name('.' + path.name + '.new')
     temporary.write_text(text, encoding='utf-8')
     temporary.replace(path)
-
-def next_pow2(value):
-    return 1 << (int(value) - 1).bit_length()
-
-def minimum_phase_from_magnitude(magnitude, nfft, taps):
-    if np.any(~np.isfinite(magnitude)) or np.any(magnitude <= 0.0):
-        raise RuntimeError('A requested anechoic magnitude is non-finite or non-positive')
-    cepstrum = np.fft.irfft(np.log(magnitude), nfft)
-    minimum = np.zeros(nfft, dtype=np.float64)
-    minimum[0] = cepstrum[0]
-    minimum[1:nfft // 2] = 2.0 * cepstrum[1:nfft // 2]
-    minimum[nfft // 2] = cepstrum[nfft // 2]
-    return np.fft.irfft(np.exp(np.fft.rfft(minimum)), nfft)[:taps]
-
-def response_magnitude_for_grid(response, response_rate, rate, nfft):
-    source_nfft = next_pow2(max(16384, len(response) * 16))
-    spectra = np.fft.rfft(response, source_nfft, axis=0)
-    magnitude = np.sqrt(np.mean(np.abs(spectra) ** 2, axis=1))
-    source_frequency = np.fft.rfftfreq(source_nfft, 1.0 / response_rate)
-    target_frequency = np.fft.rfftfreq(nfft, 1.0 / rate)
-    return np.interp(target_frequency, source_frequency, magnitude,
-                     left=magnitude[0], right=magnitude[-1])
-
-def make_anechoic_hpcf(diffuse_hpcf, destination, diffuse_eq, diffuse_rate):
-    audio, rate = sf.read(diffuse_hpcf, always_2d=True, dtype='float64')
-    if rate != SAMPLE_RATE:
-        raise RuntimeError(f'Expected {SAMPLE_RATE} Hz HpCF, got {rate}: {diffuse_hpcf}')
-    taps = len(audio)
-    nfft = next_pow2(max(16384, taps * 16, len(diffuse_eq) * 16))
-    diffuse_magnitude = response_magnitude_for_grid(diffuse_eq, diffuse_rate, rate, nfft)
-    if np.any(diffuse_magnitude == 0.0):
-        raise RuntimeError(f'Diffuse-field EQ contains an exact zero and cannot be subtracted: {DIFFUSE_FIELD_EQ}')
-    output = np.zeros_like(audio)
-    for channel in range(audio.shape[1]):
-        input_magnitude = np.abs(np.fft.rfft(audio[:, channel], nfft))
-        target_magnitude = input_magnitude / diffuse_magnitude
-        output[:, channel] = minimum_phase_from_magnitude(target_magnitude, nfft, taps)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    sf.write(destination, output, rate, subtype='FLOAT')
-    return destination
 
 def stereo_cascade_gain(h5_path, hpcf_path):
     """Strict no-clipping gain for independent stereo H5 and HpCF paths."""
@@ -195,15 +146,14 @@ pipeline: []
 
 def make_stereo_profile(index, item, hpcf_path, field_path, preamp_db):
     """Normal stereo profile: H5 tonal average with no channel crossfeed."""
-    kind = str(item['kind']).upper()
     label = str(item['label']).strip()
-    filename = f'{slugify(label)}-{kind.casefold()}.yml'
-    title = yaml_string(f'{label} ({kind})')
+    filename = f'{slugify(label)}.yml'
+    title = yaml_string(label)
     h5 = yaml_string(field_path)
     hpcf = yaml_string(hpcf_path)
     config = f'''---
 title: {title}
-description: "{'Mesh2HRTF earcup' if kind == 'OE' else 'H5 2945-point'} weighted stereo average with anechoic headphone correction; no crossfeed"
+description: "H5 2945-point weighted stereo average with anechoic headphone correction; no crossfeed"
 devices:
   samplerate: {SAMPLE_RATE}
   chunksize: 1024
@@ -261,15 +211,14 @@ pipeline:
     return CAMILLA_ROOT / filename, config
 
 def make_crossfeed_profile(index, item, hpcf_path, matrix_path, preamp_db):
-    kind = str(item['kind']).upper()
     label = str(item['label']).strip()
-    filename = f'{slugify(label)}-{kind.casefold()}-crossfeed.yml'
-    title = yaml_string(f'{label} ({kind}) - Crossfeed')
+    filename = f'{slugify(label)}-crossfeed.yml'
+    title = yaml_string(f'{label} - Crossfeed')
     matrix = yaml_string(matrix_path)
     hpcf = yaml_string(hpcf_path)
     config = f'''---
 title: {title}
-description: "{'Mesh2HRTF earcup' if kind == 'OE' else 'H5 2945-point'} diffuse-field 2x2 matrix with anechoic headphone correction"
+description: "H5 2945-point diffuse-field 2x2 matrix with anechoic headphone correction"
 devices:
   samplerate: {SAMPLE_RATE}
   chunksize: 1024
@@ -403,7 +352,7 @@ pipeline:
 
 def configured_path(item):
     raw = Path(str(item.get('file', ''))).expanduser()
-    return (raw if raw.is_absolute() else HPCF_DIFFUSE / raw).resolve()
+    return (raw if raw.is_absolute() else HPCF_ANECHOIC / raw).resolve()
 
 def profile_wav_name(label):
     name = str(label).strip().replace('/', '_').replace('\\', '_')
@@ -419,88 +368,51 @@ def rebuild_all_filters():
         raise SystemExit(f'Missing measured H5 weighted stereo average: {H5_WEIGHTED}')
     if not H5_MATRIX.is_file():
         raise SystemExit(f'Missing measured H5 diffuse matrix: {H5_MATRIX}')
-    needs_oe_field = any(str(item.get('kind', '')).upper() == 'OE' for item in HPCFS)
-    if needs_oe_field and not OE_WEIGHTED.is_file():
-        raise SystemExit(f'Missing Mesh2HRTF OE weighted stereo average: {OE_WEIGHTED}')
-    if needs_oe_field and not OE_MATRIX.is_file():
-        raise SystemExit(f'Missing Mesh2HRTF OE diffuse matrix: {OE_MATRIX}')
-    if not DIFFUSE_FIELD_EQ.is_file():
-        raise SystemExit(f'Missing diffuse-field EQ: {DIFFUSE_FIELD_EQ}')
-    if not HPCF_DIFFUSE.is_dir():
-        raise SystemExit(f'Missing diffuse HpCF folder: {HPCF_DIFFUSE}')
+    if not HPCF_ANECHOIC.is_dir():
+        raise SystemExit(f'Missing anechoic HpCF folder: {HPCF_ANECHOIC}')
     devices = []
     labels = set()
     sources = set()
     for item in HPCFS:
-        kind = str(item.get('kind', '')).upper()
         label = str(item.get('label', '')).strip()
         source = configured_path(item)
-        if kind not in ('IE', 'OE') or not label:
+        if not label:
             raise SystemExit(f'Invalid HPCFS entry: {item!r}')
         if not source.is_file() or source.suffix.casefold() != '.wav':
-            raise SystemExit(f'Missing diffuse HpCF WAV: {source}')
+            raise SystemExit(f'Missing anechoic HpCF WAV: {source}')
         if label.casefold() in labels or os.path.normcase(str(source)) in sources:
             raise SystemExit(f'Duplicate HpCF device: {label} / {source}')
-        labels.add(label.casefold()); sources.add(os.path.normcase(str(source)))
-        devices.append((item, source, anechoic_path(item)))
-
-    diffuse_eq, diffuse_rate = sf.read(DIFFUSE_FIELD_EQ, always_2d=True, dtype='float64')
-    HPCF_ANECHOIC.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=HPCF_ANECHOIC) as temporary_name:
-        temporary = Path(temporary_name)
-        staged_hpcfs = []
-        for item, source, destination in devices:
-            staged = temporary / destination.name
-            make_anechoic_hpcf(source, staged, diffuse_eq, diffuse_rate)
-            staged_hpcfs.append((item, staged, destination))
-
-        generated = []
-        validation_generated = []
-        for index, (item, staged, destination) in enumerate(staged_hpcfs, 1):
-            kind = str(item.get('kind', '')).upper()
-            weighted_path = OE_WEIGHTED if kind == 'OE' else H5_WEIGHTED
-            matrix_path = OE_MATRIX if kind == 'OE' else H5_MATRIX
-            stereo_gain = stereo_cascade_gain(weighted_path, staged)
-            crossfeed_gain = matrix_cascade_gain(matrix_path, staged)
-            generated.extend((
-                make_stereo_profile(index, item, destination, weighted_path, stereo_gain),
-                make_crossfeed_profile(index, item, destination, matrix_path, crossfeed_gain),
-            ))
-            validation_generated.extend((
-                make_stereo_profile(index, item, staged, weighted_path, stereo_gain),
-                make_crossfeed_profile(index, item, staged, matrix_path, crossfeed_gain),
-            ))
-        candidates = [(CAMILLA_ROOT / '00-filterless.yml', filterless_text()), *generated]
-        validation_candidates = [(CAMILLA_ROOT / '00-filterless.yml', filterless_text()), *validation_generated]
-
-        camilladsp = Path('/run/current-system/sw/bin/camilladsp')
-        if not camilladsp.is_file():
-            raise SystemExit(f'Missing CamillaDSP executable: {camilladsp}')
-        with tempfile.TemporaryDirectory() as validation_name:
-            validation = Path(validation_name)
-            for number, (path, text) in enumerate(validation_candidates):
-                candidate = validation / f'{number:04d}-{path.name}'
-                candidate.write_text(text, encoding='utf-8')
-                check = subprocess.run([str(camilladsp), '--check', str(candidate)], text=True, capture_output=True)
-                if check.returncode:
-                    raise SystemExit(f'Invalid generated profile {path.name}: ' + (check.stderr.strip() or check.stdout.strip()))
-
-        # Commit regenerated anechoic HpCFs only after every profile validates.
-        for old in HPCF_ANECHOIC.glob('*.wav'):
-            old.unlink()
-        for _, staged, destination in staged_hpcfs:
-            staged.replace(destination)
-
-    # This directory is fully generator-owned for YAML profiles.
+        labels.add(label.casefold())
+        sources.add(os.path.normcase(str(source)))
+        devices.append((item, source))
+    generated = []
+    for index, (item, source) in enumerate(devices, 1):
+        stereo_gain = stereo_cascade_gain(H5_WEIGHTED, source)
+        crossfeed_gain = matrix_cascade_gain(H5_MATRIX, source)
+        generated.extend((
+            make_stereo_profile(index, item, source, H5_WEIGHTED, stereo_gain),
+            make_crossfeed_profile(index, item, source, H5_MATRIX, crossfeed_gain),
+        ))
+    candidates = [(CAMILLA_ROOT / '00-filterless.yml', filterless_text()), *generated]
+    camilladsp = Path('/run/current-system/sw/bin/camilladsp')
+    if not camilladsp.is_file():
+        raise SystemExit(f'Missing CamillaDSP executable: {camilladsp}')
+    with tempfile.TemporaryDirectory() as validation_name:
+        validation = Path(validation_name)
+        for number, (path, text) in enumerate(candidates):
+            candidate = validation / f'{number:04d}-{path.name}'
+            candidate.write_text(text, encoding='utf-8')
+            check = subprocess.run([str(camilladsp), '--check', str(candidate)], text=True, capture_output=True)
+            if check.returncode:
+                raise SystemExit(f'Invalid generated profile {path.name}: ' + (check.stderr.strip() or check.stdout.strip()))
     for pattern in ('*.yml', '*.yaml'):
         for old in CAMILLA_ROOT.rglob(pattern):
             if old.is_file():
                 old.unlink()
     for path, text in candidates:
         atomic_write(path, text)
-    print(f'Regenerated {len(devices)} anechoic HpCFs in {HPCF_ANECHOIC}')
+    print(f'Using {len(devices)} anechoic HpCFs from {HPCF_ANECHOIC} or absolute paths')
     print(f'Rebuilt {len(candidates)} CamillaDSP YAML profiles directly in {CAMILLA_ROOT}')
-
 TERMINALS = (
     ('foot', '-T', 'Manage Audio Device'),
     ('kitty', '--title', 'Manage Audio Device'),
@@ -551,7 +463,6 @@ def render(entries):
     for item in entries:
         lines += ['    {',f"        'file': {str(item['file'])!r},",
                   f"        'label': {str(item['label'])!r},",
-                  f"        'kind': {str(item['kind'])!r},",
                   '    },']
     return '\n'.join([*lines,')'])
 
@@ -561,15 +472,14 @@ def replace_block(text,node,entries):
     result=''.join(lines);ast.parse(result);return result
 
 def new_entry():
-    raw=ask('HpCF WAV filename or absolute path')
+    raw=ask('HpCF WAV filename from hpcf anechoic, or absolute path')
     candidate=Path(raw).expanduser()
-    path=(candidate if candidate.is_absolute() else HPCF_DIFFUSE/candidate).resolve()
+    path=(candidate if candidate.is_absolute() else HPCF_ANECHOIC/candidate).resolve()
     if not path.is_file():raise RuntimeError(f'HpCF file does not exist: {path}')
     if path.suffix.casefold()!='.wav':raise RuntimeError('HpCF must be a WAV file')
     label=ask('Profile name')
-    kind=('IE','OE')[choose('Choose type',('In ear (IE)','Over ear / on ear (OE)'))]
-    stored=path.name if path.parent==HPCF_DIFFUSE.resolve() else str(path)
-    return {'file':stored,'label':label,'kind':kind,'resolved':path}
+    stored=path.name if path.parent==HPCF_ANECHOIC.resolve() else str(path)
+    return {'file':stored,'label':label,'resolved':path}
 def validate_unique(entries,skip=None):
     labels=set();paths=set()
     for index,item in enumerate(entries):
@@ -622,7 +532,7 @@ def clean_devices(text):
     node, entries = load(text)
     print('\nClean devices review')
     row(1, f'Configured devices to remove: {len(entries)}')
-    row(2, f'Generated anechoic HpCF folder: {HPCF_ANECHOIC}')
+    row(2, f'Anechoic HpCF folder: {HPCF_ANECHOIC}')
     row(3, f'CamillaDSP YAML folder: {CAMILLA_ROOT}')
     row(4, 'Result: only 00-filterless.yml will be regenerated')
     if choose('Remove every configured device and generated filter?', ('No', 'Yes')) == 0:
@@ -650,11 +560,10 @@ def clean_devices(text):
 
 def add(text):
     node,entries=load(text);entry=new_entry()
-    trial=[*entries,{key:entry[key] for key in ('file','label','kind')}];validate_unique(trial)
+    trial=[*entries,{key:entry[key] for key in ('file','label')}];validate_unique(trial)
     print('\nAdd review')
     row(1,f"HpCF: {entry['resolved']}")
     row(2,f"Profile name: {entry['label']}")
-    row(3,f"Type: {entry['kind']}")
     if choose('Save this device?',('No','Yes'))==0:return
     backup=save(text,replace_block(text,node,trial))
     print(f"\nAdded {entry['label']}.\nBackup: {backup}")
@@ -662,28 +571,24 @@ def add(text):
 def edit(text):
     node,entries=load(text)
     if not entries:raise RuntimeError('No configured audio devices to edit')
-    index=choose('Edit audio device',[f"{x.get('label')} ({x.get('kind')}) | {x.get('file')}" for x in entries])
+    index=choose('Edit audio device',[f"{x.get('label')} | {x.get('file')}" for x in entries])
     current=entries[index]
     path=configured_path(current)
     label=str(current.get('label','')).strip()
-    kind=str(current.get('kind','')).upper()
     if ask_edit('HpCF',str(path)):
         raw=ask('HpCF WAV filename or absolute path',str(path))
         candidate=Path(raw).expanduser()
-        path=(candidate if candidate.is_absolute() else HPCF_DIFFUSE/candidate).resolve()
+        path=(candidate if candidate.is_absolute() else HPCF_ANECHOIC/candidate).resolve()
     if ask_edit('Profile name',label):
         label=ask('Profile name',label)
-    if ask_edit('Type',kind):
-        kind=('IE','OE')[choose('Choose type',('In ear (IE)','Over ear / on ear (OE)'))]
     if not path.is_file():raise RuntimeError(f'HpCF file does not exist: {path}')
     if path.suffix.casefold()!='.wav':raise RuntimeError('HpCF must be a WAV file')
-    stored=path.name if path.parent==HPCF_DIFFUSE.resolve() else str(path)
-    trial=list(entries);trial[index]={'file':stored,'label':label,'kind':kind}
+    stored=path.name if path.parent==HPCF_ANECHOIC.resolve() else str(path)
+    trial=list(entries);trial[index]={'file':stored,'label':label}
     validate_unique(trial)
     print('\nEdit review')
     row(1,f'HpCF: {path}')
     row(2,f'Profile name: {label}')
-    row(3,f'Type: {kind}')
     if choose('Save these edits?',('No','Yes'))==0:
         print('No files changed.');return
     backup=save(text,replace_block(text,node,trial))
@@ -692,12 +597,11 @@ def edit(text):
 def remove(text):
     node,entries=load(text)
     if not entries:raise RuntimeError('No configured audio devices to remove')
-    index=choose('Remove audio device',[f"{x.get('label')} ({x.get('kind')}) | {x.get('file')}" for x in entries])
+    index=choose('Remove audio device',[f"{x.get('label')} | {x.get('file')}" for x in entries])
     removed=entries.pop(index)
     print('\nRemove review')
     row(1,f"HpCF: {configured_path(removed)}")
     row(2,f"Profile name: {removed.get('label')}")
-    row(3,f"Type: {removed.get('kind')}")
     if choose('Remove this device?',('No','Yes'))==0:return
     backup=save(text,replace_block(text,node,entries))
     print(f"\nRemoved {removed.get('label')}.\nBackup: {backup}")
