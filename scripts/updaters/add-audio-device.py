@@ -85,7 +85,7 @@ def atomic_write(path, text):
     temporary.replace(path)
 
 def stereo_cascade_gain(h5_path, hpcf_path):
-    """Strict no-clipping gain for independent stereo H5 and HpCF paths."""
+    """Maximum safe gain for independent stereo H5 and HpCF paths."""
     h5, h5_rate = sf.read(h5_path, always_2d=True, dtype='float64')
     hpcf, hpcf_rate = sf.read(hpcf_path, always_2d=True, dtype='float64')
     if h5_rate != SAMPLE_RATE or hpcf_rate != SAMPLE_RATE:
@@ -97,11 +97,11 @@ def stereo_cascade_gain(h5_path, hpcf_path):
     bound = max(float(np.sum(np.abs(left))), float(np.sum(np.abs(right))))
     if not np.isfinite(bound) or bound <= 0.0:
         raise RuntimeError('Final stereo H5 and HpCF cascade has an invalid peak bound')
-    exact = min(0.0, -20.0 * np.log10(bound))
+    exact = -20.0 * np.log10(bound)
     return math.floor(exact * 1_000_000.0) / 1_000_000.0
 
 def matrix_cascade_gain(matrix_path, hpcf_path):
-    """Closest gain to 0 dB with a strict bounded full-scale input guarantee."""
+    """Maximum safe gain with a strict bounded full-scale input guarantee."""
     matrix, matrix_rate = sf.read(matrix_path, always_2d=True, dtype='float64')
     hpcf, hpcf_rate = sf.read(hpcf_path, always_2d=True, dtype='float64')
     if matrix_rate != SAMPLE_RATE or hpcf_rate != SAMPLE_RATE:
@@ -121,7 +121,7 @@ def matrix_cascade_gain(matrix_path, hpcf_path):
     bound = max(left, right)
     if not np.isfinite(bound) or bound <= 0.0:
         raise RuntimeError('Final matrix and HpCF cascade has an invalid peak bound')
-    exact = min(0.0, -20.0 * np.log10(bound))
+    exact = -20.0 * np.log10(bound)
     return math.floor(exact * 1_000_000.0) / 1_000_000.0
 
 def filterless_text():
