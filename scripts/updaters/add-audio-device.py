@@ -21,7 +21,6 @@ CONTEXT_FILE = HOME / '.config/sway/scripts/audio-backends/00_context.py'
 
 def load_context_paths():
     defaults = {
-        'PROFILES': HOME / 'Documents/prefs/audio-filters',
         'UPDATERS': HOME / '.config/sway/scripts/updaters',
         'AUDIO_DEVICE_BACKUPS': HOME / '.local/state/sway/audio-device-updater/backups',
     }
@@ -44,13 +43,14 @@ def load_context_paths():
 
 CONTEXT_PATHS = load_context_paths()
 AUDIO_ROOT = HOME / 'Documents/prefs/audio'
+# This installation stores generated CamillaDSP profiles inside the audio tree.
 AUDIO_FILTERS = AUDIO_ROOT / 'filters'
 SCRIPT_DIR = CONTEXT_PATHS['UPDATERS']
 CONFIG_SCRIPT = Path(__file__).resolve()
 BACKUP_DIR = CONTEXT_PATHS['AUDIO_DEVICE_BACKUPS']
 HPCF_ANECHOIC = AUDIO_ROOT / 'hpcf anechoic'
-H5_WEIGHTED = AUDIO_ROOT / 'H5/2945-weighted-average/H5_2945_Weighted_Power_Average_UNNORMALIZED.wav'
-H5_MATRIX = AUDIO_ROOT / 'H5/2945-diffuse-matrix/H5_2945_Diffuse_Field_Matrix_4ch_FLOAT.wav'
+H5_WEIGHTED = AUDIO_ROOT / 'sofa average/H5_2945_Weighted_Power_Average_UNNORMALIZED.wav'
+H5_MATRIX = AUDIO_ROOT / 'sofa average/H5_2945_Diffuse_Field_Matrix_4ch_FLOAT.wav'
 HPCFS = (
     {
         'file': 'Apple EarPods + AhaStyle - Approximate B&K 5128 - H5 Approx Anechoic HpCF.wav',
@@ -63,6 +63,10 @@ HPCFS = (
     {
         'file': 'HyperX Cloud III - B&K 5128 - H5 Approx Anechoic HpCF.wav',
         'label': 'HyperX Cloud III',
+    },
+    {
+        'file': 'Apple EarPods - B&K 5128 - H5 Approx Anechoic HpCF.wav',
+        'label': 'earpods',
     },
 )
 SAMPLE_RATE = 96000
@@ -363,6 +367,54 @@ def profile_wav_name(label):
 def anechoic_path(item):
     return (HPCF_ANECHOIC / profile_wav_name(item.get('label', ''))).resolve()
 
+def commit_profiles(candidates):
+    CAMILLA_ROOT.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='.profile-commit-', dir=CAMILLA_ROOT.parent) as transaction_name:
+        transaction = Path(transaction_name)
+        backup = transaction / 'backup'
+        backup.mkdir()
+        previous = []
+        for pattern in ('*.yml', '*.yaml'):
+            for old in CAMILLA_ROOT.rglob(pattern):
+                if old.is_file():
+                    relative = old.relative_to(CAMILLA_ROOT)
+                    saved = backup / relative
+                    saved.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(old, saved)
+                    previous.append((relative, saved))
+        try:
+            for pattern in ('*.yml', '*.yaml'):
+                for old in CAMILLA_ROOT.rglob(pattern):
+                    if old.is_file():
+                        old.unlink()
+            for path, text in candidates:
+                atomic_write(path, text)
+        except BaseException as commit_error:
+            restore_errors = []
+            for pattern in ('*.yml', '*.yaml'):
+                for partial in CAMILLA_ROOT.rglob(pattern):
+                    if partial.is_file():
+                        try:
+                            partial.unlink()
+                        except OSError as error:
+                            restore_errors.append(f'remove {partial}: {error}')
+            for relative, saved in previous:
+                destination = CAMILLA_ROOT / relative
+                try:
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(saved, destination)
+                except OSError as error:
+                    restore_errors.append(f'restore {destination}: {error}')
+            if restore_errors:
+                raise RuntimeError(
+                    'Profile commit failed and rollback was incomplete: '
+                    + '; '.join(restore_errors)
+                ) from commit_error
+            raise RuntimeError(
+                'Profile commit failed; all previous YAML profiles were restored: '
+                + str(commit_error)
+            ) from commit_error
+
 def rebuild_all_filters():
     if not H5_WEIGHTED.is_file():
         raise SystemExit(f'Missing measured H5 weighted stereo average: {H5_WEIGHTED}')
@@ -405,12 +457,7 @@ def rebuild_all_filters():
             check = subprocess.run([str(camilladsp), '--check', str(candidate)], text=True, capture_output=True)
             if check.returncode:
                 raise SystemExit(f'Invalid generated profile {path.name}: ' + (check.stderr.strip() or check.stdout.strip()))
-    for pattern in ('*.yml', '*.yaml'):
-        for old in CAMILLA_ROOT.rglob(pattern):
-            if old.is_file():
-                old.unlink()
-    for path, text in candidates:
-        atomic_write(path, text)
+    commit_profiles(candidates)
     print(f'Using {len(devices)} anechoic HpCFs from {HPCF_ANECHOIC} or absolute paths')
     print(f'Rebuilt {len(candidates)} CamillaDSP YAML profiles directly in {CAMILLA_ROOT}')
 TERMINALS = (
