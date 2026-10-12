@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Manage diffuse-field HpCF devices and rebuild H5 CamillaDSP profiles."""
+"""Manage anechoic HpCF devices and rebuild sample-safe H5 CamillaDSP profiles."""
 import ast
 import math
 import re
@@ -26,7 +26,7 @@ def load_context_paths():
     }
     if not CONTEXT_FILE.is_file():
         return defaults
-    namespace = {'Path': Path}
+    namespace = {'Path': Path, 'HOME': HOME}
     wanted = set(defaults) | {'HOME', 'SCRIPTS'}
     tree = ast.parse(CONTEXT_FILE.read_text(encoding='utf-8'), str(CONTEXT_FILE))
     for statement in tree.body:
@@ -49,12 +49,13 @@ SCRIPT_DIR = CONTEXT_PATHS['UPDATERS']
 CONFIG_SCRIPT = Path(__file__).resolve()
 BACKUP_DIR = CONTEXT_PATHS['AUDIO_DEVICE_BACKUPS']
 HPCF_ANECHOIC = AUDIO_ROOT / 'hpcf anechoic'
+MEASUREMENTS_DIR = AUDIO_ROOT / 'measurements'
 H5_WEIGHTED = AUDIO_ROOT / 'sofa average/H5_2945_Weighted_Power_Average_UNNORMALIZED.wav'
-H5_MATRIX = AUDIO_ROOT / 'sofa average/H5_2945_Diffuse_Field_Matrix_4ch_FLOAT.wav'
+H5_MATRIX = AUDIO_ROOT / 'sofa average/H5_2945_Avg_Crossfeed_4ch_FLOAT.wav'
 HPCFS = (
     {
         'file': 'Apple EarPods + AhaStyle - Approximate B&K 5128 - H5 Approx Anechoic HpCF.wav',
-        'label': 'earpods + cover',
+        'label': 'earpods + silicone tips',
     },
     {
         'file': 'Apple EarPods - B&K 5128 - H5 Approx Anechoic HpCF.wav',
@@ -70,10 +71,13 @@ HPCFS = (
     },
 )
 SAMPLE_RATE = 96000
-N_FFT = 65536
 CAMILLA_PLAYBACK_DEVICE = 'hw:Loopback,0,1'
 CAMILLA_PLAYBACK_FORMAT = 'S32_LE'
 CAMILLA_ROOT = AUDIO_FILTERS
+# Positive S32_LE maximum; reserve one output LSB instead of aiming above it.
+OUTPUT_SAMPLE_CEILING = 1.0 - 2.0 ** -31
+# Tiny numerical guard for float64 FFT/summation, not an arbitrary dB margin.
+BOUND_NUMERICAL_GUARD = 1e-9
 
 def slugify(value):
     value = value.lower().replace("'", '')
@@ -88,45 +92,109 @@ def atomic_write(path, text):
     temporary.write_text(text, encoding='utf-8')
     temporary.replace(path)
 
+def response_peak_preamp_db(peak_linear, description):
+    """Highest nonpositive gain for a sample bound normalized to PCM limits.
+
+    Default float64 processing, no extra digital boost, and the generated S32_LE
+    capture/playback formats are assumed. Rounding is always toward safety.
+    """
+    peak_linear = float(peak_linear)
+    if not np.isfinite(peak_linear) or peak_linear <= 0.0:
+        raise RuntimeError(f'{description} has an invalid sample bound')
+    guarded = np.nextafter(peak_linear * (1.0 + BOUND_NUMERICAL_GUARD), np.inf)
+    exact = min(0.0, -20.0 * np.log10(guarded))
+    gain = math.floor(exact * 1_000_000_000_000.0) / 1_000_000_000_000.0
+    if guarded * 10.0 ** (gain / 20.0) > 1.0:
+        raise RuntimeError(f'{description}: rounded preamp fails the sample bound')
+    return gain
+
+
+def dense_response_nfft(*lengths):
+    """Use a dense zero-padded FFT grid for practical response peaks."""
+    longest = max(int(length) for length in lengths)
+    minimum = max(65536, longest * 16)
+    return 1 << (minimum - 1).bit_length()
+
+
+def convolve_fir(left, right):
+    """Full linear convolution using NumPy FFTs; no extra runtime dependency."""
+    length = len(left) + len(right) - 1
+    nfft = 1 << (length - 1).bit_length()
+    return np.fft.irfft(
+        np.fft.rfft(left, n=nfft) * np.fft.rfft(right, n=nfft), n=nfft
+    )[:length]
+
+def read_fir(path, channels):
+    data, rate = sf.read(path, always_2d=True, dtype='float64')
+    if rate != SAMPLE_RATE or data.shape[1] != channels or not len(data):
+        raise RuntimeError(f'{path}: expected nonempty {channels}-channel {SAMPLE_RATE} Hz FIR')
+    if not np.isfinite(data).all():
+        raise RuntimeError(f'{path}: non-finite FIR samples')
+    return data
+
+
+def row_sample_extrema(kernels):
+    """Exact signed row extrema for S32_LE input samples in [-1, 1-2^-31].
+
+    Each input channel can independently attain its coefficient-sign-aligned
+    worst case. Use the FINAL cascade, not a product of separate filter bounds.
+    """
+    positive_sums = []
+    negative_sums = []
+    for kernel in kernels:
+        if not np.isfinite(kernel).all():
+            raise RuntimeError('Final cascade has non-finite samples')
+        positive_sums.append(math.fsum(float(v) for v in kernel if v > 0.0))
+        negative_sums.append(math.fsum(float(-v) for v in kernel if v < 0.0))
+    positive = math.fsum(positive_sums)
+    negative = math.fsum(negative_sums)
+    maximum = math.fsum((OUTPUT_SAMPLE_CEILING * positive, negative))
+    minimum_abs = math.fsum((positive, OUTPUT_SAMPLE_CEILING * negative))
+    return maximum, minimum_abs
+
+
+def sample_safe_preamp(rows, description):
+    """Tight static sample protection, with only numerical/serialization guard."""
+    extrema = [row_sample_extrema(kernels) for kernels in rows]
+    peak = max(maximum / OUTPUT_SAMPLE_CEILING
+               for maximum, minimum_abs in extrema)
+    peak = max(peak, max(minimum_abs for maximum, minimum_abs in extrema))
+    return response_peak_preamp_db(peak, description)
+
+
+def report_cascade_headroom(rows, description, gain):
+    """Distinguish sinusoidal graph peaks from all-input sample protection."""
+    nfft = dense_response_nfft(*(len(k) for row in rows for k in row))
+    frequencies = np.fft.rfftfreq(nfft, 1.0 / SAMPLE_RATE)
+    audible = (frequencies >= 20.0) & (frequencies <= 20000.0)
+    full_peak = band_peak = 0.0
+    for row in rows:
+        # Independent input channels can align phases at each frequency.
+        response = sum(np.abs(np.fft.rfft(k, n=nfft)) for k in row)
+        full_peak = max(full_peak, float(np.max(response)))
+        band_peak = max(band_peak, float(np.max(response[audible])))
+    print(f'{description}: 20-20000 Hz sine/row peak '
+          f'{20*np.log10(band_peak):.6f} dB; full-band sine/row peak '
+          f'{20*np.log10(full_peak):.6f} dB; sample-safe gain {gain:.12f} dB')
+
 def stereo_cascade_gain(h5_path, hpcf_path):
-    """Maximum safe gain for independent stereo H5 and HpCF paths."""
-    h5, h5_rate = sf.read(h5_path, always_2d=True, dtype='float64')
-    hpcf, hpcf_rate = sf.read(hpcf_path, always_2d=True, dtype='float64')
-    if h5_rate != SAMPLE_RATE or hpcf_rate != SAMPLE_RATE:
-        raise RuntimeError('H5 weighted average and HpCF must both be 96000 Hz')
-    if h5.shape[1] != 2 or hpcf.shape[1] != 2:
-        raise RuntimeError('H5 weighted average and anechoic HpCF must be stereo')
-    left = np.convolve(h5[:, 0], hpcf[:, 0])
-    right = np.convolve(h5[:, 1], hpcf[:, 1])
-    bound = max(float(np.sum(np.abs(left))), float(np.sum(np.abs(right))))
-    if not np.isfinite(bound) or bound <= 0.0:
-        raise RuntimeError('Final stereo H5 and HpCF cascade has an invalid peak bound')
-    exact = -20.0 * np.log10(bound)
-    return math.floor(exact * 1_000_000.0) / 1_000_000.0
+    h5 = read_fir(h5_path, 2)
+    hp = read_fir(hpcf_path, 2)
+    rows = [[convolve_fir(h5[:, c], hp[:, c])] for c in range(2)]
+    gain = sample_safe_preamp(rows, 'Final stereo PCM sample bound')
+    report_cascade_headroom(rows, str(hpcf_path) + ' stereo', gain)
+    return gain
+
 
 def matrix_cascade_gain(matrix_path, hpcf_path):
-    """Maximum safe gain with a strict bounded full-scale input guarantee."""
-    matrix, matrix_rate = sf.read(matrix_path, always_2d=True, dtype='float64')
-    hpcf, hpcf_rate = sf.read(hpcf_path, always_2d=True, dtype='float64')
-    if matrix_rate != SAMPLE_RATE or hpcf_rate != SAMPLE_RATE:
-        raise RuntimeError('H5 matrix and HpCF must both be 96000 Hz')
-    if matrix.shape[1] != 4:
-        raise RuntimeError('H5 matrix must have channels LL, R-to-L, L-to-R, RR')
-    if hpcf.shape[1] != 2:
-        raise RuntimeError('Anechoic HpCF must be stereo')
-    paths = (
-        np.convolve(matrix[:, 0], hpcf[:, 0]),
-        np.convolve(matrix[:, 1], hpcf[:, 0]),
-        np.convolve(matrix[:, 2], hpcf[:, 1]),
-        np.convolve(matrix[:, 3], hpcf[:, 1]),
-    )
-    left = float(np.sum(np.abs(paths[0])) + np.sum(np.abs(paths[1])))
-    right = float(np.sum(np.abs(paths[2])) + np.sum(np.abs(paths[3])))
-    bound = max(left, right)
-    if not np.isfinite(bound) or bound <= 0.0:
-        raise RuntimeError('Final matrix and HpCF cascade has an invalid peak bound')
-    exact = -20.0 * np.log10(bound)
-    return math.floor(exact * 1_000_000.0) / 1_000_000.0
+    matrix = read_fir(matrix_path, 4)
+    hp = read_fir(hpcf_path, 2)
+    kernels = [convolve_fir(matrix[:, c], hp[:, 0 if c < 2 else 1]) for c in range(4)]
+    rows = [kernels[:2], kernels[2:]]
+    gain = sample_safe_preamp(rows, 'Final matrix PCM sample bound')
+    report_cascade_headroom(rows, str(hpcf_path) + ' crossfeed', gain)
+    return gain
+
 
 def filterless_text():
     return f'''---
@@ -151,13 +219,13 @@ pipeline: []
 def make_stereo_profile(index, item, hpcf_path, field_path, preamp_db):
     """Normal stereo profile: H5 tonal average with no channel crossfeed."""
     label = str(item['label']).strip()
-    filename = f'{slugify(label)}.yml'
-    title = yaml_string(label)
+    filename = f"{slugify(label)}{'-raw' if item.get('_raw') else ''}.yml"
+    title = yaml_string(label + (' - Raw' if item.get('_raw') else ''))
     h5 = yaml_string(field_path)
     hpcf = yaml_string(hpcf_path)
     config = f'''---
 title: {title}
-description: "H5 2945-point weighted stereo average with anechoic headphone correction; no crossfeed"
+description: "H5 measured-grid weighted stereo average with anechoic headphone correction; no crossfeed"
 devices:
   samplerate: {SAMPLE_RATE}
   chunksize: 1024
@@ -199,7 +267,7 @@ filters:
   auto_gain:
     type: Gain
     parameters:
-      gain: {preamp_db:.6f}
+      gain: {preamp_db:.12f}
       scale: dB
 pipeline:
   - type: Filter
@@ -216,13 +284,13 @@ pipeline:
 
 def make_crossfeed_profile(index, item, hpcf_path, matrix_path, preamp_db):
     label = str(item['label']).strip()
-    filename = f'{slugify(label)}-crossfeed.yml'
-    title = yaml_string(f'{label} - Crossfeed')
+    filename = f"{slugify(label)}{'-raw' if item.get('_raw') else ''}-crossfeed.yml"
+    title = yaml_string(label + (' - Raw' if item.get('_raw') else '') + ' - Crossfeed')
     matrix = yaml_string(matrix_path)
     hpcf = yaml_string(hpcf_path)
     config = f'''---
 title: {title}
-description: "H5 2945-point diffuse-field 2x2 matrix with anechoic headphone correction"
+description: "H5 full-sphere hemisphere ear-power 2x2 crossfeed matrix with anechoic headphone correction"
 devices:
   samplerate: {SAMPLE_RATE}
   chunksize: 1024
@@ -323,7 +391,7 @@ filters:
   auto_gain:
     type: Gain
     parameters:
-      gain: {preamp_db:.6f}
+      gain: {preamp_db:.12f}
       scale: dB
 pipeline:
   - type: Mixer
@@ -368,32 +436,80 @@ def anechoic_path(item):
     return (HPCF_ANECHOIC / profile_wav_name(item.get('label', ''))).resolve()
 
 def commit_profiles(candidates):
+    """Atomically replace generated profiles and verify every final byte."""
     CAMILLA_ROOT.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix='.profile-commit-', dir=CAMILLA_ROOT.parent) as transaction_name:
+    expected = {}
+    for path, text in candidates:
+        path = Path(path)
+        if path.parent != CAMILLA_ROOT:
+            raise RuntimeError(f'Generated profile escapes output folder: {path}')
+        if path in expected:
+            raise RuntimeError(f'Duplicate generated profile filename: {path.name}')
+        expected[path] = text
+    before = {
+        path: path.read_text(encoding='utf-8')
+        for pattern in ('*.yml', '*.yaml')
+        for path in CAMILLA_ROOT.rglob(pattern)
+        if path.is_file()
+    }
+    # Preserve YAMLs not produced by this manager, including nested room profiles.
+    generated_descriptions = (
+        'H5 2945-point weighted stereo average',
+        'H5 2945-point diffuse-field 2x2 matrix',
+        'H5 measured-grid weighted stereo average',
+        'H5 hemisphere rank-one approximate 2x2 crossfeed matrix',
+        'H5 full-sphere hemisphere ear-power 2x2 crossfeed matrix',
+        'Pass-through CamillaDSP profile with no filters',
+    )
+    preserved = {
+        path for path, text in before.items()
+        if path not in expected and not any(
+            f'description: "{description}' in text
+            for description in generated_descriptions
+        )
+    }
+    before = {path: text for path, text in before.items() if path not in preserved}
+    with tempfile.TemporaryDirectory(
+        prefix='.profile-commit-', dir=CAMILLA_ROOT.parent
+    ) as transaction_name:
         transaction = Path(transaction_name)
         backup = transaction / 'backup'
         backup.mkdir()
         previous = []
-        for pattern in ('*.yml', '*.yaml'):
-            for old in CAMILLA_ROOT.rglob(pattern):
-                if old.is_file():
-                    relative = old.relative_to(CAMILLA_ROOT)
-                    saved = backup / relative
-                    saved.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(old, saved)
-                    previous.append((relative, saved))
+        for old, old_text in before.items():
+            relative = old.relative_to(CAMILLA_ROOT)
+            saved = backup / relative
+            saved.parent.mkdir(parents=True, exist_ok=True)
+            saved.write_text(old_text, encoding='utf-8')
+            previous.append((relative, saved))
         try:
-            for pattern in ('*.yml', '*.yaml'):
-                for old in CAMILLA_ROOT.rglob(pattern):
-                    if old.is_file():
-                        old.unlink()
-            for path, text in candidates:
+            # Existing targets are replaced atomically in place, never skipped.
+            # Remove only obsolete manager-generated paths after replacements.
+            for path, text in expected.items():
                 atomic_write(path, text)
+            for old in before:
+                if old not in expected:
+                    old.unlink()
+            actual_paths = {
+                path
+                for pattern in ('*.yml', '*.yaml')
+                for path in CAMILLA_ROOT.rglob(pattern)
+                if path.is_file()
+            }
+            if actual_paths != set(expected) | preserved:
+                missing = sorted(str(path) for path in (set(expected) | preserved) - actual_paths)
+                extra = sorted(str(path) for path in actual_paths - (set(expected) | preserved))
+                raise RuntimeError(
+                    f'Profile verification path mismatch; missing={missing}, extra={extra}'
+                )
+            for path, text in expected.items():
+                if path.read_text(encoding='utf-8') != text:
+                    raise RuntimeError(f'Profile verification failed: {path}')
         except BaseException as commit_error:
             restore_errors = []
             for pattern in ('*.yml', '*.yaml'):
                 for partial in CAMILLA_ROOT.rglob(pattern):
-                    if partial.is_file():
+                    if partial.is_file() and partial not in preserved:
                         try:
                             partial.unlink()
                         except OSError as error:
@@ -414,18 +530,62 @@ def commit_profiles(candidates):
                 'Profile commit failed; all previous YAML profiles were restored: '
                 + str(commit_error)
             ) from commit_error
+    changed = [path for path, text in expected.items() if before.get(path) != text]
+    removed = [path for path in before if path not in expected]
+    return changed, removed
 
-def rebuild_all_filters():
+def measurement_devices():
+    """Configured labels plus every CSV-derived HpCF, without editing HPCFS.
+
+    Ignore stale/unrelated WAVs. Expected WAV names use the builder's existing
+    safe-name rule, verified against the builder in the regression tests.
+    """
+    if not MEASUREMENTS_DIR.is_dir():
+        raise SystemExit(f'Missing measurement folder: {MEASUREMENTS_DIR}')
+    csvs = sorted((p for p in MEASUREMENTS_DIR.iterdir()
+                   if p.is_file() and p.suffix.casefold() == '.csv'),
+                  key=lambda p: (p.name.casefold(), p.name))
+    if not csvs:
+        raise SystemExit(f'No CSV files found in {MEASUREMENTS_DIR}')
+    result = [dict(item) for item in HPCFS]
+    configured = {str(configured_path(item)) for item in result}
+    expected_names = set()
+    for csv_path in csvs:
+        name = re.sub(r'[\\/:*?"<>|]+', '_', csv_path.stem).strip()
+        if not name or name in ('.', '..') or any(ord(c) < 32 for c in name):
+            raise SystemExit(f'Invalid measurement filename: {csv_path.name}')
+        wav_name = name + ' - H5 Approx Anechoic HpCF.wav'
+        if wav_name.casefold() in expected_names:
+            raise SystemExit(f'Measurement output collision: {csv_path.name}')
+        expected_names.add(wav_name.casefold())
+        source = (HPCF_ANECHOIC / wav_name).resolve()
+        if not source.is_file():
+            raise SystemExit(f'Missing CSV-derived HpCF: {source}; run the HpCF builder first')
+        if str(source) not in configured:
+            result.append({'file': wav_name, 'label': name})
+            configured.add(str(source))
+    return result
+
+
+def paired_hpcf_paths(source):
+    """A normal WAV and its explicit Raw sibling, including custom paths."""
+    source = Path(source)
+    if source.stem.endswith(' - Raw'):
+        return source.with_name(source.stem[:-6] + source.suffix), source
+    return source, source.with_name(source.stem + ' - Raw' + source.suffix)
+
+def build_profile_candidates(all_measurements=False):
     if not H5_WEIGHTED.is_file():
         raise SystemExit(f'Missing measured H5 weighted stereo average: {H5_WEIGHTED}')
     if not H5_MATRIX.is_file():
-        raise SystemExit(f'Missing measured H5 diffuse matrix: {H5_MATRIX}')
+        raise SystemExit(f'Missing measured H5 hemisphere matrix: {H5_MATRIX}')
     if not HPCF_ANECHOIC.is_dir():
         raise SystemExit(f'Missing anechoic HpCF folder: {HPCF_ANECHOIC}')
     devices = []
     labels = set()
+    profile_names = {'00-filterless.yml'}
     sources = set()
-    for item in HPCFS:
+    for item in (measurement_devices() if all_measurements else HPCFS):
         label = str(item.get('label', '')).strip()
         source = configured_path(item)
         if not label:
@@ -434,18 +594,40 @@ def rebuild_all_filters():
             raise SystemExit(f'Missing anechoic HpCF WAV: {source}')
         if label.casefold() in labels or os.path.normcase(str(source)) in sources:
             raise SystemExit(f'Duplicate HpCF device: {label} / {source}')
+        profile_slug = slugify(label)
+        filenames = {profile_slug + suffix for suffix in
+                     ('.yml', '-crossfeed.yml', '-raw.yml', '-raw-crossfeed.yml')}
+        if not profile_slug or filenames & profile_names:
+            raise SystemExit(f'Empty or duplicate profile filename for label: {label}')
+        profile_names.update(filenames)
         labels.add(label.casefold())
         sources.add(os.path.normcase(str(source)))
-        devices.append((item, source))
+        normal, raw = paired_hpcf_paths(source)
+        for variant in (normal, raw):
+            if not variant.is_file():
+                raise SystemExit(f'Missing paired HpCF: {variant}; run the updated HpCF builder first')
+            read_fir(variant, 2)
+        devices.append((item, normal))
     generated = []
     for index, (item, source) in enumerate(devices, 1):
-        stereo_gain = stereo_cascade_gain(H5_WEIGHTED, source)
-        crossfeed_gain = matrix_cascade_gain(H5_MATRIX, source)
-        generated.extend((
-            make_stereo_profile(index, item, source, H5_WEIGHTED, stereo_gain),
-            make_crossfeed_profile(index, item, source, H5_MATRIX, crossfeed_gain),
-        ))
+        normal, raw_source = paired_hpcf_paths(source)
+        for raw, variant in ((False, normal), (True, raw_source)):
+            variant_item = dict(item, _raw=raw)
+            # Assess the actual complete cascade, not separate filter bounds.
+            # Flat-endpoint HpCFs still receive full-band sample protection:
+            # ignoring ultrasonic clipping would not protect audible samples.
+            stereo_gain = stereo_cascade_gain(H5_WEIGHTED, variant)
+            crossfeed_gain = matrix_cascade_gain(H5_MATRIX, variant)
+            generated.extend((
+                make_stereo_profile(index, variant_item, variant, H5_WEIGHTED, stereo_gain),
+                make_crossfeed_profile(index, variant_item, variant, H5_MATRIX, crossfeed_gain),
+            ))
     candidates = [(CAMILLA_ROOT / '00-filterless.yml', filterless_text()), *generated]
+    return candidates, devices
+
+
+def rebuild_all_filters(all_measurements=False):
+    candidates, devices = build_profile_candidates(all_measurements)
     camilladsp = Path('/run/current-system/sw/bin/camilladsp')
     if not camilladsp.is_file():
         raise SystemExit(f'Missing CamillaDSP executable: {camilladsp}')
@@ -457,9 +639,20 @@ def rebuild_all_filters():
             check = subprocess.run([str(camilladsp), '--check', str(candidate)], text=True, capture_output=True)
             if check.returncode:
                 raise SystemExit(f'Invalid generated profile {path.name}: ' + (check.stderr.strip() or check.stdout.strip()))
-    commit_profiles(candidates)
+    existed = {path for path, text in candidates if path.is_file()}
+    changed, removed = commit_profiles(candidates)
+    for path, text in candidates:
+        action = 'Replaced existing' if path in existed else 'Created'
+        print(f'{action}: {path}')
+    for path, text in candidates:
+        match = re.search(r'  auto_gain:\n    type: Gain\n    parameters:\n      gain: ([^\n]+)', text)
+        if match:
+            print(f'{path.name}: sample-safe preamp {match.group(1)} dB')
     print(f'Using {len(devices)} anechoic HpCFs from {HPCF_ANECHOIC} or absolute paths')
-    print(f'Rebuilt {len(candidates)} CamillaDSP YAML profiles directly in {CAMILLA_ROOT}')
+    print(
+        f'Verified {len(candidates)} CamillaDSP YAML profiles in {CAMILLA_ROOT}; '
+        f'{len(changed)} changed, {len(removed)} obsolete removed'
+    )
 TERMINALS = (
     ('foot', '-T', 'Manage Audio Device'),
     ('kitty', '--title', 'Manage Audio Device'),
@@ -581,7 +774,7 @@ def clean_devices(text):
     row(1, f'Configured devices to remove: {len(entries)}')
     row(2, f'Anechoic HpCF folder: {HPCF_ANECHOIC}')
     row(3, f'CamillaDSP YAML folder: {CAMILLA_ROOT}')
-    row(4, 'Result: only 00-filterless.yml will be regenerated')
+    row(4, 'Result: only 00-filterless.yml is regenerated; unrelated YAMLs are preserved')
     if choose('Remove every configured device and generated filter?', ('No', 'Yes')) == 0:
         print('No files changed.')
         return
@@ -603,7 +796,7 @@ def clean_devices(text):
         ) from error
     print(f'\nRemoved {len(entries)} configured devices.')
     print(f'Backup: {backup}')
-    print('Only 00-filterless.yml remains generated.')
+    print('Only 00-filterless.yml remains manager-generated; unrelated YAMLs are preserved.')
 
 def add(text):
     node,entries=load(text);entry=new_entry()
@@ -674,6 +867,11 @@ def manager_main():
     actions[choice](text)
 
 if __name__=='__main__':
+    if sys.argv[1:] in (['--rebuild'], ['--rebuild-all']):
+        rebuild_all_filters(all_measurements=sys.argv[1:] == ['--rebuild-all'])
+        raise SystemExit(0)
+    if sys.argv[1:]:
+        raise SystemExit('Usage: add-audio-device.py [--rebuild | --rebuild-all]')
     if not (sys.stdin.isatty() and sys.stdout.isatty()):relaunch();raise SystemExit(0)
     status=0
     try:manager_main()
