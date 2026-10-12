@@ -59,27 +59,28 @@ def _saved_master_volume():
         return None
     return value
 
-def _live_master_volume():
-    # Avoid @DEFAULT_SINK@ when PipeWire metadata is temporarily ambiguous.
-    # Prefer the path's explicit master, then the saved physical sink. If there
-    # is exactly one exposed sink, it is unambiguous even without a default.
-    target=master_sink()
-    if target=='@DEFAULT_SINK@':
-        rows=_pipewire_json('sinks')
-        names=[str(row.get('name') or '') for row in rows if row.get('name')]
-        saved=saved_output_route().get('sink')
-        if saved and saved in names:target=saved
-        elif _shared_system_path() and 'camilladsp' in names:target='camilladsp'
-        elif len(names)==1:target=names[0]
-        else:raise RuntimeError('No unambiguous live master sink is available')
-    result=run(['__wp_control__','get-sink-volume',target],False,5,media_env())
+def _read_sink_master_volume(name):
+    """Read one named live sink through the shared PipeWire control backend."""
+    if not name or name=='@DEFAULT_SINK@':
+        raise RuntimeError('A concrete playback sink is required for master capture')
+    result=run(['__wp_control__','get-sink-volume',name],False,5,media_env())
     match=re.search(r'(\d+(?:\.\d+)?)%',result.stdout)
     if result.returncode or not match:
-        raise RuntimeError(result.stderr.strip() or 'Could not read the live master volume')
+        raise RuntimeError(result.stderr.strip() or 'Could not read the live master volume from '+name)
     value=float(match.group(1))
     if not math.isfinite(value) or not 0<=value<=100:
         raise RuntimeError('Live master volume is outside 0-100%')
     return value
+
+def _live_master_volume():
+    """Read the active logical master, with a physical clean-state fallback."""
+    target=master_sink()
+    if target=='@DEFAULT_SINK@':
+        # Deleted state can leave several exposed sinks and no default metadata.
+        # Resolve the same complete physical card/profile/route/sink used by
+        # startup and Media Control. Never guess the CamillaDSP virtual sink.
+        target=choose_output_route(None)['sink']
+    return _read_sink_master_volume(target)
 
 def capture_master_volume():
     """Persist the actual live logical master before any graph mutation.

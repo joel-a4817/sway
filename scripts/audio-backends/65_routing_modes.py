@@ -36,13 +36,7 @@ def seed_master_from_physical_output(route=None):
     if saved is not None:return route,saved
     ensure_pipewire_ready()
     candidate=route if isinstance(route,dict) and route.get('sink') else _physical_output_route(None)
-    result=run(['__wp_control__','get-sink-volume',candidate['sink']],False,5,media_env())
-    match=re.search(r'(\d+(?:\.\d+)?)%',result.stdout)
-    if result.returncode or not match:
-        raise RuntimeError(result.stderr.strip() or 'Could not read clean-state physical master volume')
-    live=float(match.group(1))
-    if not math.isfinite(live) or not 0<=live<=100:
-        raise RuntimeError('Clean-state physical master volume is outside 0-100%')
+    live=_read_sink_master_volume(candidate['sink'])
     MASTER_VOLUME.parent.mkdir(parents=True,exist_ok=True)
     atomic(MASTER_VOLUME,f'{live:.2f}%\n')
     return candidate,live

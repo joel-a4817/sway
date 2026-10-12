@@ -73,8 +73,7 @@ def normalize_with_media():
             # no-master/no-authoritative-sink condition; all other gain and
             # readback failures remain fatal and named.
             missing=_saved_master_volume() is None
-            unavailable=(str(error) in ('Could not identify the current default sink',
-                                        'No unambiguous live master sink is available') or
+            unavailable=(str(error)=='Could not identify the current default sink' or
                          str(error).startswith('Master volume is unavailable from both live audio and persisted state:'))
             if missing and unavailable:
                 return {'skipped':'master unavailable','detail':str(error)}
