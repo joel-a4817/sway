@@ -31,12 +31,7 @@ def pause_for_normalization():
 def save_master_after_pause():
     # This is the only transaction snapshot point: media is paused and no
     # route/filter/input/output mutation has run yet.
-    value=float(master_volume())
-    if not math.isfinite(value) or not 0<=value<=100:
-        raise RuntimeError('Current master volume is outside 0-100%')
-    MASTER_VOLUME.parent.mkdir(parents=True,exist_ok=True)
-    atomic(MASTER_VOLUME,f'{value:.2f}%\n')
-    return value
+    return capture_master_volume()
 
 def pause_for_audio_stop():
     ensure()
@@ -142,7 +137,7 @@ def normalize_audio_volumes(saved_master=None):
     # the persisted logical master. Standalone normalization captures live state.
     global MASTER_RESTORING
     if saved_master is None:
-        saved_master=capture_default_sink_master()
+        saved_master=capture_master_volume()
     MASTER_RESTORING=True
     # Gain transaction only. Player pausing belongs to the caller.
     errors=[]
@@ -224,10 +219,10 @@ def normalize_audio_volumes(saved_master=None):
         if inactive_node is not None:
             unity=run([exe('wpctl'),'set-volume',str(inactive_node['id']),'100%'],False,8,media_env())
             if unity.returncode:raise RuntimeError(unity.stderr.strip() or 'Could not set inactive playback sink to unity')
-    # Restore is deliberately the final gain operation. Use wpctl against the
-    # current default sink, not route heuristics or the stale persisted value.
+    # Restore is deliberately the final gain operation and uses the same
+    # route-aware logical-master owner as both volume sliders.
     try:
-        restore_default_sink_master(value)
+        restore_master_volume(value)
     finally:
         MASTER_RESTORING=False
     if errors:

@@ -81,42 +81,31 @@ def _live_master_volume():
         raise RuntimeError('Live master volume is outside 0-100%')
     return value
 
-def capture_default_sink_master():
-    """Capture and persist the live PipeWire default sink volume via wpctl.
+def capture_master_volume():
+    """Persist the actual live logical master before any graph mutation.
 
-    This is the first operation of a gain-normalization transaction. It bypasses
-    master_volume() protection/fallback logic so a stale master-volume file can
-    never replace the actual pre-normalization gain.
+    This deliberately bypasses master_volume()'s protected-state fallback. The
+    active path's authoritative gain point is read even while startup or another
+    transaction has MASTER_RESTORING set, so a stale saved 100% cannot overwrite
+    the real live value.
     """
     global MASTER_WRITE_UNTIL
-    result=run([exe('wpctl'),'get-volume','@DEFAULT_AUDIO_SINK@'],False,8,media_env())
-    if result.returncode:
-        raise RuntimeError(result.stderr.strip() or 'Could not read current default sink volume with wpctl')
-    match=re.search(r'Volume:\s*([0-9]+(?:\.[0-9]+)?)',result.stdout)
-    if not match:
-        raise RuntimeError('Could not parse current default sink volume from wpctl: '+result.stdout.strip())
-    value=float(match.group(1))*100.0
+    value=float(_live_master_volume())
     if not math.isfinite(value) or not 0<=value<=100:
-        raise RuntimeError('Current default sink volume is outside 0-100%')
+        raise RuntimeError('Current live master volume is outside 0-100%')
     MASTER_VOLUME.parent.mkdir(parents=True,exist_ok=True)
     MASTER_WRITE_UNTIL=time.monotonic()+5.0
     atomic(MASTER_VOLUME,f'{value:.2f}%\n')
     return value
 
-def restore_default_sink_master(value):
-    """Restore the captured master to the then-current default sink via wpctl."""
+def restore_master_volume(value):
+    """Restore and persist the logical master through its route-aware owner."""
     value=float(value)
-    result=run([exe('wpctl'),'set-volume','@DEFAULT_AUDIO_SINK@',f'{value:.2f}%'],False,8,media_env())
-    if result.returncode:
-        raise RuntimeError(result.stderr.strip() or 'Could not restore current default sink volume with wpctl')
-    check=run([exe('wpctl'),'get-volume','@DEFAULT_AUDIO_SINK@'],False,8,media_env())
-    match=re.search(r'Volume:\s*([0-9]+(?:\.[0-9]+)?)',check.stdout)
-    if check.returncode or not match:
-        raise RuntimeError(check.stderr.strip() or 'Could not verify restored default sink volume with wpctl')
-    actual=float(match.group(1))*100.0
-    if abs(actual-value)>0.11:
-        raise RuntimeError(f'Default sink master readback was {actual:.2f}%, expected {value:.2f}%')
-    sync_mpv_for_audio_path(value)
+    if not math.isfinite(value) or not 0<=value<=100:
+        raise RuntimeError('Saved master volume is outside 0-100%')
+    apply_master_volume(value,normalize_sinks=False)
+    MASTER_VOLUME.parent.mkdir(parents=True,exist_ok=True)
+    atomic(MASTER_VOLUME,f'{value:.2f}%\n')
     return value
 
 def master_volume():
