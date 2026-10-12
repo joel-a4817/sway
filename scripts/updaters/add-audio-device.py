@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Manage Raw and smoothed H5 profiles through the NixOS ALSA lookahead limiter."""
+"""Manage Raw and smoothed H5 profiles with per-profile limiter routing."""
 import ast, math, re, os, shutil, subprocess, sys, tempfile, termios, textwrap, tty
 from datetime import datetime
 from pathlib import Path
@@ -27,7 +27,6 @@ BACKUP_DIR=CONTEXT_PATHS['AUDIO_DEVICE_BACKUPS']
 HPCF_ANECHOIC=AUDIO_ROOT/'hpcf anechoic'
 MEASUREMENTS_DIR=AUDIO_ROOT/'measurements'
 H5_WEIGHTED=AUDIO_ROOT/'sofa average/H5_2945_Weighted_Power_Average_UNNORMALIZED.wav'
-H5_MATRIX=AUDIO_ROOT/'sofa average/H5_2945_Avg_Crossfeed_4ch_FLOAT.wav'
 HPCFS = (
     {
         'file': 'Apple EarPods + AhaStyle - Approximate B&K 5128 - H5 Approx Anechoic HpCF - Raw.wav',
@@ -51,7 +50,8 @@ HPCFS = (
     },
 )
 SAMPLE_RATE=96000
-CAMILLA_PLAYBACK_DEVICE='camilladsp_peak_limited'
+CAMILLA_RAW_PLAYBACK_DEVICE='camilladsp_peak_integer'
+CAMILLA_SMOOTHED_PLAYBACK_DEVICE='camilladsp_peak_limited'
 CAMILLA_PLAYBACK_FORMAT='F32_LE'
 CAMILLA_ROOT=AUDIO_FILTERS
 OUTPUT_SAMPLE_CEILING=1.0-2.0**-31
@@ -100,12 +100,7 @@ def report_cascade_headroom(rows,description,gain):
 def stereo_cascade_gain(h5_path,hpcf_path):
     h5=read_fir(h5_path,2);hp=read_fir(hpcf_path,2);rows=[[convolve_fir(h5[:,c],hp[:,c])] for c in range(2)]
     gain=sample_safe_preamp(rows,'Final stereo PCM sample bound');report_cascade_headroom(rows,str(hpcf_path)+' stereo',gain);return gain
-def matrix_cascade_gain(matrix_path,hpcf_path):
-    matrix=read_fir(matrix_path,4);hp=read_fir(hpcf_path,2)
-    kernels=[convolve_fir(matrix[:,c],hp[:,0 if c<2 else 1]) for c in range(4)];rows=[kernels[:2],kernels[2:]]
-    gain=sample_safe_preamp(rows,'Final matrix PCM sample bound');report_cascade_headroom(rows,str(hpcf_path)+' crossfeed',gain);return gain
-
-def devices_text():
+def devices_text(playback_device):
     return f'''devices:
   samplerate: {SAMPLE_RATE}
   chunksize: 1024
@@ -117,10 +112,10 @@ def devices_text():
   playback:
     type: Alsa
     channels: 2
-    device: "{CAMILLA_PLAYBACK_DEVICE}"
+    device: "{playback_device}"
     format: {CAMILLA_PLAYBACK_FORMAT}
 '''
-def filterless_text():return '---\ntitle: "Filterless / Speakers"\ndescription: "Pass-through CamillaDSP profile with no filters"\n'+devices_text()+'pipeline: []\n'
+def filterless_text():return '---\ntitle: "Filterless / Speakers"\ndescription: "Pass-through CamillaDSP profile with no filters"\n'+devices_text(CAMILLA_RAW_PLAYBACK_DEVICE)+'pipeline: []\n'
 def profile_label(item):
     label=str(item['label']).strip()
     for suffix in (' - Smoothed',' - Raw'):
@@ -146,7 +141,7 @@ def gain_pipeline():return '  - type: Filter\n    channels: [0, 1]\n    names: [
 def make_stereo_profile(index,item,hpcf_path,field_path,preamp_db):
     label=profile_label(item);smoothed=bool(item.get('_smoothed'));suffix='' if smoothed else '-raw'
     title=label+('' if smoothed else ' - Raw')
-    text='---\ntitle: '+yaml_string(title)+'\ndescription: "H5 measured-grid weighted stereo average with anechoic headphone correction; no crossfeed"\n'+devices_text()+'filters:\n'
+    text='---\ntitle: '+yaml_string(title)+'\ndescription: "H5 measured-grid weighted stereo average with anechoic headphone correction; no crossfeed"\n'+devices_text(CAMILLA_SMOOTHED_PLAYBACK_DEVICE if smoothed else CAMILLA_RAW_PLAYBACK_DEVICE)+'filters:\n'
     for name,path,ch in [('h5_left',field_path,0),('h5_right',field_path,1),('hpcf_left',hpcf_path,0),('hpcf_right',hpcf_path,1)]:text+=conv_text(name,path,ch)
     if not smoothed:text+=gain_text(preamp_db)
     text+='''pipeline:
@@ -160,38 +155,47 @@ def make_stereo_profile(index,item,hpcf_path,field_path,preamp_db):
     if not smoothed:text+=gain_pipeline()
     return CAMILLA_ROOT/(slugify(label)+suffix+'.yml'),text
 
-def make_crossfeed_profile(index,item,hpcf_path,matrix_path,preamp_db):
+def make_mono_profile(index,item,hpcf_path,field_path,preamp_db):
     label=profile_label(item);smoothed=bool(item.get('_smoothed'));suffix='' if smoothed else '-raw'
-    title=label+('' if smoothed else ' - Raw')+' - Crossfeed'
-    text='---\ntitle: '+yaml_string(title)+'\ndescription: "H5 full-sphere hemisphere ear-power 2x2 crossfeed matrix with anechoic headphone correction"\n'+devices_text()+'''mixers:
-  matrix_branches:
+    title=label+('' if smoothed else ' - Raw')+' - Mono'
+    text='---\ntitle: '+yaml_string(title)+'\ndescription: "Arithmetic-average mono (0.5L + 0.5R) sent identically through the left and right H5/HpCF chains"\n'+devices_text(CAMILLA_SMOOTHED_PLAYBACK_DEVICE if smoothed else CAMILLA_RAW_PLAYBACK_DEVICE)+'''mixers:
+  mono_sum:
     channels:
       in: 2
-      out: 4
+      out: 2
     mapping:
+      - dest: 0
+        sources:
+          - channel: 0
+            gain: -6.020599913280
+            inverted: false
+          - channel: 1
+            gain: -6.020599913280
+            inverted: false
+      - dest: 1
+        sources:
+          - channel: 0
+            gain: -6.020599913280
+            inverted: false
+          - channel: 1
+            gain: -6.020599913280
+            inverted: false
+filters:
 '''
-    for dest,ch in enumerate([0,1,0,1]):text+=f'      - dest: {dest}\n        sources:\n          - channel: {ch}\n            gain: 0\n            inverted: false\n'
-    text+='  matrix_sum:\n    channels:\n      in: 4\n      out: 2\n    mapping:\n'
-    for dest,channels in enumerate([[0,1],[2,3]]):
-        text+=f'      - dest: {dest}\n        sources:\n'
-        for ch in channels:text+=f'          - channel: {ch}\n            gain: 0\n            inverted: false\n'
-    text+='filters:\n'
-    for ch,name in enumerate(['matrix_ll','matrix_rl','matrix_lr','matrix_rr']):text+=conv_text(name,matrix_path,ch)
-    text+=conv_text('hpcf_left',hpcf_path,0)+conv_text('hpcf_right',hpcf_path,1)
+    for name,path,ch in [('h5_left',field_path,0),('h5_right',field_path,1),('hpcf_left',hpcf_path,0),('hpcf_right',hpcf_path,1)]:text+=conv_text(name,path,ch)
     if not smoothed:text+=gain_text(preamp_db)
-    text+='pipeline:\n  - type: Mixer\n    name: matrix_branches\n'
-    for ch,name in enumerate(['matrix_ll','matrix_rl','matrix_lr','matrix_rr']):text+=f'  - type: Filter\n    channels: [{ch}]\n    names: [{name}]\n'
-    text+='''  - type: Mixer
-    name: matrix_sum
+    text+='''pipeline:
+  - type: Mixer
+    name: mono_sum
   - type: Filter
     channels: [0]
-    names: [hpcf_left]
+    names: [h5_left, hpcf_left]
   - type: Filter
     channels: [1]
-    names: [hpcf_right]
+    names: [h5_right, hpcf_right]
 '''
     if not smoothed:text+=gain_pipeline()
-    return CAMILLA_ROOT/(slugify(label)+suffix+'-crossfeed.yml'),text
+    return CAMILLA_ROOT/(slugify(label)+suffix+'-mono.yml'),text
 
 def configured_path(item):
     path=Path(str(item.get('file',''))).expanduser();return (path if path.is_absolute() else HPCF_ANECHOIC/path).resolve()
@@ -225,7 +229,6 @@ def measurement_devices():
 
 def build_profile_candidates(all_measurements=False):
     if not H5_WEIGHTED.is_file():raise SystemExit(f'Missing measured H5 weighted stereo average: {H5_WEIGHTED}')
-    if not H5_MATRIX.is_file():raise SystemExit(f'Missing measured H5 hemisphere matrix: {H5_MATRIX}')
     if not HPCF_ANECHOIC.is_dir():raise SystemExit(f'Missing anechoic HpCF folder: {HPCF_ANECHOIC}')
     devices=[];labels=set();names={'00-filterless.yml'};sources=set();generated=[]
     for item in (measurement_devices() if all_measurements else HPCFS):
@@ -236,15 +239,15 @@ def build_profile_candidates(all_measurements=False):
         labels.add(label.casefold());sources.add(os.path.normcase(str(source)));variants=selected_variants(item,source)
         for smoothed,variant in variants:
             read_fir(variant,2);variant_item=dict(item,_smoothed=smoothed);base=slugify(profile_label(variant_item));suffix='' if smoothed else '-raw'
-            filenames={base+suffix+'.yml',base+suffix+'-crossfeed.yml'}
+            filenames={base+suffix+'.yml',base+suffix+'-mono.yml'}
             if not base or filenames&names:raise SystemExit(f'Empty or duplicate profile filename for label: {label}')
             names.update(filenames)
         devices.append((item,source))
         for smoothed,variant in variants:
             variant_item=dict(item,_smoothed=smoothed)
-            stereo_gain=stereo_cascade_gain(H5_WEIGHTED,variant);crossfeed_gain=matrix_cascade_gain(H5_MATRIX,variant)
+            stereo_gain=stereo_cascade_gain(H5_WEIGHTED,variant)
             if smoothed:print(f'WARNING: {label}: unlabelled smoothed profiles have NO static attenuation; calculated gains above are diagnostic only. External ALSA lookahead limiter must be installed.')
-            generated.extend((make_stereo_profile(len(devices),variant_item,variant,H5_WEIGHTED,stereo_gain),make_crossfeed_profile(len(devices),variant_item,variant,H5_MATRIX,crossfeed_gain)))
+            generated.extend((make_stereo_profile(len(devices),variant_item,variant,H5_WEIGHTED,stereo_gain),make_mono_profile(len(devices),variant_item,variant,H5_WEIGHTED,stereo_gain)))
     return [(CAMILLA_ROOT/'00-filterless.yml',filterless_text()),*generated],devices
 
 def commit_profiles(candidates):
@@ -255,7 +258,7 @@ def commit_profiles(candidates):
         if path in expected:raise RuntimeError(f'Duplicate generated profile filename: {path.name}')
         expected[path]=text
     before={path:path.read_text(encoding='utf-8') for pattern in ('*.yml','*.yaml') for path in CAMILLA_ROOT.rglob(pattern) if path.is_file()}
-    descriptions=('H5 2945-point weighted stereo average','H5 2945-point diffuse-field 2x2 matrix','H5 measured-grid weighted stereo average','H5 hemisphere rank-one approximate 2x2 crossfeed matrix','H5 full-sphere hemisphere ear-power 2x2 crossfeed matrix','Pass-through CamillaDSP profile with no filters')
+    descriptions=('H5 2945-point weighted stereo average','H5 2945-point diffuse-field 2x2 matrix','H5 measured-grid weighted stereo average','Equal-power L+R mono','Arithmetic-average mono (0.5L + 0.5R)','Pass-through CamillaDSP profile with no filters')
     preserved={path for path,text in before.items() if path not in expected and not any(f'description: "{description}' in text for description in descriptions)}
     before={path:text for path,text in before.items() if path not in preserved}
     with tempfile.TemporaryDirectory(prefix='.profile-commit-',dir=CAMILLA_ROOT.parent) as transaction_name:
@@ -285,8 +288,10 @@ def commit_profiles(candidates):
             raise RuntimeError('Profile commit failed; all previous YAML profiles were restored: '+str(error)) from error
     return [path for path,text in expected.items() if before.get(path)!=text],[path for path in before if path not in expected]
 def rebuild_all_filters(all_measurements=False):
-    if not Path('/etc/camilladsp-peak-limiter-v11').is_file():raise SystemExit('Install and rebuild the NixOS peak-limiter-v11 module before regenerating profiles.')
-    candidates,devices=build_profile_candidates(all_measurements);camilladsp=Path('/run/current-system/sw/bin/camilladsp')
+    candidates,devices=build_profile_candidates(all_measurements)
+    uses_limiter=any(f'device: "{CAMILLA_SMOOTHED_PLAYBACK_DEVICE}"' in text for path,text in candidates)
+    if uses_limiter and not Path('/etc/camilladsp-peak-limiter-v11').is_file():raise SystemExit('Smoothed profiles require the installed NixOS peak-limiter-v11 module.')
+    camilladsp=Path('/run/current-system/sw/bin/camilladsp')
     if not camilladsp.is_file():raise SystemExit(f'Missing CamillaDSP executable: {camilladsp}')
     with tempfile.TemporaryDirectory() as validation_name:
         for number,(path,text) in enumerate(candidates):
@@ -298,7 +303,8 @@ def rebuild_all_filters(all_measurements=False):
         print(f'{"Replaced existing" if path in existed else "Created"}: {path}')
         match=re.search(r'  auto_gain:\n    type: Gain\n    parameters:\n      gain: ([^\n]+)',text)
         if match:print(f'{path.name}: applied Raw sample-safe preamp {match.group(1)} dB')
-        elif 'filters:' in text:print(f'{path.name}: NO static gain stage; routed through external ALSA lookahead limiter')
+        elif f'device: "{CAMILLA_SMOOTHED_PLAYBACK_DEVICE}"' in text:print(f'{path.name}: NO static gain stage; routed through external ALSA lookahead limiter')
+        elif f'device: "{CAMILLA_RAW_PLAYBACK_DEVICE}"' in text:print(f'{path.name}: limiter bypassed; routed directly to FLOAT-to-S32 loopback conversion')
     print(f'Using {len(devices)} anechoic HpCF devices; verified {len(candidates)} CamillaDSP YAML profiles in {CAMILLA_ROOT}; {len(changed)} changed, {len(removed)} obsolete removed')
 TERMINALS=(('foot','-T','Manage Audio Device'),('kitty','--title','Manage Audio Device'),('alacritty','--title','Manage Audio Device','-e'))
 def row(number,label):
