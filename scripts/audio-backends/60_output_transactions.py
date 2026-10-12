@@ -241,12 +241,18 @@ def choose_output_route(requested=None):
     if not physical:raise RuntimeError('No physical playback output in PipeWire graph')
     explicit=isinstance(requested,dict) and not requested.get('_remembered')
     requested=requested if isinstance(requested,dict) else dict(topology['saved'],_remembered=True)
+    unavailable=str(requested.get('_unavailable_sink') or '')
+    if unavailable:
+        physical=[pair for pair in physical if pair[1]['name']!=unavailable]
+        if not physical:raise RuntimeError('No alternative physical playback sink is available')
     wanted=str(requested.get('sink') or '')
     wanted_card=str(requested.get('card') or '')
     selected_pair=next(((card,sink) for card,sink in physical
                         if sink['name']==wanted and (not wanted_card or card['name']==wanted_card)),None)
     if selected_pair is None and wanted and explicit:
         raise RuntimeError('Selected physical output unavailable: '+wanted)
+    if selected_pair is None and wanted and not explicit:
+        selected_pair=physical[0]
     if selected_pair is None and wanted_card:
         owned=[pair for pair in physical if pair[0]['name']==wanted_card]
         if owned:selected_pair=owned[0]
@@ -418,9 +424,14 @@ def output_state():
 def start_local_monitor(route=None,resolved=False,persist=True):
     selected=route if resolved else choose_output_route(route)
     sink=selected['sink']
-    # Selection and startup must pass a complete live route. Do not silently
-    # replace an explicitly staged route with an older remembered route here.
-    pw_sink(sink)
+    # A committed sink can disappear after discovery. Re-resolve from a fresh
+    # physical topology, excluding the failed sink, before opening the monitor.
+    try:pw_sink(sink)
+    except RuntimeError:
+        saved=saved_output_route()
+        if saved.get('sink')!=sink:raise
+        selected=choose_output_route(dict(saved,_remembered=True,_unavailable_sink=sink))
+        sink=selected['sink'];pw_sink(sink)
     stop_local_monitor()
     command='set -o pipefail; "$1" -q -D camilladsp_output_shared -r 96000 -f S32_LE -c 2 -t raw | "$2" --playback --device="$3" --rate=96000 --format=s32le --channels=2'
     args=[exe('bash'),'-c',command,'monitor',exe('arecord'),exe('pacat'),sink]

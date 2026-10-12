@@ -35,7 +35,7 @@ def saved_mpv_volume():
 def mpv_gain():
     try:value=float(MPV_GAIN.read_text().strip().rstrip('%'))
     except (OSError,ValueError):value=100.0
-    return value if math.isfinite(value) and 0<=value<=130 else 100.0
+    return value if math.isfinite(value) and 0<=value<=200 else 100.0
 def effective_mpv_volume(master=None):
     trim=mpv_gain()
     if _shared_system_path():
@@ -45,8 +45,8 @@ def effective_mpv_volume(master=None):
 def set_mpv_gain(value):
     try:value=float(value)
     except (TypeError,ValueError):raise ValueError('Invalid MPV gain')
-    if not math.isfinite(value) or not 0<=value<=130:
-        raise ValueError('MPV gain must be between 0 and 130')
+    if not math.isfinite(value) or not 0<=value<=200:
+        raise ValueError('MPV gain must be between 0 and 200')
     with PLAYERLOCK:
         MPV_GAIN.parent.mkdir(parents=True,exist_ok=True)
         atomic(MPV_GAIN,f'{value:.2f}%\n')
@@ -56,7 +56,7 @@ def set_mpv_gain(value):
         actual=float(mpv_direct(['get_property','volume']))
         if abs(actual-wanted)>0.11:
             raise RuntimeError(f'MPV volume readback was {actual:.2f}%, expected {wanted:.2f}%')
-    return {'volume':value,'effectiveVolume':actual,'unity':100.0,'maximum':130.0}
+    return {'volume':value,'effectiveVolume':actual,'unity':100.0,'maximum':200.0}
 def mpv_direct(command):
     request_id=random.randint(1,2_147_000_000)
     with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as client:
@@ -200,7 +200,7 @@ def ensure_mpv():
     pid=rpid(MPVPID)
     if alive(pid,'mpv') and MPVSOCK.exists() and mpv_output_matches(pid):return
     stop_mpv();log=MPVLOG.open('ab',buffering=0)
-    cmd=[exe('mpv'),'--idle=yes','--no-video','--no-terminal','--keep-open=no',*mpv_output_args(),f'--input-ipc-server={MPVSOCK}',f'--volume={effective_mpv_volume():.2f}','--volume-max=130']
+    cmd=[exe('mpv'),'--idle=yes','--no-video','--no-terminal','--keep-open=no',*mpv_output_args(),f'--input-ipc-server={MPVSOCK}',f'--volume={effective_mpv_volume():.2f}','--volume-max=200']
     try:q=subprocess.Popen(cmd,stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
     finally:log.close()
     MPVPID.write_text(f'{q.pid}\n');deadline=time.monotonic()+5

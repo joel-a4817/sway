@@ -5,10 +5,15 @@ def _ensure_no_filter_physical_default():
         # Device/Profile/Route preview owns the temporary physical graph. The
         # previously committed sink may legitimately disappear between stages.
         return None
-    physical=saved_output_route().get('sink')
+    saved=saved_output_route();physical=saved.get('sink')
     if not physical or physical=='camilladsp':
         return None
-    pw_sink(physical)
+    try:pw_sink(physical)
+    except RuntimeError:
+        replacement=choose_output_route(dict(saved,_remembered=True,_unavailable_sink=physical))
+        physical=replacement['sink']
+        _write_json(LOCALSINK,replacement);remember_output(replacement)
+        pw_sink(physical)
     try:current=pw_default()
     except RuntimeError:current=''
     if current==physical:

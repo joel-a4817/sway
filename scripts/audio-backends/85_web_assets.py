@@ -1004,7 +1004,7 @@ body {
 #pc .mpv-gain-labels { display:flex; justify-content:space-between; font-size:.74rem; color:var(--muted); margin:.1rem 2.3rem 0; }
 #pc .mpv-gain-wrap { position:relative; flex:1; display:flex; align-items:center; }
 #pc .mpv-gain-wrap .range { width:100%; }
-#pc .mpv-unity-mark { position:absolute; left:calc(10.5px + (100% - 21px) * 0.769230769); top:50%; width:2px; height:1.15rem; transform:translate(-50%,-50%); background:currentColor; opacity:.55; pointer-events:none; border-radius:1px; }
+#pc .mpv-unity-mark { position:absolute; left:calc(10.5px + (100% - 21px) * 0.5); top:50%; width:2px; height:1.15rem; transform:translate(-50%,-50%); background:currentColor; opacity:.55; pointer-events:none; border-radius:1px; }
 #pc .mpv-unity-reset { border:0; background:transparent; color:inherit; font:inherit; padding:0; cursor:pointer; text-decoration:underline; text-underline-offset:2px; }
 #pc .mpv-unity-reset:hover,#pc .mpv-unity-reset:focus-visible { color:var(--accent); outline:none; }
 #pc .range-row .volume-icon {
@@ -1380,14 +1380,14 @@ body {
        <svg fill="currentColor" viewbox="0 0 24 24"><path d="M3 9v6h4l5 4V5L7 9H3z"></path></svg>
       </span>
       <div class="mpv-gain-wrap">
-       <input aria-label="MPV volume" class="range" id="mpv-gain" max="130" min="0" step="1" type="range" value="100"/>
+       <input aria-label="MPV volume" class="range" id="mpv-gain" max="200" min="0" step="1" type="range" value="100"/>
        <span aria-hidden="true" class="mpv-unity-mark"></span>
       </div>
       <span aria-hidden="true" class="volume-icon">
        <svg fill="currentColor" viewbox="0 0 24 24"><path d="M2 9v6h4l5 4V5L6 9H2z"></path><path d="M14 8.2a5 5 0 0 1 0 7.6l1.4 1.4a7 7 0 0 0 0-10.4L14 8.2z"></path></svg>
       </span>
      </div>
-     <div class="mpv-gain-labels"><span>0%</span><button class="mpv-unity-reset" id="mpv-unity-reset" type="button">100%</button><span>130%</span></div>
+     <div class="mpv-gain-labels"><span>0%</span><button class="mpv-unity-reset" id="mpv-unity-reset" type="button">100%</button><span>200%</span></div>
      <div class="grid two">
       <button class="action" id="repeat">
        Repeat Off
@@ -1680,18 +1680,18 @@ function bindVolume(media,url){
 function bindMpvGain(){
   const media=state.local,control=media.mpvGain,unityReset=$('#mpv-unity-reset');
   const send=()=>{
-    const value=Math.max(0,Math.min(130,Number(control.value)||0));
+    const value=Math.max(0,Math.min(200,Number(control.value)||0));
     media.mpvGainHold=performance.now()+1500;media.mpvGainPending=value;
-    fill(control,value,130);
+    fill(control,value,200);
     post('/api/player/mpv-gain',{volume:value}).then(result=>{
       const actual=Number(result.volume);
       media.mpvGainPending=null;
-      if(Number.isFinite(actual)){control.value=String(actual);fill(control,actual,130)}
+      if(Number.isFinite(actual)){control.value=String(actual);fill(control,actual,200)}
     }).catch(error=>{media.mpvGainPending=null;note(error.message,true);pollLocal()})
   };
-  control.oninput=()=>{media.mpvGainHold=performance.now()+1500;fill(control,Number(control.value),130);clearTimeout(media.mpvGainTimer);media.mpvGainTimer=setTimeout(send,90)};
+  control.oninput=()=>{media.mpvGainHold=performance.now()+1500;fill(control,Number(control.value),200);clearTimeout(media.mpvGainTimer);media.mpvGainTimer=setTimeout(send,90)};
   control.onchange=()=>{clearTimeout(media.mpvGainTimer);send()};
-  unityReset.onclick=()=>{clearTimeout(media.mpvGainTimer);control.value='100';fill(control,100,130);send()};
+  unityReset.onclick=()=>{clearTimeout(media.mpvGainTimer);control.value='100';fill(control,100,200);send()};
 }
 function coverNode(url,large=false){const node=document.createElement(url?'img':'div');node.className='cover-art'+(large?' large':'')+(url?'':' cover-fallback');if(url){node.src=url;node.loading=large?'eager':'lazy';node.alt='Album cover';node.onerror=()=>{const fallback=coverNode('',large);fallback.id=node.id;fallback.dataset.failedCover=url;node.replaceWith(fallback)}}else{node.textContent='♫';node.setAttribute('aria-label','No album art')}return node}
 let localNowArtworkURL='';
@@ -1922,7 +1922,7 @@ function renderVolatile(data){
   $('#source-title').textContent=({ipad_external:'External',laptop_external:'PC',ipad_ipad:'External',ipad_laptop:'PC',ipad_both:'Both',laptop_ipad:'External',laptop_laptop:'PC',laptop_both:'Both'})[data.mode.mode]||data.mode.label;$('#source-details').textContent='CamillaDSP '+(data.mode.engineRunning?'running':'stopped')+' • SonoBus '+(data.mode.sonobus?'on':'off')+' • AirPlay '+(data.mode.airplay?'on':'off')+(data.mode.localWanted?' • Output '+(data.mode.localOutputLabel||'Not selected'):'');
   document.querySelectorAll('[data-mode]').forEach(button=>button.classList.toggle('mode-active',button.dataset.mode===data.mode.mode));const localOutput=!!data.mode.localWanted;$('#open-output').disabled=!localOutput;$('#open-output').setAttribute('aria-disabled',String(!localOutput));$('#output-title').textContent=localOutput?(data.mode.localOutputLabel||'PC output not selected'):'Not used by current output';$('#output-details').textContent=localOutput?'':'Switch audio output to PC or Both before configuring a physical output.';
   updatePlaylistCover(data.player);
-  const local=data.player,lm=state.local;$('#now-title').textContent=local.title||'Nothing playing';updateLocalNowArtwork(local.cover||'');$('#now-details').textContent=[local.artist,local.album].filter(Boolean).join(' • ')||(local.path||'');renderTimeline(lm,local.currentTime,local.duration);if(lm.volumePending===null&&document.activeElement!==lm.volume){displayMasterVolume(local.volume)}if(lm.mpvGainPending===null&&document.activeElement!==lm.mpvGain){const gain=Number(local.mpvGain);if(Number.isFinite(gain)){lm.mpvGain.value=String(gain);fill(lm.mpvGain,gain,130)}}$('#shuffle').disabled=!local.canShuffleQueue;$('#repeat').textContent='Repeat '+({off:'Off',all:'All',one:'1'}[local.repeat]||'Off');$('#repeat').classList.toggle('active',local.repeat!=='off');setPlayIcon($('#local-play-shape'),document.querySelector('[data-cmd="toggle"]'),local.playing)
+  const local=data.player,lm=state.local;$('#now-title').textContent=local.title||'Nothing playing';updateLocalNowArtwork(local.cover||'');$('#now-details').textContent=[local.artist,local.album].filter(Boolean).join(' • ')||(local.path||'');renderTimeline(lm,local.currentTime,local.duration);if(lm.volumePending===null&&document.activeElement!==lm.volume){displayMasterVolume(local.volume)}if(lm.mpvGainPending===null&&document.activeElement!==lm.mpvGain){const gain=Number(local.mpvGain);if(Number.isFinite(gain)){lm.mpvGain.value=String(gain);fill(lm.mpvGain,gain,200)}}$('#shuffle').disabled=!local.canShuffleQueue;$('#repeat').textContent='Repeat '+({off:'Off',all:'All',one:'1'}[local.repeat]||'Off');$('#repeat').classList.toggle('active',local.repeat!=='off');setPlayIcon($('#local-play-shape'),document.querySelector('[data-cmd="toggle"]'),local.playing)
 }
 async function refreshStatic(){if(staticRefreshRunning)return;staticRefreshRunning=true;try{const data=await api('/api/state');profileSnapshot=data.profiles;renderProfileSnapshot(data.profiles);renderPlaylistSnapshot(data.playlists);loadGroups(data);renderVolatile(data);renderSystem(data.systemMedia);return data}catch(error){note(error.message,true)}finally{staticRefreshRunning=false}}
 async function refreshVolatile(){if(volatileRefreshRunning||document.hidden)return;volatileRefreshRunning=true;try{renderVolatile(await api('/api/volatile'));}catch(error){console.warn('volatile refresh failed',error)}finally{volatileRefreshRunning=false}}

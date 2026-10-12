@@ -47,15 +47,25 @@ def stop_bypass():
     BYPASSPID.unlink(missing_ok=True)
 
 def select_desktop_sink(name):
-    target=pw_sink(name)
+    try:target=pw_sink(name)
+    except RuntimeError:
+        saved=saved_output_route()
+        if saved.get('sink')!=name:raise
+        replacement=choose_output_route(dict(saved,_remembered=True,_unavailable_sink=name))
+        name=replacement['sink'];target=pw_sink(name)
+        _write_json(LOCALSINK,replacement);remember_output(replacement)
     result=run([exe('wpctl'),'set-default',str(target['id'])],False,10,media_env())
     if result.returncode:raise RuntimeError(result.stderr.strip() or 'Could not select '+name)
     pw_move_streams(name)
+    return name
 
 def direct_no_filter(route):
     sink=route.get('sink') if isinstance(route,dict) else None
     if not sink or sink=='camilladsp':raise RuntimeError('Select a physical output for No filter')
-    select_desktop_sink(sink)
+    selected=select_desktop_sink(sink)
+    if selected!=sink:
+        route=choose_output_route({'sink':selected,'_remembered':True})
+        _write_json(LOCALSINK,route);remember_output(route)
     return route
 
 def restore_dsp_desktop_sink():
