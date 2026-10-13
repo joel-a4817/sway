@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Manage Raw and smoothed H5 profiles with per-profile limiter routing."""
+"""Manage Raw, limiter-smoothed, and gain-smoothed H5 profiles."""
 import ast, math, re, os, shutil, subprocess, sys, tempfile, termios, textwrap, tty
 from datetime import datetime
 from pathlib import Path
@@ -26,7 +26,6 @@ CONFIG_SCRIPT=Path(__file__).resolve()
 BACKUP_DIR=CONTEXT_PATHS['AUDIO_DEVICE_BACKUPS']
 HPCF_ANECHOIC=AUDIO_ROOT/'hpcf anechoic'
 MEASUREMENTS_DIR=AUDIO_ROOT/'measurements'
-H5_WEIGHTED=AUDIO_ROOT/'sofa average/H5_2945_Weighted_Power_Average_UNNORMALIZED.wav'
 HPCFS = (
     {
         'file': 'Apple EarPods + AhaStyle - Approximate B&K 5128 - H5 Approx Anechoic HpCF - Raw.wav',
@@ -48,58 +47,39 @@ HPCFS = (
         'label': 'cloud iii',
         'include_smoothed': True,
     },
+    {
+        'file': 'KZ EDX Pro - B&K 5128 - H5 Approx Anechoic HpCF - Raw.wav',
+        'label': 'edx pro',
+        'include_smoothed': True,
+    },
 )
 SAMPLE_RATE=96000
 CAMILLA_RAW_PLAYBACK_DEVICE='camilladsp_peak_integer'
 CAMILLA_SMOOTHED_PLAYBACK_DEVICE='camilladsp_peak_limited'
 CAMILLA_PLAYBACK_FORMAT='F32_LE'
 CAMILLA_ROOT=AUDIO_FILTERS
-OUTPUT_SAMPLE_CEILING=1.0-2.0**-31
-BOUND_NUMERICAL_GUARD=1e-9
 
 def slugify(value):return re.sub(r'[^a-z0-9]+','-',value.lower().replace("'",'')).strip('-')
 def yaml_string(value):return '"'+str(value).replace('\\','\\\\').replace('"','\\"')+'"'
 def atomic_write(path,text):
     temporary=path.with_name('.'+path.name+'.new');temporary.write_text(text,encoding='utf-8');temporary.replace(path)
-def response_peak_preamp_db(peak_linear,description):
-    peak_linear=float(peak_linear)
-    if not np.isfinite(peak_linear) or peak_linear<=0.0:raise RuntimeError(f'{description} has an invalid sample bound')
-    guarded=np.nextafter(peak_linear*(1.0+BOUND_NUMERICAL_GUARD),np.inf)
-    exact=min(0.0,-20.0*np.log10(guarded));gain=math.floor(exact*1_000_000_000_000.0)/1_000_000_000_000.0
-    if guarded*10.0**(gain/20.0)>1.0:raise RuntimeError(f'{description}: rounded preamp fails the sample bound')
-    return gain
 def dense_response_nfft(*lengths):
     minimum=max(65536,max(int(length) for length in lengths)*16);return 1<<(minimum-1).bit_length()
-def convolve_fir(left,right):
-    length=len(left)+len(right)-1;nfft=1<<(length-1).bit_length()
-    return np.fft.irfft(np.fft.rfft(left,n=nfft)*np.fft.rfft(right,n=nfft),n=nfft)[:length]
 def read_fir(path,channels):
     data,rate=sf.read(path,always_2d=True,dtype='float64')
     if rate!=SAMPLE_RATE or data.shape[1]!=channels or not len(data):raise RuntimeError(f'{path}: expected nonempty {channels}-channel {SAMPLE_RATE} Hz FIR')
     if not np.isfinite(data).all():raise RuntimeError(f'{path}: non-finite FIR samples')
     return data
-def row_sample_extrema(kernels):
-    positive_sums=[];negative_sums=[]
-    for kernel in kernels:
-        if not np.isfinite(kernel).all():raise RuntimeError('Final cascade has non-finite samples')
-        positive_sums.append(math.fsum(float(v) for v in kernel if v>0.0));negative_sums.append(math.fsum(float(-v) for v in kernel if v<0.0))
-    positive=math.fsum(positive_sums);negative=math.fsum(negative_sums)
-    return math.fsum((OUTPUT_SAMPLE_CEILING*positive,negative)),math.fsum((positive,OUTPUT_SAMPLE_CEILING*negative))
-def sample_safe_preamp(rows,description):
-    extrema=[row_sample_extrema(kernels) for kernels in rows]
-    peak=max(maximum/OUTPUT_SAMPLE_CEILING for maximum,minimum_abs in extrema)
-    peak=max(peak,max(minimum_abs for maximum,minimum_abs in extrema))
-    return response_peak_preamp_db(peak,description)
-def report_cascade_headroom(rows,description,gain):
-    nfft=dense_response_nfft(*(len(k) for row in rows for k in row));frequencies=np.fft.rfftfreq(nfft,1.0/SAMPLE_RATE)
-    audible=(frequencies>=20.0)&(frequencies<=20000.0);full_peak=band_peak=0.0
-    for row in rows:
-        response=sum(np.abs(np.fft.rfft(k,n=nfft)) for k in row)
-        full_peak=max(full_peak,float(np.max(response)));band_peak=max(band_peak,float(np.max(response[audible])))
-    print(f'{description}: 20-20000 Hz sine/row peak {20*np.log10(band_peak):.6f} dB; full-band sine/row peak {20*np.log10(full_peak):.6f} dB; sample-safe gain {gain:.12f} dB')
-def stereo_cascade_gain(h5_path,hpcf_path):
-    h5=read_fir(h5_path,2);hp=read_fir(hpcf_path,2);rows=[[convolve_fir(h5[:,c],hp[:,c])] for c in range(2)]
-    gain=sample_safe_preamp(rows,'Final stereo PCM sample bound');report_cascade_headroom(rows,str(hpcf_path)+' stereo',gain);return gain
+def stereo_hpcf_gain(hpcf_path):
+    hp=read_fir(hpcf_path,2);nfft=dense_response_nfft(len(hp));magnitude=np.abs(np.fft.rfft(hp,n=nfft,axis=0))
+    if not np.isfinite(magnitude).all():raise RuntimeError(f'{hpcf_path}: non-finite frequency response')
+    peak_linear=float(np.max(magnitude))
+    if peak_linear<=0.0:raise RuntimeError(f'{hpcf_path}: zero frequency response')
+    peak_db=20.0*np.log10(peak_linear);gain=min(0.0,-peak_db);post_peak_db=peak_db+gain
+    frequencies=np.fft.rfftfreq(nfft,1.0/SAMPLE_RATE);where=np.unravel_index(int(np.argmax(magnitude)),magnitude.shape)
+    if post_peak_db>1e-10:raise RuntimeError(f'{hpcf_path}: calculated gain exceeds 0 dB by {post_peak_db} dB')
+    print(f'{hpcf_path}: full 0-{SAMPLE_RATE/2:.0f} Hz peak {peak_db:.12f} dB at {frequencies[where[0]]:.6f} Hz channel {where[1]+1}; highest non-clipping gain {gain:.12f} dB; resulting peak {post_peak_db:.12f} dB')
+    return gain
 def devices_text(playback_device):
     return f'''devices:
   samplerate: {SAMPLE_RATE}
@@ -138,64 +118,23 @@ def gain_text(gain):
       scale: dB
 '''
 def gain_pipeline():return '  - type: Filter\n    channels: [0, 1]\n    names: [auto_gain]\n'
-def make_stereo_profile(index,item,hpcf_path,field_path,preamp_db):
-    label=profile_label(item);smoothed=bool(item.get('_smoothed'));suffix='' if smoothed else '-raw'
-    title=label+('' if smoothed else ' - Raw')
-    text='---\ntitle: '+yaml_string(title)+'\ndescription: "H5 measured-grid weighted stereo average with anechoic headphone correction; no crossfeed"\n'+devices_text(CAMILLA_SMOOTHED_PLAYBACK_DEVICE if smoothed else CAMILLA_RAW_PLAYBACK_DEVICE)+'filters:\n'
-    for name,path,ch in [('h5_left',field_path,0),('h5_right',field_path,1),('hpcf_left',hpcf_path,0),('hpcf_right',hpcf_path,1)]:text+=conv_text(name,path,ch)
-    if not smoothed:text+=gain_text(preamp_db)
+def make_stereo_profile(index,item,hpcf_path,preamp_db):
+    label=profile_label(item);mode=str(item.get('_mode','raw'));prefix={'raw':'Raw','limit':'Limit','gain':'Gain'}[mode];suffix={'raw':'-raw','limit':'-limit','gain':'-gain'}[mode]
+    title=prefix+' '+label
+    playback=CAMILLA_SMOOTHED_PLAYBACK_DEVICE if mode=='limit' else CAMILLA_RAW_PLAYBACK_DEVICE
+    text='---\ntitle: '+yaml_string(title)+'\ndescription: "Anechoic headphone correction only; no H5 field convolution or crossfeed"\n'+devices_text(playback)+'filters:\n'
+    for name,path,ch in [('hpcf_left',hpcf_path,0),('hpcf_right',hpcf_path,1)]:text+=conv_text(name,path,ch)
+    if mode in ('raw','gain'):text+=gain_text(preamp_db)
     text+='''pipeline:
   - type: Filter
     channels: [0]
-    names: [h5_left, hpcf_left]
+    names: [hpcf_left]
   - type: Filter
     channels: [1]
-    names: [h5_right, hpcf_right]
+    names: [hpcf_right]
 '''
-    if not smoothed:text+=gain_pipeline()
-    return CAMILLA_ROOT/(slugify(label)+suffix+'.yml'),text
-
-def make_mono_profile(index,item,hpcf_path,field_path,preamp_db):
-    label=profile_label(item);smoothed=bool(item.get('_smoothed'));suffix='' if smoothed else '-raw'
-    title=label+('' if smoothed else ' - Raw')+' - Mono'
-    text='---\ntitle: '+yaml_string(title)+'\ndescription: "Arithmetic-average mono (0.5L + 0.5R) sent identically through the left and right H5/HpCF chains"\n'+devices_text(CAMILLA_SMOOTHED_PLAYBACK_DEVICE if smoothed else CAMILLA_RAW_PLAYBACK_DEVICE)+'''mixers:
-  mono_sum:
-    channels:
-      in: 2
-      out: 2
-    mapping:
-      - dest: 0
-        sources:
-          - channel: 0
-            gain: -6.020599913280
-            inverted: false
-          - channel: 1
-            gain: -6.020599913280
-            inverted: false
-      - dest: 1
-        sources:
-          - channel: 0
-            gain: -6.020599913280
-            inverted: false
-          - channel: 1
-            gain: -6.020599913280
-            inverted: false
-filters:
-'''
-    for name,path,ch in [('h5_left',field_path,0),('h5_right',field_path,1),('hpcf_left',hpcf_path,0),('hpcf_right',hpcf_path,1)]:text+=conv_text(name,path,ch)
-    if not smoothed:text+=gain_text(preamp_db)
-    text+='''pipeline:
-  - type: Mixer
-    name: mono_sum
-  - type: Filter
-    channels: [0]
-    names: [h5_left, hpcf_left]
-  - type: Filter
-    channels: [1]
-    names: [h5_right, hpcf_right]
-'''
-    if not smoothed:text+=gain_pipeline()
-    return CAMILLA_ROOT/(slugify(label)+suffix+'-mono.yml'),text
+    if mode in ('raw','gain'):text+=gain_pipeline()
+    return CAMILLA_ROOT/(slugify(prefix+' '+label)+'.yml'),text
 
 def configured_path(item):
     path=Path(str(item.get('file',''))).expanduser();return (path if path.is_absolute() else HPCF_ANECHOIC/path).resolve()
@@ -228,7 +167,6 @@ def measurement_devices():
     return result
 
 def build_profile_candidates(all_measurements=False):
-    if not H5_WEIGHTED.is_file():raise SystemExit(f'Missing measured H5 weighted stereo average: {H5_WEIGHTED}')
     if not HPCF_ANECHOIC.is_dir():raise SystemExit(f'Missing anechoic HpCF folder: {HPCF_ANECHOIC}')
     devices=[];labels=set();names={'00-filterless.yml'};sources=set();generated=[]
     for item in (measurement_devices() if all_measurements else HPCFS):
@@ -236,20 +174,17 @@ def build_profile_candidates(all_measurements=False):
         if not label:raise SystemExit(f'Invalid HPCFS entry: {item!r}')
         if not source.is_file() or source.suffix.casefold()!='.wav':raise SystemExit(f'Missing anechoic HpCF WAV: {source}')
         if label.casefold() in labels or os.path.normcase(str(source)) in sources:raise SystemExit(f'Duplicate HpCF device: {label} / {source}')
-        labels.add(label.casefold());sources.add(os.path.normcase(str(source)));variants=selected_variants(item,source)
-        for smoothed,variant in variants:
-            read_fir(variant,2);variant_item=dict(item,_smoothed=smoothed);base=slugify(profile_label(variant_item));suffix='' if smoothed else '-raw'
-            filenames={base+suffix+'.yml',base+suffix+'-mono.yml'}
-            if not base or filenames&names:raise SystemExit(f'Empty or duplicate profile filename for label: {label}')
-            names.update(filenames)
-        devices.append((item,source))
-        for smoothed,variant in variants:
-            variant_item=dict(item,_smoothed=smoothed)
-            stereo_gain=stereo_cascade_gain(H5_WEIGHTED,variant)
-            if smoothed:print(f'WARNING: {label}: unlabelled smoothed profiles have NO static attenuation; calculated gains above are diagnostic only. External ALSA lookahead limiter must be installed.')
-            generated.extend((make_stereo_profile(len(devices),variant_item,variant,H5_WEIGHTED,stereo_gain),make_mono_profile(len(devices),variant_item,variant,H5_WEIGHTED,stereo_gain)))
+        labels.add(label.casefold());sources.add(os.path.normcase(str(source)));variants=selected_variants(item,source);devices.append((item,source))
+        raw=next(((path,stereo_hpcf_gain(path)) for smoothed,path in variants if not smoothed),None)
+        smooth=next(((path,stereo_hpcf_gain(path)) for smoothed,path in variants if smoothed),None)
+        profiles=[]
+        if raw:profiles.append(('raw',raw[0],raw[1]))
+        if smooth:profiles.extend((('limit',smooth[0],smooth[1]),('gain',smooth[0],smooth[1])))
+        for mode,variant,stereo_gain in profiles:
+            variant_item=dict(item,_mode=mode);path,text=make_stereo_profile(len(devices),variant_item,variant,stereo_gain)
+            if path.name in names:raise SystemExit(f'Empty or duplicate profile filename for label: {label}')
+            names.add(path.name);generated.append((path,text))
     return [(CAMILLA_ROOT/'00-filterless.yml',filterless_text()),*generated],devices
-
 def commit_profiles(candidates):
     CAMILLA_ROOT.mkdir(parents=True,exist_ok=True);expected={}
     for path,text in candidates:
@@ -302,7 +237,7 @@ def rebuild_all_filters(all_measurements=False):
     for path,text in candidates:
         print(f'{"Replaced existing" if path in existed else "Created"}: {path}')
         match=re.search(r'  auto_gain:\n    type: Gain\n    parameters:\n      gain: ([^\n]+)',text)
-        if match:print(f'{path.name}: applied Raw sample-safe preamp {match.group(1)} dB')
+        if match:print(f'{path.name}: applied non-clipping gain {match.group(1)} dB')
         elif f'device: "{CAMILLA_SMOOTHED_PLAYBACK_DEVICE}"' in text:print(f'{path.name}: NO static gain stage; routed through external ALSA lookahead limiter')
         elif f'device: "{CAMILLA_RAW_PLAYBACK_DEVICE}"' in text:print(f'{path.name}: limiter bypassed; routed directly to FLOAT-to-S32 loopback conversion')
     print(f'Using {len(devices)} anechoic HpCF devices; verified {len(candidates)} CamillaDSP YAML profiles in {CAMILLA_ROOT}; {len(changed)} changed, {len(removed)} obsolete removed')
