@@ -92,8 +92,8 @@ def start_runtime(force=False):
         # Every automatic routing recovery has one safe result: No filter,
         # laptop-to-laptop mode and a currently discovered physical output.
         # Do not retain or recreate the virtual CamillaDSP sink as a fallback.
-        print('Audio routing fallback: '+str(error),flush=True)
-        startup_output=apply_physical_no_filter_fallback(startup_output)
+        fallback_to_clean_audio(error,startup_output)
+        startup_output=saved_output_route()
         mode='laptop_laptop'
     except ValueError as error:
         # A saved password-protected group cannot be joined unattended. Keep
@@ -267,7 +267,10 @@ def main():
                 raise RuntimeError('Surviving CamillaDSP config differs from selected profile; refusing unsafe startup')
     watcher_stop=threading.Event()
     threading.Thread(target=watch_sonobus_workspace,args=(watcher_stop,),daemon=True).start()
-    start_runtime()
+    try:
+        start_runtime()
+    except Exception as error:
+        fallback_to_clean_audio(error)
     if not STOPPED.exists():normalize_audio_volumes(saved_master)
     threading.Thread(target=watch_master_volume,args=(watcher_stop,),daemon=True).start()
     threading.Thread(target=watch_output_preview,args=(watcher_stop,),daemon=True).start()

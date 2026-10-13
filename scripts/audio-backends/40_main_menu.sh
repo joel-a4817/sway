@@ -144,7 +144,6 @@ if ! preview_error="$(MEDIA_CONTROL_PICKER_PID=$$ MEDIA_CONTROL_PICKER_START="$(
 fi
 OUTPUT_PREVIEW_ACTIVE=1
 export MEDIA_CONTROL_PICKER_PID=$$
-OUTPUT_PREVIEW_ACTIVE=1
 # Refresh after the Swaynag selection, without changing the live graph.
 TOPOLOGY_JSON="$(output_topology)" || { echo "Start audio services before choosing a playback output." >&2; exit 1; }
 # Device selection is a real output apply, exactly like the web picker.

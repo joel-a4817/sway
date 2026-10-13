@@ -117,12 +117,12 @@ trap 'exit 131' QUIT
 TOPOLOGY_SCRIPT="$HOME_DIR/.config/sway/scripts/network/camilladsp-server-sonobus.py"
 [[ -f "$TOPOLOGY_SCRIPT" ]] || { echo "Missing paired server: $TOPOLOGY_SCRIPT" >&2; exit 1; }
 # A deleted baseline is repaired through the same backend used by server startup.
-if [[ ! -s "$REMOTE_STATE/active-profile" || ! -s "$REMOTE_STATE/mode" || ! -s "$REMOTE_STATE/local-output-route.json" ]]; then
-    python3 "$TOPOLOGY_SCRIPT" --ensure-audio-baseline >>"$ACTION_LOG" 2>&1 || {
-        cat "$ACTION_LOG" >&2
-        exit 1
-    }
-fi
+# The shared Python backend owns the complete expected-state list. Always ask it
+# to validate the baseline so one missing file cannot be overlooked here.
+python3 "$TOPOLOGY_SCRIPT" --ensure-audio-baseline >>"$ACTION_LOG" 2>&1 || {
+    cat "$ACTION_LOG" >&2
+    exit 1
+}
 # Opening Media Control verifies gains through the standard transaction:
 # pause, save master, no-op function boundary, normalize, restore master last.
 python3 "$TOPOLOGY_SCRIPT" --normalize-menu-open >>"$ACTION_LOG" 2>&1 || {
