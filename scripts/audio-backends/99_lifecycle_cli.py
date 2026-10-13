@@ -263,7 +263,7 @@ def main():
                 raise RuntimeError('Unverified CamillaDSP engine is running; refusing unsafe startup')
             if rpid(CAMPID)!=pid:
                 CAMPID.write_text(str(pid)+'\n')
-            if selected_filter()!=verified.name:
+            if selected_filter()!=profile_id(verified):
                 raise RuntimeError('Surviving CamillaDSP config differs from selected profile; refusing unsafe startup')
     watcher_stop=threading.Event()
     threading.Thread(target=watch_sonobus_workspace,args=(watcher_stop,),daemon=True).start()
@@ -345,8 +345,7 @@ def topology_cli():
             print(json.dumps(away_display_state()));return
         if len(sys.argv)==3 and sys.argv[1]=='--select-filter':
             requested=sys.argv[2]
-            available={NO_FILTER,*[item.name for item in profiles()]}
-            if requested not in available:raise ValueError('Selected filter is not available')
+            if requested!=NO_FILTER:profile(requested)
             if STOPPED.exists():
                 ACTIVE.write_text(requested+'\n')
                 data={'profile':requested,'stopped':True}
@@ -368,7 +367,9 @@ def topology_cli():
         if len(sys.argv)==3 and sys.argv[1]=='--profile-path':
             print(profile(sys.argv[2]));return
         if len(sys.argv)==2 and sys.argv[1]=='--dsp-profiles':
-            print(json.dumps([NO_FILTER]+[item.name for item in profiles()],ensure_ascii=False));return
+            print(json.dumps([NO_FILTER]+[profile_id(item) for item in profiles()],ensure_ascii=False));return
+        if len(sys.argv)==3 and sys.argv[1]=='--dsp-directory':
+            print(json.dumps(filter_directory(sys.argv[2]),ensure_ascii=False));return
         if len(sys.argv)==2 and sys.argv[1]=='--dsp-filter-info':
             print(json.dumps(listening_filters(),ensure_ascii=False));return
         if len(sys.argv)==2 and sys.argv[1]=='--selected-filter':

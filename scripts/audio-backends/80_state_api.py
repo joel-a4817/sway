@@ -1,7 +1,7 @@
 def full_state():
     return {
         'mode':mode_state(),'awayDisplay':away_display_state(),
-        'profiles':{'profiles':[NO_FILTER]+[item.name for item in profiles()],'filters':listening_filters(),'active':active(),'running':alive(rpid(CAMPID),'camilladsp')},
+        'profiles':{'profiles':[NO_FILTER]+[profile_id(item) for item in profiles()],'filters':listening_filters(),'active':active(),'running':alive(rpid(CAMPID),'camilladsp')},
         'player':player_state(),'systemMedia':system_state(),'groups':groups_state(),'playlists':lists(),
     }
 

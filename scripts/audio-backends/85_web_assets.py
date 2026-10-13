@@ -1516,7 +1516,7 @@ const state={
 const fmt=value=>{const v=Math.max(0,Number(value)||0);return Math.floor(v/60)+':'+String(Math.floor(v)%60).padStart(2,'0')};
 function show(id){screens.forEach(screen=>screen.classList.toggle('hidden',screen.id!==id));scrollTo({top:0,behavior:'smooth'});updateBackToTop()}
 function updateBackToTop(){const visible=['songs','playlist'].some(id=>!$('#'+id).classList.contains('hidden'));$('#back-to-top').classList.toggle('hidden',!visible||window.scrollY<320)}
-window.addEventListener('scroll',updateBackToTop,{passive:true});$('#back-to-top').onclick=()=>window.scrollTo({top:0,behavior:'smooth'});$('#open-groups').onclick=()=>show('groups-page');$('#open-listening').onclick=()=>show('listening-page');
+window.addEventListener('scroll',updateBackToTop,{passive:true});$('#back-to-top').onclick=()=>window.scrollTo({top:0,behavior:'smooth'});$('#open-groups').onclick=()=>show('groups-page');$('#open-listening').onclick=()=>{show('listening-page');filterDirectoryPath='';openFilterDirectory('').catch(error=>note(error.message,true))};
 function notificationBox(){const banners=[...document.querySelectorAll('#global-task-feedback')];let banner=banners.shift()||null;banners.forEach(item=>item.remove());if(!banner){banner=document.createElement('div');banner.id='global-task-feedback';banner.className='task-feedback hidden';banner.setAttribute('role','status');banner.setAttribute('aria-live','polite');const message=document.createElement('span');message.className='task-feedback-message';const close=document.createElement('button');close.type='button';close.className='task-feedback-close';close.textContent='×';close.setAttribute('aria-label','Close notification');close.addEventListener('click',()=>{clearTimeout(showTaskFeedback.timer);banner.classList.add('hidden')});banner.append(message,close);document.body.appendChild(banner)}return banner}function showTaskFeedback(message,kind='working'){const banner=notificationBox(),messageNode=banner.querySelector('.task-feedback-message');if(messageNode)messageNode.textContent=String(message||'Working…');banner.classList.remove('working','done','error','hidden');banner.classList.add(['working','done','error'].includes(kind)?kind:'working');clearTimeout(showTaskFeedback.timer);if(kind!=='working')showTaskFeedback.timer=setTimeout(()=>banner.classList.add('hidden'),10000)}function note(message,error=false){if(error&&message)showTaskFeedback(message,'error')}
 async function api(url,options={}){const response=await fetch(url,{cache:'no-store',...options});const data=await response.json().catch(()=>null);if(!data||typeof data!=='object'||Array.isArray(data))throw Error('Invalid server response');if(!response.ok||data.ok===false)throw Error(data.error||'Request failed');return data}
 const post=(url,data={})=>api(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
@@ -1865,24 +1865,46 @@ $('#restart-vnc').onclick=()=>busy(
   async()=>{const result=await post('/api/restart-vnc');renderVncState(result);return result},
   'Toggling VNC…','VNC state updated',true
 ).catch(error=>{note(error.message,true);refreshVncState()});
-$('#profile-search').oninput=()=>{if(profileSnapshot)renderProfileSnapshot(profileSnapshot);else refreshStatic()};
+$('#profile-search').oninput=()=>openFilterDirectory(filterDirectoryPath).catch(error=>note(error.message,true));
 bindSeek(state.local,'/api/player/seek');bindSeek(state.system,'/api/system-media/seek');bindVolume(state.local,'/api/player/volume');bindVolume(state.system,'/api/system-volume');bindMpvGain();
 let staticRefreshRunning=false,volatileRefreshRunning=false,profileSnapshot=null;
-function renderProfileSnapshot(data){
-  const query=$('#profile-search').value.toLowerCase(),root=$('#profile-list');
-  renderActiveProfile(data);root.replaceChildren();
+let filterDirectoryPath='';
+async function openFilterDirectory(path=''){
+  filterDirectoryPath=path;
+  const data=await api('/api/filter-directory?path='+encodeURIComponent(path));
+  renderFilterDirectory(data);
+}
+function renderFilterDirectory(directory){
+  const query=$('#profile-search').value.trim().toLowerCase(),root=$('#profile-list');root.replaceChildren();
   const list=document.createElement('div');list.className='list';
-  for(const name of data.profiles||[]){
-    const info=data.filters?.[name]||{label:name};
-    if(![name,info.label].some(value=>value.toLowerCase().includes(query)))continue;
-    const button=document.createElement('button');
-    button.className='item'+(name===data.active?' active':'');
-    const title=document.createElement('span');title.className='name';title.textContent=info.label;
-    button.append(title);
-    button.onclick=async()=>{try{await busy(button,()=>post('/api/select',{profile:name}),'Switching profile…','Profile activated',true);await refreshStatic()}catch(error){note(error.message,true)}};
-    list.append(button);
+  if(directory.path){
+    const back=document.createElement('button');back.className='item';
+    back.innerHTML='<span class="name">Back</span><span class="meta"></span>';
+    back.children[1].textContent=directory.parent||'Listening profiles';
+    back.onclick=()=>openFilterDirectory(directory.parent||'').catch(error=>note(error.message,true));list.append(back)
+  }else{
+    const bypass=document.createElement('button');bypass.className='item'+(profileSnapshot?.active==='__no_filter__'?' active':'');
+    bypass.innerHTML='<span class="name">No filter (bypass CamillaDSP)</span>';
+    bypass.onclick=()=>selectFilterProfile(bypass,'__no_filter__');list.append(bypass)
   }
-  root.append(list);
+  for(const entry of directory.entries||[]){
+    if(query&&![entry.name,entry.label,entry.id].some(value=>String(value).toLowerCase().includes(query)))continue;
+    const button=document.createElement('button');button.className='item'+(entry.type==='profile'&&entry.id===profileSnapshot?.active?' active':'');
+    const title=document.createElement('span');title.className='name';title.textContent=entry.label;
+    const detail=document.createElement('span');detail.className='meta';detail.textContent='';
+    button.append(title,detail);
+    button.onclick=()=>entry.type==='directory'?openFilterDirectory(entry.id).catch(error=>note(error.message,true)):selectFilterProfile(button,entry.id);
+    list.append(button)
+  }
+  if(!list.children.length){const empty=document.createElement('div');empty.className='card details';empty.textContent=query?'No matches':'No folders or YAML files here';list.append(empty)}
+  root.append(list)
+}
+async function selectFilterProfile(button,name){
+  try{await busy(button,()=>post('/api/select',{profile:name}),'Switching profile…','Profile activated',true);await refreshStatic();await openFilterDirectory(filterDirectoryPath)}catch(error){note(error.message,true)}
+}
+function renderProfileSnapshot(data){
+  renderActiveProfile(data);
+  if(!$('#listening-page').classList.contains('hidden'))openFilterDirectory(filterDirectoryPath).catch(error=>note(error.message,true));
 }
 function playlistAction(playlist,shuffle){
   const button=document.createElement('button');button.type='button';button.className='playlist-icon';

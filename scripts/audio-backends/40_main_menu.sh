@@ -97,36 +97,36 @@ case "$selected" in
     fi
     exit 0 ;;
  select-filter)
-    profiles="$(python3 "$TOPOLOGY_SCRIPT" --dsp-profiles)" || exit 1
-    info="$(python3 "$TOPOLOGY_SCRIPT" --dsp-filter-info)" || exit 1
-    mapfile -t filters < <(jq -r --argjson info "$info" '.[] | select(($info[.] | if has("mediaControl") then .mediaControl else true end) == true)' <<<"$profiles")
-    ((${#filters[@]})) || { echo 'No listening filters found.' >&2; exit 1; }
-    filter_device_label() {
-        local filter="$1" profile_label="$2"
-        printf '%s\n' "$profile_label"
-    }
-    labels=()
-    for filter in "${filters[@]}"; do
-        room_label="$(jq -r --arg f "$filter" '.[$f].label // $f' <<<"$info")"
-        labels+=("$(filter_device_label "$filter" "$room_label")")
+    filter_path=''
+    while :; do
+        directory="$(python3 "$TOPOLOGY_SCRIPT" --dsp-directory "$filter_path")" || exit 1
+        mapfile -t entry_rows < <(jq -r '.entries[] | [.type,.id,.label] | @tsv' <<<"$directory")
+        labels=(); ids=(); types=()
+        if [[ -z "$filter_path" ]]; then
+            labels+=('No filter (bypass CamillaDSP)'); ids+=('__no_filter__'); types+=('profile')
+        fi
+        for row in "${entry_rows[@]}"; do
+            type="${row%%$'\t'*}"; rest="${row#*$'\t'}"; id="${rest%%$'\t'*}"; label="${rest#*$'\t'}"
+            types+=("$type"); ids+=("$id")
+            labels+=("$label")
+        done
+        echo; wrap_line "Listening profiles${filter_path:+ / $filter_path}"; echo
+        [[ -n "$filter_path" ]] && printf '[0] Back\n'
+        for i in "${!labels[@]}"; do print_menu_item "$((i+1))" "${labels[i]}"; done
+        ((${#labels[@]})) || { [[ -n "$filter_path" ]] || { wrap_line 'No filter folders or YAML files found.' >&2; exit 1; }; }
+        while :; do
+            read -r -p 'Select: ' answer || exit 0
+            [[ "$answer" =~ ^[0-9]+$ ]] || { wrap_line 'Enter a listed number.'; continue; }
+            number=$((10#$answer))
+            if ((number==0)) && [[ -n "$filter_path" ]]; then
+                filter_path="$(jq -r '.parent // empty' <<<"$directory")"; continue 2
+            fi
+            ((number>=1 && number<=${#labels[@]})) || { wrap_line 'Enter a listed number.'; continue; }
+            index=$((number-1)); break
+        done
+        if [[ "${types[index]}" == directory ]]; then filter_path="${ids[index]}"; continue; fi
+        selected_filter="${ids[index]}"; selected_label="${labels[index]}"; break
     done
-    current_filter="$(python3 "$TOPOLOGY_SCRIPT" --selected-filter 2>/dev/null || true)"
-    current_room_label="$(jq -r --arg f "$current_filter" '.[$f].label // $f' <<<"$info")"
-    current_label="$(filter_device_label "$current_filter" "$current_room_label")"
-    if ! printf '%s\n' "${filters[@]}" | grep -Fqx -- "$current_filter"; then
-        echo 'The currently selected filter is not available.' >&2
-        exit 1
-    fi
-    filter_choices=("Current filter ($current_label)" "${labels[@]}")
-    choose_index 'Listening filter' "${filter_choices[@]}" || exit 0
-    answer="$number"
-    if ((number == 0)); then
-        selected_filter="$current_filter"
-        selected_label="$current_label"
-    else
-        selected_filter="${filters[$((10#$answer-1))]}"
-        selected_label="${labels[$((10#$answer-1))]}"
-    fi
     flock -u 9
     run_quiet_action python3 "$TOPOLOGY_SCRIPT" --select-filter "$selected_filter" || exit $?
     wrap_line "Listening filter applied: $selected_label"

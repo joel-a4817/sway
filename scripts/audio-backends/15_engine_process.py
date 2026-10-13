@@ -219,7 +219,7 @@ def reusable_camilla(pid):
 
 def start_camilla(p):
     global CAMILLA_PROCESS
-    target=profile(p.name if isinstance(p,Path) else str(p))
+    target=profile(profile_id(p) if isinstance(p,Path) else str(p))
     validate_camilla_profile(target)
     logpath=STATE/'camilladsp.log'
     transient=('Device or resource busy','Input/output error')
@@ -248,7 +248,7 @@ def start_camilla(p):
             if code is not None:break
             time.sleep(.05)
         if process.poll() is None:
-            ACTIVE.write_text(target.name+'\n')
+            ACTIVE.write_text(profile_id(target)+'\n')
             return process.pid
         code=process.returncode
         CAMILLA_PROCESS=None;CAMPID.unlink(missing_ok=True)
@@ -386,13 +386,13 @@ def switch_profile(name):
             if MODES[audio_mode()][1]=='system':restore_dsp_desktop_sink()
             if MODES[audio_mode()][2]:restore_selected_local_output()
             reconcile_sonobus_after_engine_transition()
-            ACTIVE.write_text(target.name+'\n')
-            return {'profile':target.name,'pid':started,'mode':mode_state()}
+            ACTIVE.write_text(profile_id(target)+'\n')
+            return {'profile':profile_id(target),'pid':started,'mode':mode_state()}
         if not alive(pid,'camilladsp'):
             # Selecting a filter while stopped must not start or reroute audio.
-            ACTIVE.write_text(target.name+'\n')
+            ACTIVE.write_text(profile_id(target)+'\n')
             invalidate_cache('profiles')
-            return {'profile':target.name,'pid':None}
+            return {'profile':profile_id(target),'pid':None}
         old_path=camilla_command('GetConfigFilePath')
         if not isinstance(old_path,str) or not old_path:
             raise RuntimeError('CamillaDSP did not report its active config path')
@@ -411,11 +411,11 @@ def switch_profile(name):
                         camilla_command('Reload')
                     except Exception:pass
                 raise
-        ACTIVE.write_text(target.name+'\n')
+        ACTIVE.write_text(profile_id(target)+'\n')
         invalidate_cache('profiles')
         if MODES[audio_mode()][1]=='system':restore_dsp_desktop_sink()
         if MODES[audio_mode()][2]:restore_selected_local_output()
-        return {'profile':target.name,'pid':pid,'mode':mode_state()}
+        return {'profile':profile_id(target),'pid':pid,'mode':mode_state()}
 @media_transaction
 def restart_camilla():
     with LOCK:

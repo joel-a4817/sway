@@ -1,87 +1,73 @@
 HPCF_CONFIG=ADD_AUDIO_DEVICE
-_FOLDER_RE=re.compile(r'^(?:\((\d+)ms(?:-(IE|OE))?\)|(\d+)ms(?:-(IE|OE))?(?:$|[-_ ]))(.*)$',re.I)
-_PROFILE_RE=re.compile(r'^\d+-(?:(ie|oe)-)?(.+?)-(\d+)ms-(.+)$',re.I)
 
-def _folder_parts(name):
-    match=_FOLDER_RE.match(name)
-    if not match:return None
-    delay=match.group(1) or match.group(3)
-    kind=(match.group(2) or match.group(4) or '').upper()
-    label=match.group(5).strip(' -_')
-    return delay,kind,label
+def _filter_relative(path):
+    path=Path(path).resolve();base=PROFILES.resolve()
+    if path==base or base not in path.parents:raise ValueError('Filter path escapes the audio filters directory')
+    return path.relative_to(base).as_posix()
+
+def _filter_directory(value=''):
+    if not isinstance(value,str) or '\0' in value:raise ValueError('Invalid filter directory')
+    relative=Path(value or '.')
+    if relative.is_absolute() or any(part in ('','..') for part in relative.parts if part!='.'):
+        raise ValueError('Invalid filter directory')
+    target=(PROFILES/relative).resolve();base=PROFILES.resolve()
+    if target!=base and base not in target.parents:raise ValueError('Filter directory escapes the audio filters directory')
+    if not target.is_dir():raise FileNotFoundError('Filter directory not found: '+value)
+    return target
 
 def profiles():
     def load():
+        if not PROFILES.is_dir():return []
         found=[]
-        if not PROFILES.is_dir():return found
-        for pattern in ('*.yml','*.yaml'):
-            for item in PROFILES.rglob(pattern):
-                if not item.is_file():continue
-                if item.parent==PROFILES or _folder_parts(item.parent.name):found.append(item)
-        return sorted(found,key=lambda item:(item.name.casefold(),str(item).casefold()))
+        for item in PROFILES.rglob('*'):
+            try:
+                if item.is_file() and item.suffix.casefold() in ('.yml','.yaml') and not item.name.startswith('.'):
+                    _filter_relative(item);found.append(item)
+            except OSError:pass
+        return sorted(found,key=lambda item:tuple(part.casefold() for part in item.relative_to(PROFILES).parts))
     return cached('profiles',5.0,load)
 
 BRIR_DIR=PROFILES
 
-def _filter_key(value):
-    return re.sub(r'[^a-z0-9]+','',value.casefold())
+def profile_id(path):return _filter_relative(path)
 
-def _device_labels():
-    """Read configured HpCF labels without executing the rebuild script."""
-    try:
-        import ast
-        tree=ast.parse(HPCF_CONFIG.read_text(encoding='utf-8'),str(HPCF_CONFIG))
-        assignment=next((node for node in tree.body if isinstance(node,(ast.Assign,ast.AnnAssign))
-                         and ((isinstance(node,ast.Assign) and any(isinstance(target,ast.Name) and target.id=='HPCFS' for target in node.targets))
-                              or (isinstance(node,ast.AnnAssign) and isinstance(node.target,ast.Name) and node.target.id=='HPCFS'))),None)
-        value=assignment.value if assignment is not None else None
-        rows=ast.literal_eval(value) if value is not None else ()
-    except (OSError,SyntaxError,ValueError,TypeError):
-        return {}
-    labels={}
-    for row in rows if isinstance(rows,(list,tuple)) else ():
-        if not isinstance(row,dict):continue
-        label=str(row.get('label') or '').strip();kind=str(row.get('kind') or '').upper()
-        if label and kind in ('IE','OE'):
-            slug=re.sub(r'[^a-z0-9]+','-',label.casefold()).strip('-')
-            labels[(kind,slug)]={'label':label}
-    return labels
-
-def _profile_title(path):
-    """Read the user-facing YAML title without loading or executing the config."""
-    try:
-        for line in path.read_text(encoding='utf-8').splitlines()[:40]:
-            match=re.match(r'^\s*title\s*:\s*(.*?)\s*$',line,re.I)
-            if not match:continue
-            value=match.group(1).strip()
-            if len(value)>=2 and value[0]==value[-1] and value[0] in ('"',"'"):
-                value=value[1:-1]
-            return value.replace('\\"','"').replace('\\\\','\\').strip()
-    except OSError:pass
-    return ''
+def filter_directory(value=''):
+    directory=_filter_directory(value)
+    relative='' if directory==PROFILES.resolve() else directory.relative_to(PROFILES.resolve()).as_posix()
+    entries=[]
+    try:children=list(directory.iterdir())
+    except OSError as error:raise RuntimeError('Could not read filter directory: '+str(error)) from error
+    folders=sorted((item for item in children if item.is_dir() and not item.name.startswith('.')),key=lambda x:x.name.casefold())
+    yaml_files=sorted((item for item in children if item.is_file() and item.suffix.casefold() in ('.yml','.yaml') and not item.name.startswith('.')),key=lambda x:x.name.casefold())
+    for item in folders:
+        child=_filter_relative(item)
+        entries.append({'type':'directory','id':child,'name':item.name,'label':item.name})
+    for item in yaml_files:
+        key=_filter_relative(item)
+        entries.append({'type':'profile','id':key,'name':item.name,'label':item.stem})
+    return {'path':relative,'label':directory.name if relative else 'Listening profiles','parent':relative.rsplit('/',1)[0] if '/' in relative else ('' if relative else None),'entries':entries}
 
 def listening_filters():
-    """Return flat user-facing labels while retaining YAML filenames as IDs."""
     result={NO_FILTER:{'group':'','label':'No filter (bypass CamillaDSP)','mediaControl':True}}
     for item in profiles():
-        title=_profile_title(item)
-        if item.stem.casefold()=='00-filterless':
-            label=title or 'Filterless'
-        else:
-            label=title or item.stem
-        result[item.name]={'group':'','label':label,'mediaControl':True}
+        key=_filter_relative(item)
+        result[key]={'group':str(Path(key).parent) if '/' in key else '',
+                     'label':item.stem,
+                     'mediaControl':True}
     return result
 
 def profile(name):
-    if not isinstance(name,str) or Path(name).name!=name:raise ValueError('Invalid profile')
-    matches=[item.resolve() for item in profiles() if item.name==name]
-    if len(matches)!=1:raise FileNotFoundError('Missing or ambiguous profile: '+name)
-    return matches[0]
+    if not isinstance(name,str) or not name or '\0' in name:raise ValueError('Invalid profile')
+    relative=Path(name)
+    if relative.is_absolute() or any(part in ('','.', '..') for part in relative.parts):raise ValueError('Invalid profile')
+    target=(PROFILES/relative).resolve();base=PROFILES.resolve()
+    if base not in target.parents or target.suffix.casefold() not in ('.yml','.yaml') or not target.is_file():
+        raise FileNotFoundError('Missing profile: '+name)
+    return target
 
 def selected_filter():
     try:value=ACTIVE.read_text().strip()
     except OSError:return NO_FILTER
     if not value or value==NO_FILTER:return NO_FILTER
-    try:profile(value)
+    try:return profile_id(profile(value))
     except (ValueError,FileNotFoundError):return NO_FILTER
-    return value
