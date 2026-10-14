@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 import numpy as np
 import soundfile as sf
+import yaml
 HOME=Path.home()
 CONTEXT_FILE=HOME/'.config/sway/scripts/audio-backends/00_context.py'
 def load_context_paths():
@@ -202,13 +203,55 @@ def build_profile_candidates(all_measurements=False):
         for mode,hpcf,is360 in specs:
             chain=([('sofa',SOFA_AVERAGE_WAV)] if is360 else [])+common+[('hpcf',hpcf)]
             gain=chain_gain([path for _,path in chain]);generated.append(make_profile(item,mode,hpcf,chain,gain))
-    preserved=[]
+    standard_profiles={(path.parent.resolve(),path.stem):text for path,text in generated}
+    rebuilt_custom=[]
     for item,_source in devices:
         custom=CAMILLA_ROOT/profile_directory_name(profile_label(item))/'custom'
         if custom.is_dir():
             for path in sorted(custom.glob('*.y*ml')):
-                if path.is_file():preserved.append((path,path.read_text(encoding='utf-8')))
-    return [(CAMILLA_ROOT/'00-filterless.yml',filterless_text()),*generated,*preserved],devices
+                if path.is_file():rebuilt_custom.append((path,rebuild_custom_profile(path,path.read_text(encoding='utf-8'),standard_profiles)))
+    return [(CAMILLA_ROOT/'00-filterless.yml',filterless_text()),*generated,*rebuilt_custom],devices
+
+def rebuild_custom_profile(path,text,standard_profiles):
+    """Rebase one generated custom HRIR profile onto its newly built baseline."""
+    current=yaml.safe_load(text)
+    if not isinstance(current,dict):raise RuntimeError(f'{path}: custom profile is not a YAML object')
+    match=re.search(r'Custom binaural HRIR filter based on (limited|gain|raw)\.yml;',str(current.get('description','')))
+    if not match:raise RuntimeError(f'{path}: cannot identify custom filter baseline')
+    mode=match.group(1);baseline_text=standard_profiles.get((path.parent.parent.resolve(),mode))
+    if baseline_text is None:raise RuntimeError(f'{path}: newly generated {mode}.yml baseline is unavailable')
+    config=yaml.safe_load(baseline_text)
+    if not isinstance(config,dict):raise RuntimeError(f'{path}: generated baseline is not a YAML object')
+    filters=current.get('filters') or {};spread=((current.get('mixers') or {}).get('custom_hrir_spread') or {}).get('mapping')
+    if not isinstance(spread,list) or len(spread)%2:raise RuntimeError(f'{path}: custom HRIR spread mapping is invalid')
+    count=len(spread)//2
+    if count<1:raise RuntimeError(f'{path}: custom filter has no HRIR points')
+    points=[]
+    for index in range(count):
+        left=((filters.get(f'custom_hrir_{index}_left') or {}).get('parameters') or {})
+        right=((filters.get(f'custom_hrir_{index}_right') or {}).get('parameters') or {})
+        filename=left.get('filename')
+        if not filename or right.get('filename')!=filename or left.get('channel')!=0 or right.get('channel')!=1:
+            raise RuntimeError(f'{path}: HRIR point {index+1} convolution pair is invalid')
+        sources=(spread[2*index] or {}).get('sources')
+        if not isinstance(sources,list):raise RuntimeError(f'{path}: HRIR point {index+1} source mapping is invalid')
+        channels=[row.get('channel') for row in sources if isinstance(row,dict)]
+        source='average' if channels==[0,1] else ('left' if channels==[0] else ('right' if channels==[1] else None))
+        if source is None:raise RuntimeError(f'{path}: HRIR point {index+1} source mapping is unsupported')
+        points.append((Path(filename),source))
+    new_filters=config.setdefault('filters',{});mixers=config.setdefault('mixers',{});pipeline=config.setdefault('pipeline',[]);mapping=[]
+    for index,(filename,source) in enumerate(points):
+        sources={'average':[{'channel':0,'gain':-6.02059991328},{'channel':1,'gain':-6.02059991328}],'left':[{'channel':0,'gain':0.0}],'right':[{'channel':1,'gain':0.0}]}[source]
+        mapping.extend(({'dest':2*index,'sources':sources},{'dest':2*index+1,'sources':sources}))
+        new_filters[f'custom_hrir_{index}_left']={'type':'Conv','parameters':{'type':'Wav','filename':str(filename),'channel':0}}
+        new_filters[f'custom_hrir_{index}_right']={'type':'Conv','parameters':{'type':'Wav','filename':str(filename),'channel':1}}
+    mixers['custom_hrir_spread']={'channels':{'in':2,'out':2*count},'mapping':mapping};gain=-20*math.log10(count)
+    mixers['custom_hrir_merge']={'channels':{'in':2*count,'out':2},'mapping':[{'dest':ear,'sources':[{'channel':2*i+ear,'gain':gain} for i in range(count)]} for ear in (0,1)]}
+    pipeline.append({'type':'Mixer','name':'custom_hrir_spread'})
+    for i in range(count):pipeline.extend(({'type':'Filter','channels':[2*i],'names':[f'custom_hrir_{i}_left']},{'type':'Filter','channels':[2*i+1],'names':[f'custom_hrir_{i}_right']}))
+    pipeline.append({'type':'Mixer','name':'custom_hrir_merge'});name=path.stem;config['title']=name;config['description']=f'Custom binaural HRIR filter based on {mode}.yml; {count} point(s)'
+    return yaml.safe_dump(config,sort_keys=False)
+
 def commit_profiles(candidates):
     """Atomically replace the updater-owned filter tree and remove stale devices."""
     CAMILLA_ROOT.mkdir(parents=True,exist_ok=True);expected={}
