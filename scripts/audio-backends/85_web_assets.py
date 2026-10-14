@@ -1703,6 +1703,7 @@ function coverNode(url,large=false){const node=document.createElement(url?'img':
 let localNowArtworkURL='';
 function updateLocalNowArtwork(url){const next=url||'';if(next===localNowArtworkURL)return;localNowArtworkURL=next;const tile=$('#now-cover');tile.replaceChildren();if(!next)return;const image=document.createElement('img');image.alt='';image.decoding='async';image.addEventListener('error',()=>image.remove(),{once:true});image.src=next;tile.appendChild(image)}
 function render(sel,data,query){const list=$(sel);list.replaceChildren();const term=query.toLowerCase();const filtered=data.filter(song=>!term||[song.title,song.artist,song.album,song.relative].join(' ').toLowerCase().includes(term));if(!filtered.length){const empty=document.createElement('div');empty.className='card details';empty.textContent=query?'No matches':'Nothing here yet';list.append(empty);return}const fragment=document.createDocumentFragment();for(const song of filtered){const button=document.createElement('button');button.className='item';button.innerHTML='<span class="name"></span><span class="meta"></span>';button.children[0].textContent=song.title;button.children[1].textContent=[song.artist,song.album].filter(Boolean).join(' • ')||song.relative;const wrap=document.createElement('div');wrap.className='item-cover';const copy=document.createElement('div');copy.className='copy';copy.append(...button.children);wrap.append(coverNode(song.cover),copy);button.append(wrap);button.onclick=async()=>{try{await busy(button,()=>post('/api/play/song',{path:song.path}),'Playing…');note('Playing '+song.title);await refreshVolatile()}catch(error){note(error.message,true)}};fragment.append(button)}list.append(fragment)}
+function selectPrompt(label){const option=new Option(label,'',false,false);option.disabled=true;return option}
 const MODE_LABELS={ipad_ipad:'External',laptop_laptop:'PC',ipad_laptop:'PC',ipad_both:'Both',laptop_ipad:'External',laptop_both:'Both'};const LOCAL_MODES=new Set(['ipad_laptop','ipad_both','laptop_laptop','laptop_both']);let pendingMode=null,outputTopology=null,outputProfileBusy=false,outputPreviewToken=null;const outputCard=$('#output-card'),outputProfile=$('#output-profile'),outputRoute=$('#output-route'),outputSink=$('#output-sink');function selectedCard(){return outputTopology?.cards.find(item=>item.name===outputCard.value)}
 function labelledOutputOption(row){return /^\[(?:N\/A|INT|MON|LOOP|VIRT)\] /.test(String(row?.label||''))}
 function mediaControlOutputLabel(row,unavailable=false){
@@ -1716,7 +1717,7 @@ function availableOption(row,profile){
 }
 function fillRoutes(preferred=''){
   const card=selectedCard(),profile=outputProfile.value,old=preferred||outputRoute.value;
-  outputRoute.replaceChildren();
+  outputRoute.replaceChildren(selectPrompt('Select route…'));
   for(const route of card?.routes||[]){
     const blocked=!availableOption(route,profile);
     const option=new Option(mediaControlOutputLabel(route,blocked),String(route.index));
@@ -1731,7 +1732,7 @@ function fillRoutes(preferred=''){
 function fillSinks(preferred=''){
   const card=selectedCard(),route=card?.routes.find(item=>String(item.index)===outputRoute.value);
   const devices=(route?.devices||[]).map(String),prior=preferred||outputSink.value;
-  outputSink.replaceChildren();
+  outputSink.replaceChildren(selectPrompt('Select sink…'));
   if(!card)return;
   for(const sink of card.sinks||[]){
     const incompatible=devices.length>0&&sink.profileDevice!=null&&!devices.includes(String(sink.profileDevice));
@@ -1744,7 +1745,7 @@ function fillSinks(preferred=''){
   else outputSink.selectedIndex=options.findIndex(o=>!o.disabled);
 }
 function fillProfiles(preferred=''){
-  const card=selectedCard(),old=preferred||outputProfile.value;outputProfile.replaceChildren();
+  const card=selectedCard(),old=preferred||outputProfile.value;outputProfile.replaceChildren(selectPrompt('Select profile…'));
   for(const profile of card?.profiles||[]){
     const blocked=!!card?.internal||labelledOutputOption(card)||labelledOutputOption(profile)||!availableOption(profile);
     const option=new Option(mediaControlOutputLabel(profile,blocked),String(profile.index));
@@ -1756,7 +1757,7 @@ function fillProfiles(preferred=''){
   fillRoutes();
 }
 function fillCards(preferred=''){
-  const previous=preferred||outputCard.value;outputCard.replaceChildren();
+  const previous=preferred||outputCard.value;outputCard.replaceChildren(selectPrompt('Select device…'));
   for(const card of outputTopology?.cards||[]){
     const blocked=!!card.internal||labelledOutputOption(card);
     const option=new Option(card.label,card.name);
@@ -1856,7 +1857,7 @@ async function closeOutputPicker(){
   showOutputStep('card');outputProfileBusy=false;
 }
 $('#output-cancel').onclick=()=>{closeOutputPicker()}
-;function loadGroups(data){const state=data.groups,select=$('#group-select');select.replaceChildren(...Object.entries(state.profiles).map(([key,g])=>new Option(key+' • '+g.group,key,key===state.active,key===state.active)));const show=()=>{const key=select.value||state.active,g=state.profiles[key];if(!g)return;$('#group-key').value=key;$('#group-name').value=g.group;$('#group-user').value=g.username;$('#group-server').value=g.server;$('#group-required').checked=!!g.passwordRequired};select.onchange=show;show()}$('#save-group').onclick=async()=>{try{await busy($('#save-group'),()=>post('/api/groups/save',{key:$('#group-key').value,group:$('#group-name').value,username:$('#group-user').value,server:$('#group-server').value,passwordRequired:$('#group-required').checked}),'Saving group…',null,false);await refreshAll();note('Group profile saved')}catch(error){note(error.message,true)}};$('#open-audio-options').onclick=()=>show('audio-options-page');
+;function loadGroups(data){const state=data.groups,select=$('#group-select');select.replaceChildren(selectPrompt('Select group…'),...Object.entries(state.profiles).map(([key,g])=>new Option(key+' • '+g.group,key,key===state.active,key===state.active)));const show=()=>{const key=select.value||state.active,g=state.profiles[key];if(!g)return;$('#group-key').value=key;$('#group-name').value=g.group;$('#group-user').value=g.username;$('#group-server').value=g.server;$('#group-required').checked=!!g.passwordRequired};select.onchange=show;show()}$('#save-group').onclick=async()=>{try{await busy($('#save-group'),()=>post('/api/groups/save',{key:$('#group-key').value,group:$('#group-name').value,username:$('#group-user').value,server:$('#group-server').value,passwordRequired:$('#group-required').checked}),'Saving group…',null,false);await refreshAll();note('Group profile saved')}catch(error){note(error.message,true)}};$('#open-audio-options').onclick=()=>show('audio-options-page');
 $('#open-pc').onclick=async()=>{try{show('pc');await refreshStatic()}catch(error){note(error.message,true)}};
 $('#away-display-toggle').onclick=async()=>{try{await busy($('#away-display-toggle'),()=>post('/api/away-display'),'Switching away/display…',null,false);await refreshVolatile()}catch(error){note(error.message,true)}};
 $('#pc-back').onclick=()=>show('profiles');
@@ -1963,7 +1964,7 @@ function customHrirRow(){
 }
 async function openCustomFilterPage(){
   customSchema=await api('/api/custom-filter/schema');if(!customSchema.devices.length)throw new Error('No compatible device baselines found');
-  const select=$('#custom-device');select.replaceChildren(new Option('Select device…','',true,true),...customSchema.devices.map(d=>new Option(d.label,d.id)));select.value='';$('#custom-name').value='';
+  const select=$('#custom-device');select.replaceChildren(selectPrompt('Select device…'),...customSchema.devices.map(d=>new Option(d.label,d.id)));select.value='';$('#custom-name').value='';
   const list=$('#custom-hrir-list');list.replaceChildren(customHrirRow());drawCustomSphere();$('#custom-ranges').textContent=`Available ranges • azimuth ${customSchema.azimuth.min} to ${customSchema.azimuth.max} • elevation ${customSchema.elevation.min} to ${customSchema.elevation.max}. Enter each coordinate as one decimal number. Filename 20,5 is entered as 20.5.`;show('custom-filter-page')
 }
 function customPoints(){return [...document.querySelectorAll('.custom-hrir-row')].map(row=>Object.fromEntries([...row.querySelectorAll('[data-field]')].map(input=>[input.dataset.field,input.value.trim()]))) }
