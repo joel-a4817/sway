@@ -1534,7 +1534,7 @@ function renderTimeline(media,position,duration){
 }
 function renderActiveProfile(data){
   const info=data.filters?.[data.active];
-  $('#active-profile').textContent=data.active?(info?.label||data.active):'No profile';
+  $('#active-profile').textContent=data.active?(info?.displayLabel||info?.label||data.active):'No profile';
   $('#active-state').textContent=data.active?((info?.label||data.active)+' · '+(data.active==='__no_filter__'?'Bypassed':data.running?'Running':'Stopped')):'Stopped'
 }
 function renderSonobusStatus(mode,groups){

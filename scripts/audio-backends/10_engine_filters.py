@@ -47,12 +47,22 @@ def filter_directory(value=''):
         entries.append({'type':'profile','id':key,'name':item.name,'label':item.stem})
     return {'path':relative,'label':directory.name if relative else 'Listening profiles','parent':relative.rsplit('/',1)[0] if '/' in relative else ('' if relative else None),'entries':entries}
 
+def _filter_display_label(profile_key):
+    """Return a filters-root-relative breadcrumb without the YAML suffix."""
+    relative=Path(profile_key)
+    parts=list(relative.parts)
+    if not parts:return ''
+    parts[-1]=Path(parts[-1]).stem
+    return ' / '.join(parts)
+
 def listening_filters():
-    result={NO_FILTER:{'group':'','label':'No filter (bypass CamillaDSP)','mediaControl':True}}
+    result={NO_FILTER:{'group':'','label':'No filter (bypass CamillaDSP)',
+                       'displayLabel':'No filter (bypass CamillaDSP)','mediaControl':True}}
     for item in profiles():
         key=_filter_relative(item)
         result[key]={'group':str(Path(key).parent) if '/' in key else '',
                      'label':item.stem,
+                     'displayLabel':_filter_display_label(key),
                      'mediaControl':True}
     return result
 
