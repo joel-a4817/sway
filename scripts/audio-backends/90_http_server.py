@@ -29,6 +29,7 @@ class H(BaseHTTPRequestHandler):
             elif p=='/api/volatile':r=volatile_state()
             elif p=='/api/profiles':r={'profiles':[NO_FILTER]+[profile_id(x) for x in profiles()],'filters':listening_filters(),'active':active(),'running':alive(rpid(CAMPID),'camilladsp')}
             elif p=='/api/filter-directory':r=filter_directory(q.get('path',[''])[0])
+            elif p=='/api/custom-filter/schema':r=custom_filter_schema()
             elif p=='/api/mode':r=mode_state()
             elif p=='/api/away-display':r=away_display_state()
             elif p=='/api/vnc-state':r=vnc_state()
@@ -56,6 +57,7 @@ class H(BaseHTTPRequestHandler):
             elif p=='/api/mode':r=set_mode(d.get('mode'),d.get('password'),d.get('output'))
             elif p=='/api/groups/save':r=save_group(d)
             elif p=='/api/select':r=switch_profile(d.get('profile'))
+            elif p=='/api/custom-filter/create':r=create_custom_filter(d)
             elif p=='/api/audio-toggle':r=toggle_audio_services()
             elif p=='/api/ensure-audio-baseline':r=ensure_physical_audio_baseline()
             elif p=='/api/restart-sonobus':r=restart_sonobus_action(d.get('password'))

@@ -1313,6 +1313,7 @@ body {
     <div class="section-title">
      Listening profiles
     </div>
+    <button class="action" id="create-custom-filter">Create custom spatial filter</button>
     <input class="search" id="profile-search" placeholder="Search profiles"/>
     <div id="profile-list">
     </div>
@@ -1943,6 +1944,28 @@ function renderVolatile(data){
 }
 async function refreshStatic(){if(staticRefreshRunning)return;staticRefreshRunning=true;try{const data=await api('/api/state');profileSnapshot=data.profiles;renderProfileSnapshot(data.profiles);renderPlaylistSnapshot(data.playlists);loadGroups(data);renderVolatile(data);renderSystem(data.systemMedia);return data}catch(error){note(error.message,true)}finally{staticRefreshRunning=false}}
 async function refreshVolatile(){if(volatileRefreshRunning||document.hidden)return;volatileRefreshRunning=true;try{renderVolatile(await api('/api/volatile'));}catch(error){console.warn('volatile refresh failed',error)}finally{volatileRefreshRunning=false}}
+
+async function createCustomFilter(){
+  const schema=await api('/api/custom-filter/schema');
+  if(!schema.devices.length)throw new Error('No device baselines are available');
+  const deviceText=schema.devices.map((d,i)=>`${i+1}. ${d.label}`).join('\n');
+  const deviceIndex=Number(prompt('Select device:\n'+deviceText))-1;if(!Number.isInteger(deviceIndex)||!schema.devices[deviceIndex])return;
+  const device=schema.devices[deviceIndex],points=[];
+  for(;;){
+    const value=prompt(`Enter azimuth,elevation. Azimuth ${schema.azimuth.min}..${schema.azimuth.max}; elevation ${schema.elevation.min}..${schema.elevation.max}`);if(value===null)return;
+    const parts=value.split(',').map(x=>x.trim());if(parts.length!==2){alert('Enter exactly two values.');continue}
+    const az=Number(parts[0]),el=Number(parts[1]);
+    const exists=schema.azimuth.values.includes(az)&&schema.elevation.values.includes(el);
+    if(!exists){alert('Those individual values are outside the available set. The server will also validate the exact pair.');continue}
+    const source=(prompt('Point audio: average, left, or right','average')||'').trim().toLowerCase();if(!schema.pointModes.includes(source)){alert('Use average, left, or right.');continue}
+    points.push({azimuth:az,elevation:el,source});if(!confirm('Add another HRIR point?'))break;
+  }
+  const mode=(prompt('Baseline mode: '+device.modes.join(', '),device.modes[0])||'').trim().toLowerCase();if(!device.modes.includes(mode))throw new Error('That baseline is unavailable for this device');
+  const name=prompt('Custom filter name');if(!name)return;
+  const result=await post('/api/custom-filter/create',{device:device.id,name,mode,points});note('Created '+result.profile);await refreshStatic();await openFilterDirectory(device.id+'/custom');
+}
+$('#create-custom-filter').onclick=()=>createCustomFilter().catch(error=>note(error.message,true));
+
 refreshAll=async()=>refreshStatic();
 refreshStatic();refreshVncState();window.addEventListener('pageshow',event=>{if(event.persisted){refreshStatic();refreshVolatile();refreshVncState()}});document.addEventListener('visibilitychange',()=>{if(!document.hidden){renewVisibleOutput();refreshStatic();refreshVolatile()}});async function renewVisibleOutput(){if(!outputPreviewToken||$('#output-modal').classList.contains('hidden'))return;try{await post('/api/output-preview-renew',{token:outputPreviewToken})}catch(error){$('#output-modal').classList.add('hidden');pendingMode=null;outputTopology=null;outputPreviewToken=null;showOutputStep('card');showTaskFeedback('Output selection expired; reopen it. '+error.message,'error')}}setInterval(()=>{if(!document.hidden)renewVisibleOutput()},15000);setInterval(refreshVolatile,1000);setInterval(()=>{if(!document.hidden)refreshVncState()},3000);setInterval(()=>{if(!document.hidden)pollSystem()},1000);setInterval(tickSystem,250);
   </script>

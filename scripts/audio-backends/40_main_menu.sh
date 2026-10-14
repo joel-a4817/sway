@@ -103,7 +103,7 @@ case "$selected" in
         mapfile -t entry_rows < <(jq -r '.entries[] | [.type,.id,.label] | @tsv' <<<"$directory")
         labels=(); ids=(); types=()
         if [[ -z "$filter_path" ]]; then
-            labels+=('No filter (bypass CamillaDSP)'); ids+=('__no_filter__'); types+=('profile')
+            labels+=('Create custom spatial filter' 'No filter (bypass CamillaDSP)'); ids+=('__create_custom__' '__no_filter__'); types+=('action' 'profile')
         fi
         for row in "${entry_rows[@]}"; do
             type="${row%%$'\t'*}"; rest="${row#*$'\t'}"; id="${rest%%$'\t'*}"; label="${rest#*$'\t'}"
@@ -125,6 +125,7 @@ case "$selected" in
             index=$((number-1)); break
         done
         if [[ "${types[index]}" == directory ]]; then filter_path="${ids[index]}"; continue; fi
+        if [[ "${types[index]}" == action ]]; then flock -u 9; python3 "$TOPOLOGY_SCRIPT" --create-custom-filter; exit $?; fi
         selected_filter="${ids[index]}"; selected_label="${labels[index]}"; break
     done
     flock -u 9

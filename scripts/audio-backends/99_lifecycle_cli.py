@@ -343,6 +343,8 @@ def topology_cli():
             print(json.dumps(toggle_away_display()));return
         if len(sys.argv)==2 and sys.argv[1]=='--away-display-status':
             print(json.dumps(away_display_state()));return
+        if len(sys.argv)==2 and sys.argv[1]=='--create-custom-filter':
+            custom_filter_cli();return
         if len(sys.argv)==3 and sys.argv[1]=='--select-filter':
             requested=sys.argv[2]
             if requested!=NO_FILTER:profile(requested)
