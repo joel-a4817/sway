@@ -3,16 +3,21 @@ import yaml
 HRIR_ROOT=HOME/'Documents/prefs/audio/H5/H5_HRIR_WAV/96K_24bit'
 CUSTOM_FILTER_LOCK=HOME/'.local/state/sway/custom-audio-filter.lock'
 _HRIR_RE=re.compile(r'^azi_(-?\d+),(\d+)_ele_(-?\d+),(\d+)\.wav$',re.I)
-def _coord(whole,fraction):
-    whole=str(whole).strip();fraction=str(fraction).strip()
-    if not re.fullmatch(r'-?\d+',whole) or not re.fullmatch(r'\d+',fraction):raise ValueError('Coordinate parts must be integers')
-    value=float(whole+'.'+fraction);return format(value,'.10g')
+def _coord_value(value):
+    text=str(value).strip().replace(',','.')
+    if not re.fullmatch(r'-?\d+(?:\.\d+)?',text):raise ValueError('Coordinates must be ordinary numbers, for example 20.5 or -15')
+    number=float(text)
+    if not math.isfinite(number):raise ValueError('Coordinates must be finite')
+    return format(number,'.10g')
+
+def _filename_coord(whole,fraction):return _coord_value(str(whole)+'.'+str(fraction))
+
 def hrir_catalog():
     if not HRIR_ROOT.is_dir():raise FileNotFoundError('HRIR directory not found: '+str(HRIR_ROOT))
     result={}
     for path in HRIR_ROOT.iterdir():
         m=_HRIR_RE.match(path.name)
-        if m:result[(_coord(m[1],m[2]),_coord(m[3],m[4]))]=path.resolve()
+        if m:result[(_filename_coord(m[1],m[2]),_filename_coord(m[3],m[4]))]=path.resolve()
     if not result:raise RuntimeError('No HRIR WAV files found in '+str(HRIR_ROOT))
     return result
 def custom_filter_schema():
@@ -21,7 +26,7 @@ def custom_filter_schema():
         for folder in sorted((p for p in PROFILES.iterdir() if p.is_dir() and not p.name.startswith('.')),key=lambda p:p.name.casefold()):
             modes=[x for x in ('limited','gain','raw') if (folder/(x+'.yml')).is_file()]
             if modes:devices.append({'id':folder.name,'label':folder.name,'modes':modes})
-    return {'devices':devices,'azimuth':{'min':min(az),'max':max(az)},'elevation':{'min':min(el),'max':max(el)},'pointModes':['average','left','right']}
+    return {'devices':devices,'azimuth':{'min':min(az),'max':max(az)},'elevation':{'min':min(el),'max':max(el)},'coordinates':[{'azimuth':float(a),'elevation':float(e)} for a,e in sorted(cat,key=lambda pair:(float(pair[0]),float(pair[1])))],'pointModes':['average','left','right']}
 def _safe_component(value,label):
     value=str(value or '').strip()
     if not value or value in ('.','..') or '/' in value or '\\' in value or any(ord(c)<32 for c in value):raise ValueError('Invalid '+label)
@@ -41,7 +46,7 @@ def create_custom_filter(request):
     points=[]
     for item in raw:
         if not isinstance(item,dict):raise ValueError('Invalid HRIR row')
-        az=_coord(item.get('azimuthWhole'),item.get('azimuthFraction'));el=_coord(item.get('elevationWhole'),item.get('elevationFraction'));source=str(item.get('source','average')).lower()
+        az=_coord_value(item.get('azimuth'));el=_coord_value(item.get('elevation'));source=str(item.get('source','average')).lower()
         if source not in ('average','left','right'):raise ValueError('Source must be average, left, or right')
         path=cat.get((az,el))
         if path is None:raise ValueError('No HRIR exists for azimuth '+az+', elevation '+el)
@@ -80,15 +85,17 @@ def custom_filter_cli():
     print(f"Azimuth range {schema['azimuth']['min']} to {schema['azimuth']['max']}; elevation range {schema['elevation']['min']} to {schema['elevation']['max']}")
     cat=hrir_catalog()
     while True:
-        raw=input('Azimuth whole,fraction,elevation whole,fraction (0 cancels): ').strip()
+        raw=input('Azimuth elevation, separated by a space (0 cancels; example 20.5 -15): ').strip()
         if raw=='0':raise KeyboardInterrupt
-        parts=[x.strip() for x in raw.split(',')]
-        if len(parts)!=4:print('Enter four numbers, for example 0,0,-15,0.');continue
-        try:az=_coord(parts[0],parts[1]);el=_coord(parts[2],parts[3])
+        parts=raw.split()
+        if len(parts)!=2:print('Enter two decimal numbers separated by a space.');continue
+        try:az=_coord_value(parts[0]);el=_coord_value(parts[1])
         except ValueError as e:print(e);continue
-        if (az,el) not in cat:print('That exact coordinate does not exist; try again.');continue
+        if (az,el) not in cat:
+            nearby=sorted(cat,key=lambda pair:(float(pair[0])-float(az))**2+(float(pair[1])-float(el))**2)[:5]
+            print('That exact coordinate does not exist. Nearby valid options: '+', '.join('az '+a+' / el '+e for a,e in nearby));continue
         source=('average','left','right')[pick('Audio for this point',['Average','Left','Right'])]
-        points.append({'azimuthWhole':parts[0],'azimuthFraction':parts[1],'elevationWhole':parts[2],'elevationFraction':parts[3],'source':source})
+        points.append({'azimuth':az,'elevation':el,'source':source})
         if pick('Next',['Create filter','Add another HRIR'])==0:break
     mode=device['modes'][pick('Mode',device['modes'])];name=input('Filter name: ').strip()
     print('Created '+create_custom_filter({'device':device['id'],'name':name,'mode':mode,'points':points})['profile'])

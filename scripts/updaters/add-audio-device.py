@@ -198,11 +198,17 @@ def build_profile_candidates(all_measurements=False):
         if kind=='in-ear':
             if not COMPENSATION_WAV.is_file():raise SystemExit(f'Missing in-ear compensation WAV: {COMPENSATION_WAV}')
             common.append(('fixture',COMPENSATION_WAV))
-        specs=[('raw',source,False),('gain',smooth,False),('limited',smooth,False),('gain360',smooth,True),('limited360',smooth,True)]
+        specs=[('raw',source,False),('gain',smooth,False),('limited',smooth,False),('raw360',source,True),('gain360',smooth,True),('limited360',smooth,True)]
         for mode,hpcf,is360 in specs:
             chain=([('sofa',SOFA_AVERAGE_WAV)] if is360 else [])+common+[('hpcf',hpcf)]
             gain=chain_gain([path for _,path in chain]);generated.append(make_profile(item,mode,hpcf,chain,gain))
-    return [(CAMILLA_ROOT/'00-filterless.yml',filterless_text()),*generated],devices
+    preserved=[]
+    for item,_source in devices:
+        custom=CAMILLA_ROOT/profile_directory_name(profile_label(item))/'custom'
+        if custom.is_dir():
+            for path in sorted(custom.glob('*.y*ml')):
+                if path.is_file():preserved.append((path,path.read_text(encoding='utf-8')))
+    return [(CAMILLA_ROOT/'00-filterless.yml',filterless_text()),*generated,*preserved],devices
 def commit_profiles(candidates):
     """Atomically replace the updater-owned filter tree and remove stale devices."""
     CAMILLA_ROOT.mkdir(parents=True,exist_ok=True);expected={}
@@ -348,6 +354,12 @@ def rebuild_after_change(entries,backup):
         raise RuntimeError('Filter update failed; device configuration restored from backup. Cause: '+(str(error).strip() or error.__class__.__name__)) from error
     print('All CamillaDSP filters updated.')
 def update_filters(_text=None):print('\nUpdating all CamillaDSP filters...');rebuild_all_filters();print('All CamillaDSP filters updated.')
+def clean_custom_filters(_text=None):
+    removed=[]
+    if CAMILLA_ROOT.is_dir():
+        for custom in sorted(CAMILLA_ROOT.glob('*/custom')):
+            if custom.is_dir():shutil.rmtree(custom);removed.append(custom)
+    print(f"Removed {len(removed)} custom filter director{'y' if len(removed)==1 else 'ies'}.")
 def clean_devices(text):
     node,entries=load(text);print('\nClean devices review');row(1,f'Configured devices to remove: {len(entries)}');row(2,f'Anechoic HpCF folder: {HPCF_ANECHOIC}');row(3,f'CamillaDSP YAML folder: {CAMILLA_ROOT}');row(4,'The filters folder is generated state; unconfigured device directories and YAMLs are removed')
     if choose('Remove every configured device and generated filter?',('No','Yes'))==0:print('No files changed.');return
@@ -389,7 +401,7 @@ def pause():
         finally:termios.tcsetattr(fd,termios.TCSADRAIN,settings)
     print()
 def manager_main():
-    text=CONFIG_SCRIPT.read_text(encoding='utf-8');actions=(add,edit,remove,clean_devices,update_filters);choice=choose('Audio device manager',('Add device','Edit device','Remove device','Clean devices','Update all filters'));actions[choice](text)
+    text=CONFIG_SCRIPT.read_text(encoding='utf-8');actions=(add,edit,remove,clean_custom_filters,clean_devices,update_filters);choice=choose('Audio device manager',('Add device','Edit device','Remove device','Clean custom filters','Clean devices','Update all filters'));actions[choice](text)
 if __name__=='__main__':
     if sys.argv[1:] in (['--rebuild'],['--rebuild-all']):rebuild_all_filters(all_measurements=sys.argv[1:]==['--rebuild-all']);raise SystemExit(0)
     if sys.argv[1:]:raise SystemExit('Usage: add-audio-device.py [--rebuild | --rebuild-all]')
