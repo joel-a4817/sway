@@ -103,7 +103,7 @@ case "$selected" in
         mapfile -t entry_rows < <(jq -r '.entries[] | [.type,.id,.label] | @tsv' <<<"$directory")
         labels=(); ids=(); types=()
         if [[ -z "$filter_path" ]]; then
-            labels+=('Create custom spatial filter' 'No filter (bypass CamillaDSP)'); ids+=('__create_custom__' '__no_filter__'); types+=('action' 'profile')
+            : # No filter is reserved as option 0 at the root
         fi
         for row in "${entry_rows[@]}"; do
             type="${row%%$'\t'*}"; rest="${row#*$'\t'}"; id="${rest%%$'\t'*}"; label="${rest#*$'\t'}"
@@ -112,20 +112,23 @@ case "$selected" in
         done
         echo; wrap_line "Listening profiles${filter_path:+ / $filter_path}"; echo
         [[ -n "$filter_path" ]] && printf '[0] Back\n'
+        [[ -z "$filter_path" ]] && printf '[0] No filter (bypass CamillaDSP)\n'
         for i in "${!labels[@]}"; do print_menu_item "$((i+1))" "${labels[i]}"; done
+        [[ -z "$filter_path" ]] && print_menu_item "$((${#labels[@]}+1))" 'Create custom spatial filter'
         ((${#labels[@]})) || { [[ -n "$filter_path" ]] || { wrap_line 'No filter folders or YAML files found.' >&2; exit 1; }; }
         while :; do
             read -r -p 'Select: ' answer || exit 0
             [[ "$answer" =~ ^[0-9]+$ ]] || { wrap_line 'Enter a listed number.'; continue; }
             number=$((10#$answer))
+            if ((number==0)) && [[ -z "$filter_path" ]]; then selected_filter='__no_filter__'; selected_label='No filter (bypass CamillaDSP)'; break 2; fi
             if ((number==0)) && [[ -n "$filter_path" ]]; then
                 filter_path="$(jq -r '.parent // empty' <<<"$directory")"; continue 2
             fi
+            if [[ -z "$filter_path" ]] && ((number==${#labels[@]}+1)); then flock -u 9; python3 "$TOPOLOGY_SCRIPT" --create-custom-filter; exit $?; fi
             ((number>=1 && number<=${#labels[@]})) || { wrap_line 'Enter a listed number.'; continue; }
             index=$((number-1)); break
         done
         if [[ "${types[index]}" == directory ]]; then filter_path="${ids[index]}"; continue; fi
-        if [[ "${types[index]}" == action ]]; then flock -u 9; python3 "$TOPOLOGY_SCRIPT" --create-custom-filter; exit $?; fi
         selected_filter="${ids[index]}"; selected_label="${labels[index]}"; break
     done
     flock -u 9

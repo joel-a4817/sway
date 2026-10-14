@@ -1100,6 +1100,8 @@ body {
   border-color:#e9bdd62b;
   background:linear-gradient(145deg,#443146d9,#29384ad9);
 }
+
+.custom-hrir-row{padding:15px;margin:10px 0;border:1px solid #ffffff22;border-radius:18px;background:#ffffff0a}.custom-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.custom-fields label{color:#bcb7cb;font-size:12px;font-weight:700}.custom-fields input,.custom-fields select,#custom-device,#custom-name{width:100%;margin-top:5px;padding:12px;border:1px solid #ffffff25;border-radius:12px;background:#090b14;color:#fff}.custom-actions{margin-top:14px}.custom-ranges{margin:14px 2px;color:#b9b4c5;font-size:13px}.mode-dialog{border:1px solid #ffffff33;border-radius:22px;background:#151221;color:#fff;padding:22px;width:min(420px,calc(100vw - 32px));box-shadow:0 24px 80px #000b}.mode-dialog::backdrop{background:#000a;backdrop-filter:blur(8px)}.mode-choice{display:block;padding:12px;margin:8px 0;border:1px solid #ffffff22;border-radius:13px}.mode-dialog-menu{display:flex;gap:10px;justify-content:flex-end;margin-top:18px}
   </style>
  </head>
  <body>
@@ -1313,10 +1315,18 @@ body {
     <div class="section-title">
      Listening profiles
     </div>
-    <button class="action" id="create-custom-filter">Create custom spatial filter</button>
     <input class="search" id="profile-search" placeholder="Search profiles"/>
     <div id="profile-list">
     </div>
+    <button class="action" id="open-custom-filter">Create custom spatial filter</button>
+   </section>
+   <section class="hidden" id="custom-filter-page">
+    <div class="header"><button class="back" data-back="listening-page">Back</button><h1>Custom Spatial Filter</h1><div></div></div>
+    <div class="card"><div class="label">Device</div><select id="custom-device"></select><div class="label" style="margin-top:14px">Filter name</div><input id="custom-name" placeholder="My spatial filter"/></div>
+    <div class="section-title">HRIR points</div><div id="custom-hrir-list"></div>
+    <div class="custom-ranges" id="custom-ranges"></div>
+    <div class="grid two custom-actions"><button class="action" id="add-custom-hrir">Add HRIR</button><button class="action primary" id="review-custom-filter">Add filter</button></div>
+    <dialog class="mode-dialog" id="custom-mode-dialog"><h2>Select filter mode</h2><div id="custom-mode-options"></div><div class="mode-dialog-menu"><button class="action" id="cancel-custom-mode">Cancel</button><button class="action primary" id="apply-custom-filter">Apply</button></div></dialog>
    </section>
    <section class="hidden" id="pc">
     <div class="header">
@@ -1508,7 +1518,7 @@ body {
   </main>
   <script>
    const $=selector=>document.querySelector(selector);
-const screens=['profiles','audio-options-page','pc','songs','playlist','groups-page','listening-page'].map(id=>$('#'+id));
+const screens=['profiles','audio-options-page','pc','songs','playlist','groups-page','listening-page','custom-filter-page'].map(id=>$('#'+id));
 let all=[],inside=[],current='';
 const state={
   system:{slider:$('#system-seek'),elapsed:$('#system-elapsed'),durationLabel:$('#system-duration'),volume:$('#system-volume'),duration:0,dragging:false,polling:false,repoll:false,clockPosition:0,clockAt:0,clockPlaying:false,lastAvailableAt:0,trackKey:'',skipPending:false,skipFrom:'',skipStarted:0,skipWarned:false,volumeHold:0,volumeTimer:null,volumePending:null},
@@ -1945,26 +1955,23 @@ function renderVolatile(data){
 async function refreshStatic(){if(staticRefreshRunning)return;staticRefreshRunning=true;try{const data=await api('/api/state');profileSnapshot=data.profiles;renderProfileSnapshot(data.profiles);renderPlaylistSnapshot(data.playlists);loadGroups(data);renderVolatile(data);renderSystem(data.systemMedia);return data}catch(error){note(error.message,true)}finally{staticRefreshRunning=false}}
 async function refreshVolatile(){if(volatileRefreshRunning||document.hidden)return;volatileRefreshRunning=true;try{renderVolatile(await api('/api/volatile'));}catch(error){console.warn('volatile refresh failed',error)}finally{volatileRefreshRunning=false}}
 
-async function createCustomFilter(){
-  const schema=await api('/api/custom-filter/schema');
-  if(!schema.devices.length)throw new Error('No device baselines are available');
-  const deviceText=schema.devices.map((d,i)=>`${i+1}. ${d.label}`).join('\n');
-  const deviceIndex=Number(prompt('Select device:\n'+deviceText))-1;if(!Number.isInteger(deviceIndex)||!schema.devices[deviceIndex])return;
-  const device=schema.devices[deviceIndex],points=[];
-  for(;;){
-    const value=prompt(`Enter azimuth,elevation. Azimuth ${schema.azimuth.min}..${schema.azimuth.max}; elevation ${schema.elevation.min}..${schema.elevation.max}`);if(value===null)return;
-    const parts=value.split(',').map(x=>x.trim());if(parts.length!==2){alert('Enter exactly two values.');continue}
-    const az=Number(parts[0]),el=Number(parts[1]);
-    const exists=schema.azimuth.values.includes(az)&&schema.elevation.values.includes(el);
-    if(!exists){alert('Those individual values are outside the available set. The server will also validate the exact pair.');continue}
-    const source=(prompt('Point audio: average, left, or right','average')||'').trim().toLowerCase();if(!schema.pointModes.includes(source)){alert('Use average, left, or right.');continue}
-    points.push({azimuth:az,elevation:el,source});if(!confirm('Add another HRIR point?'))break;
-  }
-  const mode=(prompt('Baseline mode: '+device.modes.join(', '),device.modes[0])||'').trim().toLowerCase();if(!device.modes.includes(mode))throw new Error('That baseline is unavailable for this device');
-  const name=prompt('Custom filter name');if(!name)return;
-  const result=await post('/api/custom-filter/create',{device:device.id,name,mode,points});note('Created '+result.profile);await refreshStatic();await openFilterDirectory(device.id+'/custom');
+let customSchema=null,customRowCount=0;
+function customHrirRow(){
+  const row=document.createElement('div');row.className='custom-hrir-row';row.dataset.row=String(++customRowCount);
+  row.innerHTML='<div class="custom-fields"><label>Azimuth whole<input inputmode="numeric" data-field="azimuthWhole" placeholder="0"></label><label>Azimuth fractional<input inputmode="numeric" data-field="azimuthFraction" placeholder="0"></label><label>Elevation whole<input inputmode="numeric" data-field="elevationWhole" placeholder="-15"></label><label>Elevation fractional<input inputmode="numeric" data-field="elevationFraction" placeholder="0"></label><label>Audio at this point<select data-field="source"><option value="average">Average left + right</option><option value="left">Left only</option><option value="right">Right only</option></select></label></div><button class="action" type="button" style="margin-top:10px">Remove HRIR</button>';
+  row.querySelector('button').onclick=()=>{if(document.querySelectorAll('.custom-hrir-row').length>1)row.remove();else note('At least one HRIR is required',true)};return row
 }
-$('#create-custom-filter').onclick=()=>createCustomFilter().catch(error=>note(error.message,true));
+async function openCustomFilterPage(){
+  customSchema=await api('/api/custom-filter/schema');if(!customSchema.devices.length)throw new Error('No compatible device baselines found');
+  const select=$('#custom-device');select.replaceChildren(...customSchema.devices.map(d=>new Option(d.label,d.id)));$('#custom-name').value='';
+  const list=$('#custom-hrir-list');list.replaceChildren(customHrirRow());$('#custom-ranges').textContent=`Available ranges • azimuth ${customSchema.azimuth.min} to ${customSchema.azimuth.max} • elevation ${customSchema.elevation.min} to ${customSchema.elevation.max}. Each decimal-comma filename is entered as whole and fractional parts.`;show('custom-filter-page')
+}
+function customPoints(){return [...document.querySelectorAll('.custom-hrir-row')].map(row=>Object.fromEntries([...row.querySelectorAll('[data-field]')].map(input=>[input.dataset.field,input.value.trim()]))) }
+$('#open-custom-filter').onclick=()=>openCustomFilterPage().catch(error=>note(error.message,true));
+$('#add-custom-hrir').onclick=()=>$('#custom-hrir-list').append(customHrirRow());
+$('#review-custom-filter').onclick=()=>{const device=customSchema.devices.find(d=>d.id===$('#custom-device').value);if(!device||!$('#custom-name').value.trim())return note('Choose a device and enter a filter name',true);if(customPoints().some(p=>!p.azimuthWhole||!p.azimuthFraction||!p.elevationWhole||!p.elevationFraction))return note('Complete all four coordinate fields in every HRIR row',true);const options=$('#custom-mode-options');options.replaceChildren(...device.modes.map((mode,index)=>{const label=document.createElement('label');label.className='mode-choice';label.innerHTML=`<input type="radio" name="custom-mode" value="${mode}" ${index===0?'checked':''}> ${mode[0].toUpperCase()+mode.slice(1)}`;return label}));$('#custom-mode-dialog').showModal()};
+$('#cancel-custom-mode').onclick=()=>$('#custom-mode-dialog').close();
+$('#apply-custom-filter').onclick=async()=>{try{const mode=document.querySelector('input[name="custom-mode"]:checked')?.value;if(!mode)throw new Error('Select a mode');const result=await post('/api/custom-filter/create',{device:$('#custom-device').value,name:$('#custom-name').value.trim(),mode,points:customPoints()});$('#custom-mode-dialog').close();note('Created '+result.profile);show('listening-page');await openFilterDirectory($('#custom-device').value+'/custom')}catch(error){note(error.message,true)}};
 
 refreshAll=async()=>refreshStatic();
 refreshStatic();refreshVncState();window.addEventListener('pageshow',event=>{if(event.persisted){refreshStatic();refreshVolatile();refreshVncState()}});document.addEventListener('visibilitychange',()=>{if(!document.hidden){renewVisibleOutput();refreshStatic();refreshVolatile()}});async function renewVisibleOutput(){if(!outputPreviewToken||$('#output-modal').classList.contains('hidden'))return;try{await post('/api/output-preview-renew',{token:outputPreviewToken})}catch(error){$('#output-modal').classList.add('hidden');pendingMode=null;outputTopology=null;outputPreviewToken=null;showOutputStep('card');showTaskFeedback('Output selection expired; reopen it. '+error.message,'error')}}setInterval(()=>{if(!document.hidden)renewVisibleOutput()},15000);setInterval(refreshVolatile,1000);setInterval(()=>{if(!document.hidden)refreshVncState()},3000);setInterval(()=>{if(!document.hidden)pollSystem()},1000);setInterval(tickSystem,250);
