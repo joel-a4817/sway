@@ -82,6 +82,7 @@ class H(BaseHTTPRequestHandler):
             elif p=='/api/play/playlist':r=play_list(d.get('name'),bool(d.get('shuffle')))
             else:self.out(404,{'ok':False,'error':'Not found'});return
             self.out(200,{'ok':True,**r})
+        except FileExistsError as e:self.out(409,{'ok':False,'error':str(e)})
         except (ValueError,TypeError,KeyError,FileNotFoundError,json.JSONDecodeError) as e:self.out(400,{'ok':False,'error':str(e)})
         except Exception as e:self.out(500,{'ok':False,'error':str(e)})
     def log_message(self,*a):pass

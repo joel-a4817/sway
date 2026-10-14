@@ -31,12 +31,15 @@ def _safe_component(value,label):
     value=str(value or '').strip()
     if not value or value in ('.','..') or '/' in value or '\\' in value or any(ord(c)<32 for c in value):raise ValueError('Invalid '+label)
     return value
-def create_custom_filter(request):
-    if not isinstance(request,dict):raise ValueError('Request must be an object')
-    device_name=_safe_component(request.get('device'),'device');name=_safe_component(request.get('name'),'filter name')
+def custom_filter_target(device_name,name):
+    device_name=_safe_component(device_name,'device');name=_safe_component(name,'filter name')
     if name.casefold().endswith(('.yml','.yaml')):name=Path(name).stem
     device=(PROFILES/device_name).resolve();base=PROFILES.resolve()
     if base not in device.parents or not device.is_dir():raise FileNotFoundError('Device not found: '+device_name)
+    return device,name,device/'custom'/(name+'.yml')
+def create_custom_filter(request):
+    if not isinstance(request,dict):raise ValueError('Request must be an object')
+    device,name,target=custom_filter_target(request.get('device'),request.get('name'))
     mode=str(request.get('mode','')).lower()
     if mode not in ('limited','gain','raw'):raise ValueError('Mode must be limited, gain, or raw')
     baseline=device/(mode+'.yml')
@@ -46,7 +49,7 @@ def create_custom_filter(request):
     points=[]
     for item in raw:
         if not isinstance(item,dict):raise ValueError('Invalid HRIR row')
-        az=_coord_value(item.get('azimuth'));el=_coord_value(item.get('elevation'));source=str(item.get('source','average')).lower()
+        az=_coord_value(item.get('azimuth'));el=_coord_value(item.get('elevation'));source=str(item.get('source') or '').lower()
         if source not in ('average','left','right'):raise ValueError('Source must be average, left, or right')
         path=cat.get((az,el))
         if path is None:raise ValueError('No HRIR exists for azimuth '+az+', elevation '+el)
@@ -63,7 +66,7 @@ def create_custom_filter(request):
     pipeline.append({'type':'Mixer','name':'custom_hrir_spread'})
     for i in range(count):pipeline.extend(({'type':'Filter','channels':[2*i],'names':[f'custom_hrir_{i}_left']},{'type':'Filter','channels':[2*i+1],'names':[f'custom_hrir_{i}_right']}))
     pipeline.append({'type':'Mixer','name':'custom_hrir_merge'});config['title']=name;config['description']=f'Custom binaural HRIR filter based on {mode}.yml; {count} point(s)'
-    custom=device/'custom';target=custom/(name+'.yml');CUSTOM_FILTER_LOCK.parent.mkdir(parents=True,exist_ok=True)
+    custom=target.parent;CUSTOM_FILTER_LOCK.parent.mkdir(parents=True,exist_ok=True)
     with CUSTOM_FILTER_LOCK.open('a+') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX);custom.mkdir(parents=True,exist_ok=True)
         if target.exists():raise FileExistsError('Custom filter already exists: '+name)
@@ -97,5 +100,12 @@ def custom_filter_cli():
         source=('average','left','right')[pick('Audio for this point',['Average','Left','Right'])]
         points.append({'azimuth':az,'elevation':el,'source':source})
         if pick('Next',['Create filter','Add another HRIR'])==0:break
-    mode=device['modes'][pick('Mode',device['modes'])];name=input('Filter name: ').strip()
-    print('Created '+create_custom_filter({'device':device['id'],'name':name,'mode':mode,'points':points})['profile'])
+    mode=device['modes'][pick('Mode',device['modes'])]
+    while True:
+        name=input('Filter name: ').strip()
+        try:
+            result=create_custom_filter({'device':device['id'],'name':name,'mode':mode,'points':points})
+            break
+        except FileExistsError:
+            print('A custom filter with that name already exists for this device. Enter another name.')
+    print('Created '+result['profile'])
