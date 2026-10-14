@@ -219,7 +219,10 @@ def commit_profiles(candidates):
             raise RuntimeError(f'Generated profile escapes output folder: {path}')
         if path in expected:raise RuntimeError(f'Duplicate generated profile path: {path.relative_to(root)}')
         expected[path]=text
-    expected_device_dirs={path.parent for path in expected if path.parent!=root}
+    # Verification and stale-device cleanup operate on top-level device
+    # directories. Preserved custom filters live below DEVICE/custom, so using
+    # each YAML's immediate parent would incorrectly treat custom as a device.
+    expected_device_dirs={root/path.relative_to(root).parts[0] for path in expected if path.parent!=root}
     before_yaml={path.resolve() for pattern in ('*.yml','*.yaml') for path in root.rglob(pattern) if path.is_file()}
     before_dirs={path.resolve() for path in root.iterdir() if path.is_dir()}
     with tempfile.TemporaryDirectory(prefix='.profile-commit-',dir=root.parent) as transaction_name:
