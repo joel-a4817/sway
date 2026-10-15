@@ -137,10 +137,26 @@ def mono_mixer_text():return '''mixers:
           - channel: 1
             gain: -6.020599913280
 '''
+def channel_swap_mixer_text():return '''mixers:
+  swap:
+    channels:
+      in: 2
+      out: 2
+    mapping:
+      - dest: 0
+        sources:
+          - channel: 1
+            gain: 0.0
+      - dest: 1
+        sources:
+          - channel: 0
+            gain: 0.0
+'''
 def make_profile(item,mode,hpcf_path,chain_paths,preamp_db):
-    device_dir=CAMILLA_ROOT/profile_directory_name(profile_label(item));playback=CAMILLA_SMOOTHED_PLAYBACK_DEVICE if mode.startswith('limited') else CAMILLA_RAW_PLAYBACK_DEVICE;is360=mode.endswith('360')
-    text='---\ntitle: '+yaml_string(mode)+'\ndescription: "B&K 5128 correction'+('; H5 360 power average with arithmetic mono input' if is360 else '; regular stereo')+'"\n'+devices_text(playback)
+    device_dir=CAMILLA_ROOT/profile_directory_name(profile_label(item));playback=CAMILLA_SMOOTHED_PLAYBACK_DEVICE if mode.startswith('limited') else CAMILLA_RAW_PLAYBACK_DEVICE;is360=mode in ('raw360','gain360','limited360');is360st=mode.endswith('360s');is360swap=mode.endswith('360x')
+    text='---\ntitle: '+yaml_string(mode)+'\ndescription: "B&K 5128 correction'+('; H5 360 mono' if is360 else '; H5 360 stereo' if is360st else '; H5 360 swapped stereo' if is360swap else '; stereo')+'"\n'+devices_text(playback)
     if is360:text+=mono_mixer_text()
+    elif is360swap:text+=channel_swap_mixer_text()
     text+='filters:\n'
     names=[]
     for prefix,path in chain_paths:
@@ -148,6 +164,7 @@ def make_profile(item,mode,hpcf_path,chain_paths,preamp_db):
     if mode.startswith('gain') or mode=='raw':text+=gain_text(preamp_db)
     text+='pipeline:\n'
     if is360:text+='  - type: Mixer\n    name: mono\n'
+    elif is360swap:text+='  - type: Mixer\n    name: swap\n'
     for prefix in names:
         text+=f'  - type: Filter\n    channels: [0]\n    names: [{prefix}_left]\n  - type: Filter\n    channels: [1]\n    names: [{prefix}_right]\n'
     if mode.startswith('gain') or mode=='raw':text+='  - type: Filter\n    channels: [0, 1]\n    names: [auto_gain]\n'
@@ -199,7 +216,7 @@ def build_profile_candidates(all_measurements=False):
         if kind=='in-ear':
             if not COMPENSATION_WAV.is_file():raise SystemExit(f'Missing in-ear compensation WAV: {COMPENSATION_WAV}')
             common.append(('fixture',COMPENSATION_WAV))
-        specs=[('raw',source,False),('gain',smooth,False),('limited',smooth,False),('raw360',source,True),('gain360',smooth,True),('limited360',smooth,True)]
+        specs=[('raw',source,False),('gain',smooth,False),('limited',smooth,False),('raw360',source,True),('gain360',smooth,True),('limited360',smooth,True),('raw360s',source,True),('gain360s',smooth,True),('limited360s',smooth,True),('raw360x',source,True),('gain360x',smooth,True),('limited360x',smooth,True)]
         for mode,hpcf,is360 in specs:
             chain=([('sofa',SOFA_AVERAGE_WAV)] if is360 else [])+common+[('hpcf',hpcf)]
             gain=chain_gain([path for _,path in chain]);generated.append(make_profile(item,mode,hpcf,chain,gain))
@@ -235,14 +252,20 @@ def rebuild_custom_profile(path,text,standard_profiles):
             raise RuntimeError(f'{path}: HRIR point {index+1} convolution pair is invalid')
         sources=(spread[2*index] or {}).get('sources')
         if not isinstance(sources,list):raise RuntimeError(f'{path}: HRIR point {index+1} source mapping is invalid')
-        channels=[row.get('channel') for row in sources if isinstance(row,dict)]
-        source='average' if channels==[0,1] else ('left' if channels==[0] else ('right' if channels==[1] else None))
+        left_channels=[row.get('channel') for row in sources if isinstance(row,dict)]
+        right_sources=(spread[2*index+1] or {}).get('sources')
+        if not isinstance(right_sources,list):raise RuntimeError(f'{path}: HRIR point {index+1} right source mapping is invalid')
+        right_channels=[row.get('channel') for row in right_sources if isinstance(row,dict)]
+        source=('average' if left_channels==[0,1] and right_channels==[0,1] else 'left' if left_channels==[0] and right_channels==[0] else 'right' if left_channels==[1] and right_channels==[1] else 'stereo' if left_channels==[0] and right_channels==[1] else 'swap' if left_channels==[1] and right_channels==[0] else None)
         if source is None:raise RuntimeError(f'{path}: HRIR point {index+1} source mapping is unsupported')
         points.append((Path(filename),source))
     new_filters=config.setdefault('filters',{});mixers=config.setdefault('mixers',{});pipeline=config.setdefault('pipeline',[]);mapping=[]
     for index,(filename,source) in enumerate(points):
-        sources={'average':[{'channel':0,'gain':-6.02059991328},{'channel':1,'gain':-6.02059991328}],'left':[{'channel':0,'gain':0.0}],'right':[{'channel':1,'gain':0.0}]}[source]
-        mapping.extend(({'dest':2*index,'sources':sources},{'dest':2*index+1,'sources':sources}))
+        mono_sources={'average':[{'channel':0,'gain':-6.02059991328},{'channel':1,'gain':-6.02059991328}],'left':[{'channel':0,'gain':0.0}],'right':[{'channel':1,'gain':0.0}]}
+        if source in mono_sources:left_sources=right_sources=mono_sources[source]
+        elif source=='stereo':left_sources=[{'channel':0,'gain':0.0}];right_sources=[{'channel':1,'gain':0.0}]
+        else:left_sources=[{'channel':1,'gain':0.0}];right_sources=[{'channel':0,'gain':0.0}]
+        mapping.extend(({'dest':2*index,'sources':left_sources},{'dest':2*index+1,'sources':right_sources}))
         new_filters[f'custom_hrir_{index}_left']={'type':'Conv','parameters':{'type':'Wav','filename':str(filename),'channel':0}}
         new_filters[f'custom_hrir_{index}_right']={'type':'Conv','parameters':{'type':'Wav','filename':str(filename),'channel':1}}
     mixers['custom_hrir_spread']={'channels':{'in':2,'out':2*count},'mapping':mapping};gain=-20*math.log10(count)

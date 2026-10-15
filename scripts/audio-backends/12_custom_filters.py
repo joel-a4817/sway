@@ -26,7 +26,7 @@ def custom_filter_schema():
         for folder in sorted((p for p in PROFILES.iterdir() if p.is_dir() and not p.name.startswith('.')),key=lambda p:p.name.casefold()):
             modes=[x for x in ('limited','gain','raw') if (folder/(x+'.yml')).is_file()]
             if modes:devices.append({'id':folder.name,'label':folder.name,'modes':modes})
-    return {'devices':devices,'azimuth':{'min':min(az),'max':max(az)},'elevation':{'min':min(el),'max':max(el)},'coordinates':[{'azimuth':float(a),'elevation':float(e)} for a,e in sorted(cat,key=lambda pair:(float(pair[0]),float(pair[1])))],'pointModes':['average','left','right']}
+    return {'devices':devices,'azimuth':{'min':min(az),'max':max(az)},'elevation':{'min':min(el),'max':max(el)},'coordinates':[{'azimuth':float(a),'elevation':float(e)} for a,e in sorted(cat,key=lambda pair:(float(pair[0]),float(pair[1])))],'pointModes':['average','left','right','stereo','swap']}
 def _safe_component(value,label):
     value=str(value or '').strip()
     if not value or value in ('.','..') or '/' in value or '\\' in value or any(ord(c)<32 for c in value):raise ValueError('Invalid '+label)
@@ -50,15 +50,18 @@ def create_custom_filter(request):
     for item in raw:
         if not isinstance(item,dict):raise ValueError('Invalid HRIR row')
         az=_coord_value(item.get('azimuth'));el=_coord_value(item.get('elevation'));source=str(item.get('source') or '').lower()
-        if source not in ('average','left','right'):raise ValueError('Source must be average, left, or right')
+        if source not in ('average','left','right','stereo','swap'):raise ValueError('Source must be average, left, right, stereo, or swapped stereo')
         path=cat.get((az,el))
         if path is None:raise ValueError('No HRIR exists for azimuth '+az+', elevation '+el)
         points.append((path,source,az,el))
     config=yaml.safe_load(baseline.read_text(encoding='utf-8'))
     filters=config.setdefault('filters',{});mixers=config.setdefault('mixers',{});pipeline=config.setdefault('pipeline',[]);count=len(points);spread=[]
     for i,(path,source,az,el) in enumerate(points):
-        sources={'average':[{'channel':0,'gain':-6.02059991328},{'channel':1,'gain':-6.02059991328}],'left':[{'channel':0,'gain':0.0}],'right':[{'channel':1,'gain':0.0}]}[source]
-        spread.extend(({'dest':2*i,'sources':sources},{'dest':2*i+1,'sources':sources}))
+        mono_sources={'average':[{'channel':0,'gain':-6.02059991328},{'channel':1,'gain':-6.02059991328}],'left':[{'channel':0,'gain':0.0}],'right':[{'channel':1,'gain':0.0}]}
+        if source in mono_sources:left_sources=right_sources=mono_sources[source]
+        elif source=='stereo':left_sources=[{'channel':0,'gain':0.0}];right_sources=[{'channel':1,'gain':0.0}]
+        else:left_sources=[{'channel':1,'gain':0.0}];right_sources=[{'channel':0,'gain':0.0}]
+        spread.extend(({'dest':2*i,'sources':left_sources},{'dest':2*i+1,'sources':right_sources}))
         filters[f'custom_hrir_{i}_left']={'type':'Conv','parameters':{'type':'Wav','filename':str(path),'channel':0}}
         filters[f'custom_hrir_{i}_right']={'type':'Conv','parameters':{'type':'Wav','filename':str(path),'channel':1}}
     mixers['custom_hrir_spread']={'channels':{'in':2,'out':2*count},'mapping':spread};gain=-20*math.log10(count)
@@ -97,7 +100,7 @@ def custom_filter_cli():
         if (az,el) not in cat:
             nearby=sorted(cat,key=lambda pair:(float(pair[0])-float(az))**2+(float(pair[1])-float(el))**2)[:5]
             print('That exact coordinate does not exist. Nearby valid options: '+', '.join('az '+a+' / el '+e for a,e in nearby));continue
-        source=('average','left','right')[pick('Audio for this point',['Average','Left','Right'])]
+        source=('average','left','right','stereo','swap')[pick('Audio for this point',['L+R avg','Left','Right','Stereo L→L R→R','Stereo L→R R→L'])]
         points.append({'azimuth':az,'elevation':el,'source':source})
         if pick('Next',['Create filter','Add another HRIR'])==0:break
     mode=device['modes'][pick('Mode',device['modes'])]
