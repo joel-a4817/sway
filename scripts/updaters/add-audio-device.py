@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Manage Raw, limiter-smoothed, and gain-smoothed H5 profiles."""
+"""Manage Raw and Limited H5 profiles using Raw HpCFs only."""
 import ast, math, re, os, shutil, subprocess, sys, tempfile, termios, textwrap, tty
 from datetime import datetime
 from pathlib import Path
@@ -26,32 +26,29 @@ SCRIPT_DIR=CONTEXT_PATHS['UPDATERS']
 CONFIG_SCRIPT=Path(__file__).resolve()
 BACKUP_DIR=CONTEXT_PATHS['AUDIO_DEVICE_BACKUPS']
 HPCF_ANECHOIC=AUDIO_ROOT/'b&k 5128 hpcfs'
-COMPENSATION_WAV=AUDIO_ROOT/'conversion/Beyerdynamic DT 990 Pro - B&K 5128 to SADIE H5 Approximate Compensation.wav'
-SOFA_AVERAGE_WAV=AUDIO_ROOT/'sofa average/H5_2945_Weighted_Power_Average_UNNORMALIZED.wav'
+COMPENSATION_WAV=AUDIO_ROOT/'other/Beyerdynamic DT 990 Pro - B&K 5128 to SADIE H5 Approximate Compensation.wav'
+SOFA_AVERAGE_WAV=AUDIO_ROOT/'other/H5_2945_Weighted_Power_Average_UNNORMALIZED.wav'
 MEASUREMENTS_DIR=AUDIO_ROOT/'measurements'
 HPCFS = (
     {
         'file': 'Apple EarPods - B&K 5128 - HpCF - Raw.wav',
-        'label': 'earpods',
-        'include_smoothed': True,
+        'label': 'Apple Earpods',
         'type': 'in-ear',
     },
     {
         'file': 'CMF Buds Pro 2 - B&K 5128 - HpCF - Raw.wav',
-        'label': 'buds pro 2',
-        'include_smoothed': True,
+        'label': 'CMF Buds Pro 2',
         'type': 'in-ear',
     },
     {
         'file': 'HyperX Cloud III - B&K 5128 - HpCF - Raw.wav',
-        'label': 'cloud iii',
-        'include_smoothed': True,
+        'label': 'HyperX Cloud III',
         'type': 'over-ear',
     },
 )
 SAMPLE_RATE=96000
 CAMILLA_RAW_PLAYBACK_DEVICE='camilladsp_peak_integer'
-CAMILLA_SMOOTHED_PLAYBACK_DEVICE='camilladsp_peak_limited'
+CAMILLA_LIMITED_PLAYBACK_DEVICE='camilladsp_peak_limited'
 CAMILLA_PLAYBACK_FORMAT='F32_LE'
 CAMILLA_ROOT=AUDIO_FILTERS
 
@@ -73,26 +70,22 @@ def read_fir(path,channels):
     if rate!=SAMPLE_RATE or data.shape[1]!=channels or not len(data):raise RuntimeError(f'{path}: expected nonempty {channels}-channel {SAMPLE_RATE} Hz FIR')
     if not np.isfinite(data).all():raise RuntimeError(f'{path}: non-finite FIR samples')
     return data
-def chain_gain(paths,raw=False):
-    """Raw: normalize 20 Hz-20 kHz; Gain: preserve full-band attenuation."""
+def chain_gain(paths):
+    """Shared stereo gain: negative complete-chain peak within 20-20000 Hz."""
     arrays=[read_fir(path,2) for path in paths]
     nfft=dense_response_nfft(*(len(x) for x in arrays))
-    frequencies=np.fft.rfftfreq(nfft,1.0/SAMPLE_RATE)
-    combined=np.ones((nfft//2+1,2),dtype=np.float64)
-    for data in arrays:combined*=np.abs(np.fft.rfft(data,n=nfft,axis=0))
-    if raw:
-        combined=combined[(frequencies>=20.0)&(frequencies<=20000.0)]
-        # Include the exact band edges, which need not coincide with FFT bins.
-        edges=np.ones((2,2),dtype=np.float64)
-        for data in arrays:
-            kernel=np.exp(-2j*np.pi*np.outer([20.0,20000.0],np.arange(len(data)))/SAMPLE_RATE)
-            edges*=np.abs(kernel@data)
-        peak=max(float(np.max(combined)),float(np.max(edges)))
-    else:peak=float(np.max(combined))
-    if not np.isfinite(peak) or peak<=0.0:raise RuntimeError('Invalid complete-chain frequency response')
-    peak_db=20.0*np.log10(peak)
-    gain=-peak_db if raw else min(0.0,-peak_db)
-    print(f'Complete chain {"20 Hz-20 kHz" if raw else "full-band"} peak {peak_db:.12f} dB; gain {gain:.12f} dB')
+    frequency=np.fft.rfftfreq(nfft,1.0/SAMPLE_RATE)
+    keep=(frequency>=20.0)&(frequency<=20000.0)
+    combined=np.ones((int(keep.sum()),2),dtype=np.float64)
+    edges=np.ones((2,2),dtype=np.float64)
+    for data in arrays:
+        combined*=np.abs(np.fft.rfft(data,n=nfft,axis=0)[keep])
+        kernel=np.exp(-2j*np.pi*np.outer([20.0,20000.0],np.arange(len(data)))/SAMPLE_RATE)
+        edges*=np.abs(kernel@data)
+    peak=max(float(np.max(combined)),float(np.max(edges)))
+    if not np.isfinite(peak) or peak<=0:raise RuntimeError('Invalid complete-chain audible response')
+    gain=-20.0*np.log10(peak)
+    print(f'Complete chain 20 Hz-20 kHz peak {-gain:.12f} dB; gain {gain:.12f} dB')
     return gain
 def devices_text(playback_device):
     return f'''devices:
@@ -160,7 +153,8 @@ def channel_swap_mixer_text():return '''mixers:
             gain: 0.0
 '''
 def make_profile(item,mode,hpcf_path,chain_paths,preamp_db):
-    device_dir=CAMILLA_ROOT/profile_directory_name(profile_label(item));playback=CAMILLA_SMOOTHED_PLAYBACK_DEVICE if mode.startswith('limited') else CAMILLA_RAW_PLAYBACK_DEVICE;is360=mode in ('raw360','gain360','limited360');is360st=mode.endswith('360s');is360swap=mode.endswith('360x')
+    if mode not in {base+suffix for base in ('raw','limited') for suffix in ('','360','360s','360x')}:raise ValueError('Unsupported profile mode: '+mode)
+    device_dir=CAMILLA_ROOT/profile_directory_name(profile_label(item));playback=CAMILLA_LIMITED_PLAYBACK_DEVICE if mode.startswith('limited') else CAMILLA_RAW_PLAYBACK_DEVICE;is360=mode in ('raw360','limited360');is360st=mode.endswith('360s');is360swap=mode.endswith('360x')
     text='---\ntitle: '+yaml_string(mode)+'\ndescription: "B&K 5128 correction'+('; H5 360 mono' if is360 else '; H5 360 stereo' if is360st else '; H5 360 swapped stereo' if is360swap else '; stereo')+'"\n'+devices_text(playback)
     if is360:text+=mono_mixer_text()
     elif is360swap:text+=channel_swap_mixer_text()
@@ -168,25 +162,16 @@ def make_profile(item,mode,hpcf_path,chain_paths,preamp_db):
     names=[]
     for prefix,path in chain_paths:
         text+=conv_text(prefix+'_left',path,0)+conv_text(prefix+'_right',path,1);names.append(prefix)
-    if mode.startswith(('gain','raw')):text+=gain_text(preamp_db)
+    if mode.startswith('raw'):text+=gain_text(preamp_db)
     text+='pipeline:\n'
     if is360:text+='  - type: Mixer\n    name: mono\n'
     elif is360swap:text+='  - type: Mixer\n    name: swap\n'
     for prefix in names:
         text+=f'  - type: Filter\n    channels: [0]\n    names: [{prefix}_left]\n  - type: Filter\n    channels: [1]\n    names: [{prefix}_right]\n'
-    if mode.startswith(('gain','raw')):text+='  - type: Filter\n    channels: [0, 1]\n    names: [auto_gain]\n'
+    if mode.startswith('raw'):text+='  - type: Filter\n    channels: [0, 1]\n    names: [auto_gain]\n'
     return device_dir/(mode+'.yml'),text
 def configured_path(item):
     path=Path(str(item.get('file',''))).expanduser();return (path if path.is_absolute() else HPCF_ANECHOIC/path).resolve()
-def smoothed_path(source):
-    source=Path(source);return HPCF_ANECHOIC/(source.stem.removesuffix(' - Raw')+source.suffix)
-def selected_variants(item,source):
-    is_raw=source.stem.endswith(' - Raw');variants=[(not is_raw,source)]
-    if item.get('include_smoothed',False) and is_raw:
-        sibling=smoothed_path(source)
-        if sibling.is_file():variants.append((True,sibling))
-        else:print(f'No matching smoothed HpCF found: {sibling}; continuing with Raw only.')
-    return variants
 
 def measurement_devices():
     if not MEASUREMENTS_DIR.is_dir():raise SystemExit(f'Missing measurement folder: {MEASUREMENTS_DIR}')
@@ -203,7 +188,7 @@ def measurement_devices():
         expected.add(wav_name.casefold());source=(HPCF_ANECHOIC/wav_name).resolve()
         if key(source) in configured:continue
         if not source.is_file():raise SystemExit(f'Missing CSV-derived Raw HpCF: {source}; run the HpCF builder first')
-        result.append({'file':wav_name,'label':name,'include_smoothed':True,'type':'in-ear'});configured.add(key(source))
+        result.append({'file':wav_name,'label':name,'type':'in-ear'});configured.add(key(source))
     return result
 
 def build_profile_candidates(all_measurements=False):
@@ -214,19 +199,17 @@ def build_profile_candidates(all_measurements=False):
         label=profile_label(item);source=configured_path(item);kind=str(item.get('type','')).strip().lower()
         if kind not in ('in-ear','over-ear'):raise SystemExit(f'{label}: type must be in-ear or over-ear')
         if not source.is_file():raise SystemExit(f'Missing Raw HpCF WAV: {source}')
-        smooth=smoothed_path(source)
-        if not smooth.is_file():raise SystemExit(f'Missing smoothed HpCF WAV: {smooth}')
         directory_name=profile_directory_name(label);directory_key=os.path.normcase(directory_name)
         if label.casefold() in labels or directory_key in directory_names or os.path.normcase(str(source)) in sources:raise SystemExit(f'Duplicate HpCF device or profile directory: {label} / {source}')
         labels.add(label.casefold());directory_names.add(directory_key);sources.add(os.path.normcase(str(source)));devices.append((item,source))
         common=[]
-        if kind=='in-ear':
-            if not COMPENSATION_WAV.is_file():raise SystemExit(f'Missing in-ear compensation WAV: {COMPENSATION_WAV}')
+        if kind=='over-ear':
+            if not COMPENSATION_WAV.is_file():raise SystemExit(f'Missing over-ear compensation WAV: {COMPENSATION_WAV}')
             common.append(('fixture',COMPENSATION_WAV))
-        specs=[('raw',source,False),('gain',smooth,False),('limited',smooth,False),('raw360',source,True),('gain360',smooth,True),('limited360',smooth,True),('raw360s',source,True),('gain360s',smooth,True),('limited360s',smooth,True),('raw360x',source,True),('gain360x',smooth,True),('limited360x',smooth,True)]
+        specs=[(mode+suffix,source,bool(suffix)) for suffix in ('','360','360s','360x') for mode in ('raw','limited')]
         for mode,hpcf,is360 in specs:
             chain=([('sofa',SOFA_AVERAGE_WAV)] if is360 else [])+common+[('hpcf',hpcf)]
-            gain=0.0 if mode.startswith('limited') else chain_gain([path for _,path in chain],raw=mode.startswith('raw'));generated.append(make_profile(item,mode,hpcf,chain,gain))
+            gain=0.0 if mode.startswith('limited') else chain_gain([path for _,path in chain]);generated.append(make_profile(item,mode,hpcf,chain,gain))
     standard_profiles={(path.parent.resolve(),path.stem):text for path,text in generated}
     rebuilt_custom=[]
     for item,_source in devices:
@@ -271,7 +254,7 @@ def rebuild_custom_profile(path,text,standard_profiles):
     if not isinstance(current,dict):raise RuntimeError(f'{path}: custom profile is not a YAML object')
     match=re.search(r'Custom binaural HRIR filter based on (limited|gain|raw)\.yml;',str(current.get('description','')))
     if not match:raise RuntimeError(f'{path}: cannot identify custom filter baseline')
-    mode=match.group(1);baseline_text=standard_profiles.get((path.parent.parent.resolve(),mode))
+    mode='raw' if match.group(1)=='gain' else match.group(1);baseline_text=standard_profiles.get((path.parent.parent.resolve(),mode))
     if baseline_text is None:raise RuntimeError(f'{path}: newly generated {mode}.yml baseline is unavailable')
     config=yaml.safe_load(baseline_text)
     if not isinstance(config,dict):raise RuntimeError(f'{path}: generated baseline is not a YAML object')
@@ -375,7 +358,7 @@ def commit_profiles(candidates):
     return changed,removed_yaml,removed_dirs
 def rebuild_all_filters(all_measurements=False):
     candidates,devices=build_profile_candidates(all_measurements)
-    uses_limiter=any(f'device: "{CAMILLA_SMOOTHED_PLAYBACK_DEVICE}"' in text for path,text in candidates)
+    uses_limiter=any(f'device: "{CAMILLA_LIMITED_PLAYBACK_DEVICE}"' in text for path,text in candidates)
     if uses_limiter and not Path('/etc/camilladsp-peak-limiter-v11').is_file():raise SystemExit('Limited profiles require the installed NixOS peak-limiter-v11 module.')
     camilladsp=Path('/run/current-system/sw/bin/camilladsp')
     if not camilladsp.is_file():raise SystemExit(f'Missing CamillaDSP executable: {camilladsp}')
@@ -389,7 +372,7 @@ def rebuild_all_filters(all_measurements=False):
         print(f'{"Replaced existing" if path in existed else "Created"}: {path}')
         match=re.search(r'  auto_gain:\n    type: Gain\n    parameters:\n      gain: ([^\n]+)',text)
         if match:print(f'{path.name}: applied calculated gain {match.group(1)} dB')
-        elif f'device: "{CAMILLA_SMOOTHED_PLAYBACK_DEVICE}"' in text:print(f'{path.name}: NO static gain stage; routed through external ALSA lookahead limiter')
+        elif f'device: "{CAMILLA_LIMITED_PLAYBACK_DEVICE}"' in text:print(f'{path.name}: NO static gain stage; routed through external ALSA lookahead limiter')
         elif f'device: "{CAMILLA_RAW_PLAYBACK_DEVICE}"' in text:print(f'{path.name}: limiter bypassed; routed directly to FLOAT-to-S32 loopback conversion')
     print(f'Using {len(devices)} anechoic HpCF devices; verified {len(candidates)} CamillaDSP YAML profiles in {CAMILLA_ROOT}; {len(changed)} created, {len(removed)} obsolete YAMLs removed, {len(removed_dirs)} unconfigured device directories removed')
 TERMINALS=(('foot','-T','Manage Audio Device'),('kitty','--title','Manage Audio Device'),('alacritty','--title','Manage Audio Device','-e'))
@@ -414,12 +397,6 @@ def ask(label,default=''):
         if value and '\n' not in value and '\r' not in value:return value
         print(f'{label} is required.')
 def ask_edit(field,current):return choose(f'{field} current: {current}. Edit?',('No','Yes'))==1
-def ask_smoothed(source):
-    if not Path(source).stem.endswith(' - Raw'):print('Selected unlabelled file is the smoothed variant; adding it only.');return False
-    enabled=choose('Search the main HpCF folder for the matching unlabelled smoothed file and add its filters?',('No','Yes'))==1
-    if enabled:
-        sibling=smoothed_path(source);print(f'Found smoothed HpCF: {sibling}' if sibling.is_file() else f'No matching smoothed HpCF found: {sibling}; continuing with Raw only.')
-    return enabled
 def load(text):
     node=next((n for n in ast.parse(text).body if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='HPCFS' for t in n.targets)),None)
     if node is None:raise RuntimeError('HPCFS tuple was not found in add-audio-device.py')
@@ -428,7 +405,7 @@ def load(text):
     return node,list(entries)
 def render(entries):
     lines=['HPCFS = (']
-    for item in entries:lines+=['    {',f"        'file': {str(item['file'])!r},",f"        'label': {str(item['label'])!r},",f"        'include_smoothed': True,",f"        'type': {str(item.get('type','in-ear'))!r},",'    },']
+    for item in entries:lines+=['    {',f"        'file': {str(item['file'])!r},",f"        'label': {str(item['label'])!r},",f"        'type': {str(item.get('type','in-ear'))!r},",'    },']
     return '\n'.join([*lines,')'])
 def replace_block(text,node,entries):
     lines=text.splitlines(keepends=True);lines[node.lineno-1:node.end_lineno]=[render(entries)+'\n'];result=''.join(lines);ast.parse(result);return result
@@ -437,7 +414,7 @@ def new_entry():
     if not path.is_file():raise RuntimeError(f'HpCF file does not exist: {path}')
     if path.suffix.casefold()!='.wav':raise RuntimeError('HpCF must be a WAV file')
     label=ask('Profile name');kind=('in-ear','over-ear')[choose('Device type',('In-ear','Over-ear'))]
-    return {'file':path.name if path.parent==HPCF_ANECHOIC.resolve() else str(path),'label':label,'resolved':path,'include_smoothed':True,'type':kind}
+    return {'file':path.name if path.parent==HPCF_ANECHOIC.resolve() else str(path),'label':label,'resolved':path,'type':kind}
 def validate_unique(entries,skip=None):
     labels=set();paths=set()
     for index,item in enumerate(entries):
@@ -474,7 +451,7 @@ def clean_devices(text):
     if choose('Remove every configured device and generated filter?',('No','Yes'))==0:print('No files changed.');return
     backup=save(text,replace_block(text,node,[]));rebuild_after_change([],backup);print(f'Removed {len(entries)} configured devices. Backup: {backup}')
 def add(text):
-    node,entries=load(text);entry=new_entry();trial=[*entries,{key:entry[key] for key in ('file','label','include_smoothed','type')}];validate_unique(trial)
+    node,entries=load(text);entry=new_entry();trial=[*entries,{key:entry[key] for key in ('file','label','type')}];validate_unique(trial)
     print('\nAdd review');row(1,f"HpCF: {entry['resolved']}");row(2,f"Profile name: {entry['label']}");row(3,f"Type: {entry['type']}")
     if choose('Save this device?',('No','Yes'))==0:return
     backup=save(text,replace_block(text,node,trial));print(f"Added {entry['label']}. Backup: {backup}");rebuild_after_change(trial,backup)
@@ -487,8 +464,8 @@ def edit(text):
     if ask_edit('Profile name',label):label=ask('Profile name',label)
     if not path.is_file():raise RuntimeError(f'HpCF file does not exist: {path}')
     if path.suffix.casefold()!='.wav':raise RuntimeError('HpCF must be a WAV file')
-    kind=('in-ear','over-ear')[choose('Device type',('In-ear','Over-ear'))];enabled=True;stored=path.name if path.parent==HPCF_ANECHOIC.resolve() else str(path);trial=list(entries);trial[index]={'file':stored,'label':label,'include_smoothed':enabled,'type':kind};validate_unique(trial)
-    print('\nEdit review');row(1,f'HpCF: {path}');row(2,f'Profile name: {label}');row(3,f'Search/include unlabelled smoothed filters: {enabled}')
+    kind=('in-ear','over-ear')[choose('Device type',('In-ear','Over-ear'))];stored=path.name if path.parent==HPCF_ANECHOIC.resolve() else str(path);trial=list(entries);trial[index]={'file':stored,'label':label,'type':kind};validate_unique(trial)
+    print('\nEdit review');row(1,f'HpCF: {path}');row(2,f'Profile name: {label}');row(3,f'Type: {kind}')
     if choose('Save these edits?',('No','Yes'))==0:print('No files changed.');return
     backup=save(text,replace_block(text,node,trial));print(f'Edited {label}. Backup: {backup}');rebuild_after_change(trial,backup)
 def remove(text):
