@@ -31,12 +31,6 @@ SOFA_AVERAGE_WAV=AUDIO_ROOT/'sofa average/H5_2945_Weighted_Power_Average_UNNORMA
 MEASUREMENTS_DIR=AUDIO_ROOT/'measurements'
 HPCFS = (
     {
-        'file': 'Apple EarPods + AhaStyle - Approximate B&K 5128 - HpCF - Raw.wav',
-        'label': 'earpods + covers',
-        'include_smoothed': True,
-        'type': 'in-ear',
-    },
-    {
         'file': 'Apple EarPods - B&K 5128 - HpCF - Raw.wav',
         'label': 'earpods',
         'include_smoothed': True,
@@ -79,13 +73,26 @@ def read_fir(path,channels):
     if rate!=SAMPLE_RATE or data.shape[1]!=channels or not len(data):raise RuntimeError(f'{path}: expected nonempty {channels}-channel {SAMPLE_RATE} Hz FIR')
     if not np.isfinite(data).all():raise RuntimeError(f'{path}: non-finite FIR samples')
     return data
-def chain_gain(paths):
-    arrays=[read_fir(path,2) for path in paths];nfft=dense_response_nfft(*(len(x) for x in arrays));combined=np.ones((nfft//2+1,2),dtype=np.float64)
+def chain_gain(paths,raw=False):
+    """Raw: normalize 20 Hz-20 kHz; Gain: preserve full-band attenuation."""
+    arrays=[read_fir(path,2) for path in paths]
+    nfft=dense_response_nfft(*(len(x) for x in arrays))
+    frequencies=np.fft.rfftfreq(nfft,1.0/SAMPLE_RATE)
+    combined=np.ones((nfft//2+1,2),dtype=np.float64)
     for data in arrays:combined*=np.abs(np.fft.rfft(data,n=nfft,axis=0))
-    peak=float(np.max(combined))
+    if raw:
+        combined=combined[(frequencies>=20.0)&(frequencies<=20000.0)]
+        # Include the exact band edges, which need not coincide with FFT bins.
+        edges=np.ones((2,2),dtype=np.float64)
+        for data in arrays:
+            kernel=np.exp(-2j*np.pi*np.outer([20.0,20000.0],np.arange(len(data)))/SAMPLE_RATE)
+            edges*=np.abs(kernel@data)
+        peak=max(float(np.max(combined)),float(np.max(edges)))
+    else:peak=float(np.max(combined))
     if not np.isfinite(peak) or peak<=0.0:raise RuntimeError('Invalid complete-chain frequency response')
-    peak_db=20.0*np.log10(peak);gain=min(0.0,-peak_db)
-    print(f'Complete chain peak {peak_db:.12f} dB; highest non-clipping gain {gain:.12f} dB')
+    peak_db=20.0*np.log10(peak)
+    gain=-peak_db if raw else min(0.0,-peak_db)
+    print(f'Complete chain {"20 Hz-20 kHz" if raw else "full-band"} peak {peak_db:.12f} dB; gain {gain:.12f} dB')
     return gain
 def devices_text(playback_device):
     return f'''devices:
@@ -161,13 +168,13 @@ def make_profile(item,mode,hpcf_path,chain_paths,preamp_db):
     names=[]
     for prefix,path in chain_paths:
         text+=conv_text(prefix+'_left',path,0)+conv_text(prefix+'_right',path,1);names.append(prefix)
-    if mode.startswith('gain') or mode=='raw':text+=gain_text(preamp_db)
+    if mode.startswith(('gain','raw')):text+=gain_text(preamp_db)
     text+='pipeline:\n'
     if is360:text+='  - type: Mixer\n    name: mono\n'
     elif is360swap:text+='  - type: Mixer\n    name: swap\n'
     for prefix in names:
         text+=f'  - type: Filter\n    channels: [0]\n    names: [{prefix}_left]\n  - type: Filter\n    channels: [1]\n    names: [{prefix}_right]\n'
-    if mode.startswith('gain') or mode=='raw':text+='  - type: Filter\n    channels: [0, 1]\n    names: [auto_gain]\n'
+    if mode.startswith(('gain','raw')):text+='  - type: Filter\n    channels: [0, 1]\n    names: [auto_gain]\n'
     return device_dir/(mode+'.yml'),text
 def configured_path(item):
     path=Path(str(item.get('file',''))).expanduser();return (path if path.is_absolute() else HPCF_ANECHOIC/path).resolve()
@@ -219,7 +226,7 @@ def build_profile_candidates(all_measurements=False):
         specs=[('raw',source,False),('gain',smooth,False),('limited',smooth,False),('raw360',source,True),('gain360',smooth,True),('limited360',smooth,True),('raw360s',source,True),('gain360s',smooth,True),('limited360s',smooth,True),('raw360x',source,True),('gain360x',smooth,True),('limited360x',smooth,True)]
         for mode,hpcf,is360 in specs:
             chain=([('sofa',SOFA_AVERAGE_WAV)] if is360 else [])+common+[('hpcf',hpcf)]
-            gain=chain_gain([path for _,path in chain]);generated.append(make_profile(item,mode,hpcf,chain,gain))
+            gain=0.0 if mode.startswith('limited') else chain_gain([path for _,path in chain],raw=mode.startswith('raw'));generated.append(make_profile(item,mode,hpcf,chain,gain))
     standard_profiles={(path.parent.resolve(),path.stem):text for path,text in generated}
     rebuilt_custom=[]
     for item,_source in devices:
@@ -229,6 +236,35 @@ def build_profile_candidates(all_measurements=False):
                 if path.is_file():rebuilt_custom.append((path,rebuild_custom_profile(path,path.read_text(encoding='utf-8'),standard_profiles)))
     return [(CAMILLA_ROOT/'00-filterless.yml',filterless_text()),*generated,*rebuilt_custom],devices
 
+def custom_raw_gain(config,points):
+    """Include the custom HRIR mix, with independent full-scale stereo inputs."""
+    base=[]
+    for name,definition in config['filters'].items():
+        if definition.get('type')=='Conv' and not name.startswith('custom_hrir_') and name.endswith('_left'):
+            base.append(read_fir(Path(definition['parameters']['filename']),2))
+    hrir=[read_fir(filename,2) for filename,source in points]
+    nfft=dense_response_nfft(*(len(data) for data in base+hrir))
+    frequencies=np.fft.rfftfreq(nfft,1.0/SAMPLE_RATE)
+    selected=(frequencies>=20.0)&(frequencies<=20000.0)
+    def response(data):
+        spectrum=np.fft.rfft(data,n=nfft,axis=0)[selected]
+        kernel=np.exp(-2j*np.pi*np.outer([20.0,20000.0],np.arange(len(data)))/SAMPLE_RATE)
+        return np.concatenate((spectrum,kernel@data),axis=0)
+    baseline=np.ones((int(selected.sum())+2,2),dtype=np.complex128)
+    for data in base:baseline*=response(data)
+    transfer=np.zeros((len(baseline),2,2),dtype=np.complex128)
+    for data,(_filename,source) in zip(hrir,points):
+        h=response(data)/len(points)
+        weights={'average':((0.5,0.5),(0.5,0.5)),
+                 'left':((1.0,0.0),(1.0,0.0)),
+                 'right':((0.0,1.0),(0.0,1.0)),
+                 'stereo':((1.0,0.0),(0.0,1.0)),
+                 'swap':((0.0,1.0),(1.0,0.0))}[source]
+        for ear in (0,1):
+            for channel in (0,1):transfer[:,ear,channel]+=h[:,ear]*weights[ear][channel]*baseline[:,channel]
+    peak=float(np.max(np.sum(np.abs(transfer),axis=2)))
+    if not np.isfinite(peak) or peak<=0.0:raise RuntimeError('Invalid custom Raw frequency response')
+    return -20.0*np.log10(peak)
 def rebuild_custom_profile(path,text,standard_profiles):
     """Rebase one generated custom HRIR profile onto its newly built baseline."""
     current=yaml.safe_load(text)
@@ -273,6 +309,10 @@ def rebuild_custom_profile(path,text,standard_profiles):
     pipeline.append({'type':'Mixer','name':'custom_hrir_spread'})
     for i in range(count):pipeline.extend(({'type':'Filter','channels':[2*i],'names':[f'custom_hrir_{i}_left']},{'type':'Filter','channels':[2*i+1],'names':[f'custom_hrir_{i}_right']}))
     pipeline.append({'type':'Mixer','name':'custom_hrir_merge'});name=path.stem;config['title']=name;config['description']=f'Custom binaural HRIR filter based on {mode}.yml; {count} point(s)'
+    if mode=='raw':
+        new_filters['auto_gain']['parameters']['gain']=float(custom_raw_gain(config,points))
+        pipeline[:]=[stage for stage in pipeline if not (stage.get('type')=='Filter' and stage.get('names')==['auto_gain'])]
+        pipeline.append({'type':'Filter','channels':[0,1],'names':['auto_gain']})
     return yaml.safe_dump(config,sort_keys=False)
 
 def commit_profiles(candidates):
@@ -336,7 +376,7 @@ def commit_profiles(candidates):
 def rebuild_all_filters(all_measurements=False):
     candidates,devices=build_profile_candidates(all_measurements)
     uses_limiter=any(f'device: "{CAMILLA_SMOOTHED_PLAYBACK_DEVICE}"' in text for path,text in candidates)
-    if uses_limiter and not Path('/etc/camilladsp-peak-limiter-v11').is_file():raise SystemExit('Smoothed profiles require the installed NixOS peak-limiter-v11 module.')
+    if uses_limiter and not Path('/etc/camilladsp-peak-limiter-v11').is_file():raise SystemExit('Limited profiles require the installed NixOS peak-limiter-v11 module.')
     camilladsp=Path('/run/current-system/sw/bin/camilladsp')
     if not camilladsp.is_file():raise SystemExit(f'Missing CamillaDSP executable: {camilladsp}')
     with tempfile.TemporaryDirectory() as validation_name:
@@ -348,7 +388,7 @@ def rebuild_all_filters(all_measurements=False):
     for path,text in candidates:
         print(f'{"Replaced existing" if path in existed else "Created"}: {path}')
         match=re.search(r'  auto_gain:\n    type: Gain\n    parameters:\n      gain: ([^\n]+)',text)
-        if match:print(f'{path.name}: applied non-clipping gain {match.group(1)} dB')
+        if match:print(f'{path.name}: applied calculated gain {match.group(1)} dB')
         elif f'device: "{CAMILLA_SMOOTHED_PLAYBACK_DEVICE}"' in text:print(f'{path.name}: NO static gain stage; routed through external ALSA lookahead limiter')
         elif f'device: "{CAMILLA_RAW_PLAYBACK_DEVICE}"' in text:print(f'{path.name}: limiter bypassed; routed directly to FLOAT-to-S32 loopback conversion')
     print(f'Using {len(devices)} anechoic HpCF devices; verified {len(candidates)} CamillaDSP YAML profiles in {CAMILLA_ROOT}; {len(changed)} created, {len(removed)} obsolete YAMLs removed, {len(removed_dirs)} unconfigured device directories removed')
