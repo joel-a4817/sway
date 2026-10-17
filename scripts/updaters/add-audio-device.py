@@ -118,8 +118,14 @@ def gain_text(gain):return f'''  auto_gain:
       gain: {gain:.12f}
       scale: dB
 '''
-def mono_mixer_text():return '''mixers:
-  mono:
+PROFILE_LAYOUTS = {
+    '': {'label':'S', 'file':'s', 'spatial':False, 'mono':False, 'swap_input':False},
+    '-mono': {'label':'M', 'file':'m', 'spatial':False, 'mono':True, 'swap_input':False},
+    '-360-stereo': {'label':'360 S', 'file':'360-s', 'spatial':True, 'mono':False, 'swap_input':False},
+    '-360-swapped-stereo': {'label':'360 X', 'file':'360-x', 'spatial':True, 'mono':False, 'swap_input':True},
+    '-360-mono': {'label':'360 M', 'file':'360-m', 'spatial':True, 'mono':True, 'swap_input':False},
+}
+def mono_mixer_definition():return '''  mono_input:
     channels:
       in: 2
       out: 2
@@ -137,8 +143,7 @@ def mono_mixer_text():return '''mixers:
           - channel: 1
             gain: -6.020599913280
 '''
-def channel_swap_mixer_text():return '''mixers:
-  swap:
+def channel_swap_mixer_definition():return '''  swap_channels:
     channels:
       in: 2
       out: 2
@@ -152,24 +157,40 @@ def channel_swap_mixer_text():return '''mixers:
           - channel: 0
             gain: 0.0
 '''
+def chain_gain_for_layout(chain_paths,layout):
+    """Peak of the actual routed L/R FIR chain over 20-20000 Hz."""
+    arrays=[(name,read_fir(path,2)) for name,path in chain_paths]
+    nfft=dense_response_nfft(*(len(data) for _name,data in arrays))
+    frequency=np.fft.rfftfreq(nfft,1.0/SAMPLE_RATE);keep=(frequency>=20.0)&(frequency<=20000.0);responses=[]
+    for name,data in arrays:
+        band=np.abs(np.fft.rfft(data,n=nfft,axis=0)[keep])
+        kernel=np.exp(-2j*np.pi*np.outer([20.0,20000.0],np.arange(len(data)))/SAMPLE_RATE)
+        responses.append((name,np.concatenate((band,np.abs(kernel@data)),axis=0)))
+    output=np.ones((int(keep.sum())+2,2),dtype=np.float64)
+    for name,response in responses:
+        output*=response
+    peak=float(np.max(output))
+    if not np.isfinite(peak) or peak<=0.0:raise RuntimeError('Invalid routed complete-chain audible response')
+    gain=-20.0*np.log10(peak);print(f"{layout['label']} complete route 20 Hz-20 kHz peak {-gain:.12f} dB; gain {gain:.12f} dB");return gain
 def make_profile(item,mode,hpcf_path,chain_paths,preamp_db):
-    if mode not in {base+suffix for base in ('raw','limited') for suffix in ('','360','360s','360x')}:raise ValueError('Unsupported profile mode: '+mode)
-    device_dir=CAMILLA_ROOT/profile_directory_name(profile_label(item));playback=CAMILLA_LIMITED_PLAYBACK_DEVICE if mode.startswith('limited') else CAMILLA_RAW_PLAYBACK_DEVICE;is360=mode in ('raw360','limited360');is360st=mode.endswith('360s');is360swap=mode.endswith('360x')
-    text='---\ntitle: '+yaml_string(mode)+'\ndescription: "B&K 5128 correction'+('; H5 360 mono' if is360 else '; H5 360 stereo' if is360st else '; H5 360 swapped stereo' if is360swap else '; stereo')+'"\n'+devices_text(playback)
-    if is360:text+=mono_mixer_text()
-    elif is360swap:text+=channel_swap_mixer_text()
-    text+='filters:\n'
-    names=[]
-    for prefix,path in chain_paths:
-        text+=conv_text(prefix+'_left',path,0)+conv_text(prefix+'_right',path,1);names.append(prefix)
-    if mode.startswith('raw'):text+=gain_text(preamp_db)
+    base=next((value for value in ('raw','limited') if mode.startswith(value)),None);suffix=mode[len(base):] if base else None
+    if base is None or suffix not in PROFILE_LAYOUTS:raise ValueError('Unsupported profile mode: '+mode)
+    layout=PROFILE_LAYOUTS[suffix];device_dir=CAMILLA_ROOT/profile_directory_name(profile_label(item));playback=CAMILLA_LIMITED_PLAYBACK_DEVICE if base=='limited' else CAMILLA_RAW_PLAYBACK_DEVICE
+    text='---\ntitle: '+yaml_string(('Raw' if base=='raw' else 'Limited')+' '+layout['label'])+'\ndescription: '+yaml_string('B&K 5128 correction; mode '+('Raw' if base=='raw' else 'Limited')+'; layout '+layout['label']+'; stereo correction paths retained')+'\n'+devices_text(playback)
+    mixers=[]
+    if layout['mono']:mixers.append(mono_mixer_definition())
+    if layout['swap_input']:mixers.append(channel_swap_mixer_definition())
+    if mixers:text+='mixers:\n'+''.join(mixers)
+    text+='filters:\n';names=[]
+    for prefix,path in chain_paths:text+=conv_text(prefix+'_left',path,0)+conv_text(prefix+'_right',path,1);names.append(prefix)
+    if base=='raw':text+=gain_text(preamp_db)
     text+='pipeline:\n'
-    if is360:text+='  - type: Mixer\n    name: mono\n'
-    elif is360swap:text+='  - type: Mixer\n    name: swap\n'
+    if layout['mono']:text+='  - type: Mixer\n    name: mono_input\n'
+    if layout['swap_input']:text+='  - type: Mixer\n    name: swap_channels\n'
     for prefix in names:
         text+=f'  - type: Filter\n    channels: [0]\n    names: [{prefix}_left]\n  - type: Filter\n    channels: [1]\n    names: [{prefix}_right]\n'
-    if mode.startswith('raw'):text+='  - type: Filter\n    channels: [0, 1]\n    names: [auto_gain]\n'
-    return device_dir/(mode+'.yml'),text
+    if base=='raw':text+='  - type: Filter\n    channels: [0, 1]\n    names: [auto_gain]\n'
+    return device_dir/(base+'-'+layout['file']+'.yml'),text
 def configured_path(item):
     path=Path(str(item.get('file',''))).expanduser();return (path if path.is_absolute() else HPCF_ANECHOIC/path).resolve()
 
@@ -206,11 +227,12 @@ def build_profile_candidates(all_measurements=False):
         if kind=='over-ear':
             if not COMPENSATION_WAV.is_file():raise SystemExit(f'Missing over-ear compensation WAV: {COMPENSATION_WAV}')
             common.append(('fixture',COMPENSATION_WAV))
-        specs=[(mode+suffix,source,bool(suffix)) for suffix in ('','360','360s','360x') for mode in ('raw','limited')]
-        for mode,hpcf,is360 in specs:
-            chain=([('sofa',SOFA_AVERAGE_WAV)] if is360 else [])+common+[('hpcf',hpcf)]
-            gain=0.0 if mode.startswith('limited') else chain_gain([path for _,path in chain]);generated.append(make_profile(item,mode,hpcf,chain,gain))
-    standard_profiles={(path.parent.resolve(),path.stem):text for path,text in generated}
+        specs=[(base+suffix,PROFILE_LAYOUTS[suffix]) for suffix in PROFILE_LAYOUTS for base in ('raw','limited')]
+        for mode,layout in specs:
+            chain=([('sofa',SOFA_AVERAGE_WAV)] if layout['spatial'] else [])+common+[('hpcf',source)]
+            gain=0.0 if mode.startswith('limited') else chain_gain_for_layout(chain,layout)
+            generated.append(make_profile(item,mode,source,chain,gain))
+    standard_profiles={(path.parent.resolve(),path.stem.split('-',1)[0]):text for path,text in generated if path.stem in ('raw-s','limited-s')}
     rebuilt_custom=[]
     for item,_source in devices:
         custom=CAMILLA_ROOT/profile_directory_name(profile_label(item))/'custom'
@@ -252,9 +274,9 @@ def rebuild_custom_profile(path,text,standard_profiles):
     """Rebase one generated custom HRIR profile onto its newly built baseline."""
     current=yaml.safe_load(text)
     if not isinstance(current,dict):raise RuntimeError(f'{path}: custom profile is not a YAML object')
-    match=re.search(r'Custom binaural HRIR filter based on (limited|gain|raw)\.yml;',str(current.get('description','')))
+    match=re.search(r'Custom binaural HRIR filter based on (limited(?:-s)?|gain|raw(?:-s)?)\.yml;',str(current.get('description','')))
     if not match:raise RuntimeError(f'{path}: cannot identify custom filter baseline')
-    mode='raw' if match.group(1)=='gain' else match.group(1);baseline_text=standard_profiles.get((path.parent.parent.resolve(),mode))
+    mode='raw' if match.group(1)=='gain' else match.group(1).removesuffix('-s');baseline_text=standard_profiles.get((path.parent.parent.resolve(),mode))
     if baseline_text is None:raise RuntimeError(f'{path}: newly generated {mode}.yml baseline is unavailable')
     config=yaml.safe_load(baseline_text)
     if not isinstance(config,dict):raise RuntimeError(f'{path}: generated baseline is not a YAML object')
@@ -291,7 +313,7 @@ def rebuild_custom_profile(path,text,standard_profiles):
     mixers['custom_hrir_merge']={'channels':{'in':2*count,'out':2},'mapping':[{'dest':ear,'sources':[{'channel':2*i+ear,'gain':gain} for i in range(count)]} for ear in (0,1)]}
     pipeline.append({'type':'Mixer','name':'custom_hrir_spread'})
     for i in range(count):pipeline.extend(({'type':'Filter','channels':[2*i],'names':[f'custom_hrir_{i}_left']},{'type':'Filter','channels':[2*i+1],'names':[f'custom_hrir_{i}_right']}))
-    pipeline.append({'type':'Mixer','name':'custom_hrir_merge'});name=path.stem;config['title']=name;config['description']=f'Custom binaural HRIR filter based on {mode}.yml; {count} point(s)'
+    pipeline.append({'type':'Mixer','name':'custom_hrir_merge'});name=path.stem;config['title']=name;config['description']=f'Custom binaural HRIR filter based on {mode}-s.yml; {count} point(s)'
     if mode=='raw':
         new_filters['auto_gain']['parameters']['gain']=float(custom_raw_gain(config,points))
         pipeline[:]=[stage for stage in pipeline if not (stage.get('type')=='Filter' and stage.get('names')==['auto_gain'])]
