@@ -1943,7 +1943,7 @@ function updatePlaylistCover(player){if(!player?.playlist||!player.playing)retur
 const safeButtons=[$('#system-safe-volume'),$('#local-safe-volume')];
 const safeSliders=[$('#system-volume'),$('#volume')];
 function renderSafeVolume(info){const ok=!!(info&&info.available&&Number.isFinite(Number(info.percent)));const p=ok?Number(info.percent):0;for(const s of safeSliders){s.classList.toggle('safe-mark',ok);if(ok)s.style.setProperty('--safe-point',p+'%');else s.style.removeProperty('--safe-point')}for(const b of safeButtons){b.classList.toggle('safe-hidden',!ok);if(ok)b.textContent='Set safe max '+p.toFixed(6)+'%'}}
-for(const b of safeButtons)b.onclick=async()=>{try{const r=await post('/api/safe-volume',{});renderSafeVolume(r.safeVolume);note('Safe max '+Number(r.safeVolume.percent).toFixed(6)+'% applied')}catch(e){note(e.message,true)}};
+for(const b of safeButtons)b.onclick=async()=>{try{const r=await post('/api/safe-volume',{});if(!r.state)throw new Error('Safe max response omitted physical state');renderVolatile(r.state);note('Safe max '+Number(r.safeVolume.percent).toFixed(6)+'% applied; physical readback '+Number(r.physicalVolume).toFixed(2)+'%')}catch(e){note(e.message,true)}};
 function renderVolatile(data){renderSafeVolume(data.safeVolume);
   const sonoAllowed=!!data.mode.sonobusWanted,airAllowed=!!data.mode.airplay;
   $('#restart-sonobus').disabled=!sonoAllowed;$('#restart-sonobus').setAttribute('aria-disabled',String(!sonoAllowed));

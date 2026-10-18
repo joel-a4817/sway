@@ -349,9 +349,15 @@ def commit_profiles(candidates):
         if match:
             key=profile_path.relative_to(root).as_posix()
             safe_index[key]={'percent':float(match.group(1)),'peakDb':float(peak.group(1)) if peak else 0.0}
-    index_path=root/'.safe-volume.json';index_temp=root/'.safe-volume.json.new'
-    index_temp.write_text(json.dumps({'version':1,'profiles':safe_index},indent=2,sort_keys=True)+'\n',encoding='utf-8')
-    index_temp.replace(index_path)
+    index_path=root/'.safe-volume.json';index_temp=root/'.safe-volume.json.new';previous_index=index_path.read_bytes() if index_path.is_file() else None
+    try:
+        index_temp.write_text(json.dumps({'version':1,'profiles':safe_index},indent=2,sort_keys=True)+'\n',encoding='utf-8')
+        index_temp.replace(index_path)
+    except BaseException:
+        index_temp.unlink(missing_ok=True)
+        if previous_index is None:index_path.unlink(missing_ok=True)
+        else:index_path.write_bytes(previous_index)
+        raise
     if json.loads(index_path.read_text(encoding='utf-8')).get('profiles')!=safe_index:
         raise RuntimeError('Safe-volume index verification failed')
     changed=[path for path,text in expected.items() if path not in before_yaml]
@@ -372,8 +378,8 @@ def rebuild_all_filters(all_measurements=False):
     existed={path for path,text in candidates if path.is_file()};changed,removed,removed_dirs=commit_profiles(candidates)
     for path,text in candidates:
         print(f'{"Replaced existing" if path in existed else "Created"}: {path}')
-        parsed=yaml.safe_load(text);meta=(parsed or {}).get('metadata') or {}
-        if 'safe_volume_percent' in meta:print(f"{path.name}: safe master {float(meta['safe_volume_percent']):.6f}% before limiter activity")
+        match=re.search(r'(?m)^# safe-volume-percent: ([0-9]+(?:\.[0-9]+)?)$',text)
+        if match:print(f"{path.name}: safe master {float(match.group(1)):.6f}% before limiter activity")
     print(f'Using {len(devices)} anechoic HpCF devices; verified {len(candidates)} CamillaDSP YAML profiles in {CAMILLA_ROOT}; {len(changed)} created, {len(removed)} obsolete YAMLs removed, {len(removed_dirs)} unconfigured device directories removed')
 TERMINALS=(('foot','-T','Manage Audio Device'),('kitty','--title','Manage Audio Device'),('alacritty','--title','Manage Audio Device','-e'))
 def row(number,label):

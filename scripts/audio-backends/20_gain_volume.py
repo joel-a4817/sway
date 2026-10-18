@@ -18,14 +18,15 @@ def safe_volume_state():
 def apply_safe_volume():
     state=safe_volume_state()
     if not state.get('available'):raise RuntimeError('Safe max unavailable')
-    value=float(state['percent'])
-    global MASTER_WRITE_UNTIL
-    with LOCK:
-        MASTER_WRITE_UNTIL=time.monotonic()+2.0
-        apply_master_volume(value,normalize_sinks=False,sync_player=False)
-        MASTER_VOLUME.parent.mkdir(parents=True,exist_ok=True)
-        atomic(MASTER_VOLUME,f'{value:.6f}%\n')
-    return {'volume':value,'safeVolume':state}
+    target=float(state['percent'])
+    before=_live_master_volume()
+    result=set_master_volume(target)
+    after=_live_master_volume()
+    # wpctl readback is formatted to two decimal places by wp_control().
+    if abs(after-target)>0.51:
+        raise RuntimeError(f'Safe max physical write failed: requested {target:.6f}%, read back {after:.2f}%')
+    result.update(safeVolume=state,beforeVolume=before,physicalVolume=after)
+    return result
 
 def _ensure_no_filter_physical_default():
     """Keep desktop volume keys on the active physical sink in direct bypass."""
