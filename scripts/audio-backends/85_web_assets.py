@@ -1101,7 +1101,7 @@ body {
   background:linear-gradient(145deg,#443146d9,#29384ad9);
 }
 
-.safe-volume-button{width:100%;margin:10px 0 18px}.safe-mark{background-image:linear-gradient(90deg,transparent calc(var(--safe-point) - 1px),#ffca57 calc(var(--safe-point) - 1px),#ffca57 calc(var(--safe-point) + 1px),transparent calc(var(--safe-point) + 1px))}.safe-hidden{display:none!important}.custom-hrir-row{padding:15px;margin:10px 0;border:1px solid #ffffff22;border-radius:18px;background:#ffffff0a}.custom-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.custom-fields label{color:#bcb7cb;font-size:12px;font-weight:700}.custom-fields input,.custom-fields select,#custom-device,#custom-name{width:100%;margin-top:5px;padding:12px;border:1px solid #ffffff25;border-radius:12px;background:#090b14;color:#fff}.custom-actions{margin-top:14px}.custom-create-launch{margin-top:28px!important}.spatial-visual{margin-top:18px;padding:14px;border:1px solid #ffffff22;border-radius:22px;background:radial-gradient(circle at 50% 42%,#32245f88,#090b14 68%);box-shadow:inset 0 1px #ffffff18}.spatial-visual canvas{display:block;width:100%;height:auto;aspect-ratio:1.45}.spatial-caption{text-align:center;color:#b9b4c5;font-size:12px;margin-top:8px}.custom-ranges{margin:14px 2px;color:#b9b4c5;font-size:13px}.mode-dialog{border:1px solid #ffffff33;border-radius:22px;background:#151221;color:#fff;padding:22px;width:min(420px,calc(100vw - 32px));box-shadow:0 24px 80px #000b}.mode-dialog::backdrop{background:#000a;backdrop-filter:blur(8px)}.mode-choice{display:block;padding:12px;margin:8px 0;border:1px solid #ffffff22;border-radius:13px}.mode-dialog-menu{display:flex;gap:10px;justify-content:flex-end;margin-top:18px}
+.safe-volume-button{width:100%;margin:10px 0 18px}.safe-mark{background-image:linear-gradient(#ffca57,#ffca57);background-repeat:no-repeat;background-size:2px 25px;background-position:var(--safe-x,50%) center}.safe-hidden{display:none!important}.custom-hrir-row{padding:15px;margin:10px 0;border:1px solid #ffffff22;border-radius:18px;background:#ffffff0a}.custom-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.custom-fields label{color:#bcb7cb;font-size:12px;font-weight:700}.custom-fields input,.custom-fields select,#custom-device,#custom-name{width:100%;margin-top:5px;padding:12px;border:1px solid #ffffff25;border-radius:12px;background:#090b14;color:#fff}.custom-actions{margin-top:14px}.custom-create-launch{margin-top:28px!important}.spatial-visual{margin-top:18px;padding:14px;border:1px solid #ffffff22;border-radius:22px;background:radial-gradient(circle at 50% 42%,#32245f88,#090b14 68%);box-shadow:inset 0 1px #ffffff18}.spatial-visual canvas{display:block;width:100%;height:auto;aspect-ratio:1.45}.spatial-caption{text-align:center;color:#b9b4c5;font-size:12px;margin-top:8px}.custom-ranges{margin:14px 2px;color:#b9b4c5;font-size:13px}.mode-dialog{border:1px solid #ffffff33;border-radius:22px;background:#151221;color:#fff;padding:22px;width:min(420px,calc(100vw - 32px));box-shadow:0 24px 80px #000b}.mode-dialog::backdrop{background:#000a;backdrop-filter:blur(8px)}.mode-choice{display:block;padding:12px;margin:8px 0;border:1px solid #ffffff22;border-radius:13px}.mode-dialog-menu{display:flex;gap:10px;justify-content:flex-end;margin-top:18px}
   </style>
  </head>
  <body>
@@ -1656,6 +1656,21 @@ function displayMasterVolume(value,origin=null){
   }
 }
 let volumeWriteQueue=Promise.resolve();
+function bindRangeWheel(control){
+  control.addEventListener('wheel',event=>{
+    if(event.deltaY===0)return;
+    event.preventDefault();
+    const min=Number(control.min||0),max=Number(control.max||100);
+    const step=event.shiftKey?0.1:1;
+    const direction=event.deltaY<0?1:-1;
+    const value=Math.max(min,Math.min(max,Math.round((Number(control.value)+direction*step)*10)/10));
+    if(value===Number(control.value))return;
+    control.value=String(value);
+    control.dispatchEvent(new Event('input',{bubbles:true}));
+    clearTimeout(control._wheelCommit);
+    control._wheelCommit=setTimeout(()=>control.dispatchEvent(new Event('change',{bubbles:true})),140);
+  },{passive:false});
+}
 function bindVolume(media,url){
   const control=media.volume;
   const send=()=>{
@@ -1682,7 +1697,8 @@ function bindVolume(media,url){
     for(const item of [state.system,state.local]){item.volume.value=String(value);fill(item.volume,value,100)}
     clearTimeout(media.volumeTimer);media.volumeTimer=setTimeout(send,90)
   };
-  control.onchange=()=>{clearTimeout(media.volumeTimer);send()}
+  control.onchange=()=>{clearTimeout(media.volumeTimer);send()};
+  bindRangeWheel(control)
 }
 function bindMpvGain(){
   const media=state.local,control=media.mpvGain;
@@ -1698,6 +1714,7 @@ function bindMpvGain(){
   };
   control.oninput=()=>{media.mpvGainHold=performance.now()+1500;fill(control,Number(control.value),100);clearTimeout(media.mpvGainTimer);media.mpvGainTimer=setTimeout(send,90)};
   control.onchange=()=>{clearTimeout(media.mpvGainTimer);send()};
+  bindRangeWheel(control)
 }
 function coverNode(url,large=false){const node=document.createElement(url?'img':'div');node.className='cover-art'+(large?' large':'')+(url?'':' cover-fallback');if(url){node.src=url;node.loading=large?'eager':'lazy';node.alt='Album cover';node.onerror=()=>{const fallback=coverNode('',large);fallback.id=node.id;fallback.dataset.failedCover=url;node.replaceWith(fallback)}}else{node.textContent='♫';node.setAttribute('aria-label','No album art')}return node}
 let localNowArtworkURL='';
@@ -1942,7 +1959,16 @@ function renderPlaylistSnapshot(playlists){
 function updatePlaylistCover(player){if(!player?.playlist||!player.playing)return;for(const button of document.querySelectorAll('#playlists [data-playlist-name]')){if(button.dataset.playlistName!==player.playlist)continue;const old=button.querySelector('.item-cover .cover-art');if(!old)continue;const url=player.cover||'';if(url&&old.tagName==='IMG'&&old.getAttribute('src')===url)return;if(!url&&old.classList.contains('cover-fallback'))return;old.replaceWith(coverNode(url))}}
 const safeButtons=[$('#system-safe-volume'),$('#local-safe-volume')];
 const safeSliders=[$('#system-volume'),$('#volume')];
-function renderSafeVolume(info){const ok=!!(info&&info.available&&Number.isFinite(Number(info.percent)));const p=ok?Number(info.percent):0;for(const s of safeSliders){s.classList.toggle('safe-mark',ok);if(ok)s.style.setProperty('--safe-point',p+'%');else s.style.removeProperty('--safe-point')}for(const b of safeButtons){b.classList.toggle('safe-hidden',!ok);if(ok)b.textContent='Set safe max '+p.toFixed(6)+'%'}}
+let currentSafePercent=null;
+function safeMarkerPosition(slider,percent){
+  const min=Number(slider.min||0),max=Number(slider.max||100),thumb=21;
+  const ratio=Math.max(0,Math.min(1,(percent-min)/(max-min||1)));
+  return thumb/2+Math.max(0,slider.clientWidth-thumb)*ratio;
+}
+function positionSafeMarkers(){if(!Number.isFinite(currentSafePercent))return;for(const slider of safeSliders)slider.style.setProperty('--safe-x',safeMarkerPosition(slider,currentSafePercent)+'px')}
+function renderSafeVolume(info){const ok=!!(info&&info.available&&Number.isFinite(Number(info.percent)));const p=ok?Number(info.percent):0;currentSafePercent=ok?p:null;for(const slider of safeSliders){slider.classList.toggle('safe-mark',ok);if(ok)slider.style.setProperty('--safe-x',safeMarkerPosition(slider,p)+'px');else slider.style.removeProperty('--safe-x')}for(const button of safeButtons){button.classList.toggle('safe-hidden',!ok);if(ok)button.textContent='Set safe max '+p.toFixed(6)+'%'}}
+window.addEventListener('resize',positionSafeMarkers,{passive:true});
+if(window.ResizeObserver)new ResizeObserver(positionSafeMarkers).observe(document.documentElement);
 for(const b of safeButtons)b.onclick=async()=>{try{const r=await post('/api/safe-volume',{});if(!r.state)throw new Error('Safe max response omitted physical state');renderVolatile(r.state);note('Safe max '+Number(r.safeVolume.percent).toFixed(6)+'% applied; physical readback '+Number(r.physicalVolume).toFixed(2)+'%')}catch(e){note(e.message,true)}};
 function renderVolatile(data){renderSafeVolume(data.safeVolume);
   const sonoAllowed=!!data.mode.sonobusWanted,airAllowed=!!data.mode.airplay;

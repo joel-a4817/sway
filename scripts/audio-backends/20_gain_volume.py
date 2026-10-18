@@ -160,7 +160,7 @@ def master_volume():
                 return saved if saved is not None else value
             if saved is None or abs(saved-value)>=.5:
                 atomic(MASTER_VOLUME,f'{value:.2f}%\n')
-                if sync_player:sync_mpv_for_audio_path(value)
+                sync_mpv_for_audio_path(value)
         return value
     except (OSError,FileNotFoundError,subprocess.TimeoutExpired,RuntimeError) as live_error:
         saved=_saved_master_volume()

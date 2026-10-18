@@ -24,8 +24,7 @@ def custom_filter_schema():
     cat=hrir_catalog();az=sorted({float(a) for a,_ in cat});el=sorted({float(e) for _,e in cat});devices=[]
     if PROFILES.is_dir():
         for folder in sorted((p for p in PROFILES.iterdir() if p.is_dir() and not p.name.startswith('.')),key=lambda p:p.name.casefold()):
-            modes=[x for x in ('raw','limited') if (folder/(x+'.yml')).is_file()]
-            if modes:devices.append({'id':folder.name,'label':folder.name,'modes':modes})
+            if (folder/'stereo.yml').is_file():devices.append({'id':folder.name,'label':folder.name})
     return {'devices':devices,'azimuth':{'min':min(az),'max':max(az)},'elevation':{'min':min(el),'max':max(el)},'coordinates':[{'azimuth':float(a),'elevation':float(e)} for a,e in sorted(cat,key=lambda pair:(float(pair[0]),float(pair[1])))],'pointModes':['average','left','right','stereo','swap']}
 def _safe_component(value,label):
     value=str(value or '').strip()
@@ -40,9 +39,7 @@ def custom_filter_target(device_name,name):
 def create_custom_filter(request):
     if not isinstance(request,dict):raise ValueError('Request must be an object')
     device,name,target=custom_filter_target(request.get('device'),request.get('name'))
-    mode=str(request.get('mode','')).lower()
-    if mode not in ('raw','limited'):raise ValueError('Mode must be raw or limited')
-    baseline=device/(mode+'.yml')
+    baseline=device/'stereo.yml'
     if not baseline.is_file():raise FileNotFoundError('Baseline not found: '+str(baseline))
     raw=request.get('points');cat=hrir_catalog()
     if not isinstance(raw,list) or not raw:raise ValueError('Add at least one HRIR')
@@ -68,12 +65,12 @@ def create_custom_filter(request):
     mixers['custom_hrir_merge']={'channels':{'in':2*count,'out':2},'mapping':[{'dest':ear,'sources':[{'channel':2*i+ear,'gain':gain} for i in range(count)]} for ear in (0,1)]}
     pipeline.append({'type':'Mixer','name':'custom_hrir_spread'})
     for i in range(count):pipeline.extend(({'type':'Filter','channels':[2*i],'names':[f'custom_hrir_{i}_left']},{'type':'Filter','channels':[2*i+1],'names':[f'custom_hrir_{i}_right']}))
-    pipeline.append({'type':'Mixer','name':'custom_hrir_merge'});config['title']=name;config['description']=f'Custom binaural HRIR filter based on {mode}.yml; {count} point(s)'
+    pipeline.append({'type':'Mixer','name':'custom_hrir_merge'});config['title']=name;config['description']=f'Custom binaural HRIR filter based on stereo.yml; {count} point(s)'
     # Rebuild through the updater so creation and later rebuilds share one
     # complete-chain Raw normalization implementation (20 Hz-20 kHz only).
     import runpy
     updater=runpy.run_path(str(ADD_AUDIO_DEVICE),run_name='audio_device_helpers')
-    baseline_map={(device.resolve(),mode):baseline.read_text(encoding='utf-8')}
+    baseline_map={device.resolve():baseline.read_text(encoding='utf-8')}
     config=yaml.safe_load(updater['rebuild_custom_profile'](target,yaml.safe_dump(config,sort_keys=False),baseline_map))
     custom=target.parent;CUSTOM_FILTER_LOCK.parent.mkdir(parents=True,exist_ok=True)
     with CUSTOM_FILTER_LOCK.open('a+') as lock:
@@ -109,11 +106,10 @@ def custom_filter_cli():
         source=('average','left','right','stereo','swap')[pick('Audio for this point',['L+R avg','Left','Right','Stereo L→L R→R','Stereo L→R R→L'])]
         points.append({'azimuth':az,'elevation':el,'source':source})
         if pick('Next',['Create filter','Add another HRIR'])==0:break
-    mode=device['modes'][pick('Mode',device['modes'])]
     while True:
         name=input('Filter name: ').strip()
         try:
-            result=create_custom_filter({'device':device['id'],'name':name,'mode':mode,'points':points})
+            result=create_custom_filter({'device':device['id'],'name':name,'points':points})
             break
         except FileExistsError:
             print('A custom filter with that name already exists for this device. Enter another name.')
