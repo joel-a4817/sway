@@ -14,6 +14,13 @@ fi
 ARGS=(-t warning -y overlay -m 'Media control')
 ARGS+=( -z "$AUDIO_TOGGLE_LABEL" "printf '%s\n' audio-toggle > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
 ARGS+=( -z "$VNC_TOGGLE_LABEL" "printf '%s\n' vnc-toggle > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
+SAFE_JSON="$(python3 "$TOPOLOGY_SCRIPT" --safe-volume-status 2>>"$ACTION_LOG" || true)"
+if [[ "$(jq -r '.available // false' <<<"$SAFE_JSON" 2>/dev/null)" == true ]]; then
+  SAFE_PERCENT="$(jq -r '.percent' <<<"$SAFE_JSON")"
+  ARGS+=( -z "Safe max ${SAFE_PERCENT}%" "printf '%s\n' safe-volume > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
+else
+  ARGS+=( -z 'Safe max N/A' "printf '%s\n' safe-volume-na > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
+fi
 ARGS+=( -z 'CamillaDSP filters' "printf '%s\n' select-filter > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
 ARGS+=( -z 'Audio input' "printf '%s\n' select-input > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
 ARGS+=( -z 'Camera' "printf '%s\n' select-camera > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
@@ -31,6 +38,8 @@ kill "$SWAYNAG_PID" 2>/dev/null || true
 wait "$SWAYNAG_PID" 2>/dev/null || true
 selected="$(cat "$CARD_SELECTION_FILE")"
 case "$selected" in
+ safe-volume) flock -u 9; python3 "$TOPOLOGY_SCRIPT" --safe-volume-apply || exit $?; wrap_line "Safe max applied: ${SAFE_PERCENT}%"; exit 0 ;;
+ safe-volume-na) wrap_line 'Safe max unavailable.'; exit 0 ;;
  select-output)
     # Topology discovery is read-only. Do not create a preview or change modes
     # until the user chooses an actual playback device.

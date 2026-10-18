@@ -1,3 +1,32 @@
+def safe_volume_state():
+    if STOPPED.exists():return {'available':False,'reason':'No DSP'}
+    try:
+        loaded=camilla_command('GetConfigFilePath')
+        if not isinstance(loaded,str) or not loaded:raise RuntimeError('No loaded profile')
+        path=Path(loaded).resolve();base=PROFILES.resolve()
+        if base not in path.parents or not path.is_file():raise RuntimeError('Profile outside filter root')
+        key=path.relative_to(base).as_posix()
+        data=json.loads(SAFE_VOLUME_INDEX.read_text(encoding='utf-8'))
+        row=(data.get('profiles') or {}).get(key)
+        if not isinstance(row,dict):raise KeyError(key)
+        percent=float(row['percent']);peak=float(row.get('peakDb',0.0))
+        if not math.isfinite(percent) or not 0<percent<=100:raise ValueError('Invalid safe point')
+        return {'available':True,'percent':percent,'peakDb':peak,'profile':key}
+    except (OSError,ValueError,TypeError,KeyError,RuntimeError,json.JSONDecodeError):
+        return {'available':False,'reason':'No safe point'}
+
+def apply_safe_volume():
+    state=safe_volume_state()
+    if not state.get('available'):raise RuntimeError('Safe max unavailable')
+    value=float(state['percent'])
+    global MASTER_WRITE_UNTIL
+    with LOCK:
+        MASTER_WRITE_UNTIL=time.monotonic()+2.0
+        apply_master_volume(value,normalize_sinks=False,sync_player=False)
+        MASTER_VOLUME.parent.mkdir(parents=True,exist_ok=True)
+        atomic(MASTER_VOLUME,f'{value:.6f}%\n')
+    return {'volume':value,'safeVolume':state}
+
 def _ensure_no_filter_physical_default():
     """Keep desktop volume keys on the active physical sink in direct bypass."""
     if (not _direct_no_filter_path() or STOPPED.exists()
@@ -130,7 +159,7 @@ def master_volume():
                 return saved if saved is not None else value
             if saved is None or abs(saved-value)>=.5:
                 atomic(MASTER_VOLUME,f'{value:.2f}%\n')
-                sync_mpv_for_audio_path(value)
+                if sync_player:sync_mpv_for_audio_path(value)
         return value
     except (OSError,FileNotFoundError,subprocess.TimeoutExpired,RuntimeError) as live_error:
         saved=_saved_master_volume()
@@ -207,7 +236,7 @@ def watch_master_volume(stop):
         try:master_volume()
         except (OSError,RuntimeError,ValueError,subprocess.TimeoutExpired):pass
 
-def apply_master_volume(value,normalize_sinks=True):
+def apply_master_volume(value,normalize_sinks=True,sync_player=True):
     _ensure_no_filter_physical_default()
     # Normalize other sinks on route changes, not on each slider update.
     # CamillaDSP Main remains at unity.
@@ -247,7 +276,7 @@ def apply_master_volume(value,normalize_sinks=True):
         # pw_sink performs the bounded exposure/profile recovery for an expected
         # sink. Re-resolve it before each write because node IDs may be recreated.
         pw_sink(name)
-        result=run(['__wp_control__','set-sink-volume',name,f'{value:.2f}%'],False,8,media_env())
+        result=run(['__wp_control__','set-sink-volume',name,f'{value/100.0:.12f}'],False,8,media_env())
         if result.returncode:
             last_error=result.stderr.strip()
             if attempt==0:time.sleep(.15);continue
@@ -256,10 +285,10 @@ def apply_master_volume(value,normalize_sinks=True):
         match=re.search(r'(\d+(?:\.\d+)?)%',check.stdout)
         if check.returncode or not match:
             last_error=check.stderr.strip() or 'master readback unavailable'
-        elif abs(float(match.group(1))-value)<=0.11:
+        elif abs(float(match.group(1))-value)<=0.51:
             break
         else:last_error=f'master readback was {match.group(1)}%'
         if attempt==0:time.sleep(.15)
     else:raise RuntimeError(f'Could not verify {name} at {value:.2f}%: {last_error}')
-    sync_mpv_for_audio_path(value)
+    if sync_player:sync_mpv_for_audio_path(value)
 

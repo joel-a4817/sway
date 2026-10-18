@@ -66,6 +66,7 @@ class H(BaseHTTPRequestHandler):
             elif p=='/api/system-media':r=system_media(d.get('command'))
             elif p=='/api/system-media/seek':r=system_seek(d.get('seconds'))
             elif p=='/api/system-volume':r=set_system_volume(d.get('volume'))
+            elif p=='/api/safe-volume':r=apply_safe_volume()
             elif p=='/api/mode/pc':r={'player':'mpv','mode':mode_state()}
             elif p=='/api/mode/system':r=set_mode('laptop_external',d.get('password'))
             elif p=='/api/mode/airplay':r=set_mode('ipad_external',d.get('password'))

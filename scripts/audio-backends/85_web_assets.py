@@ -1101,7 +1101,7 @@ body {
   background:linear-gradient(145deg,#443146d9,#29384ad9);
 }
 
-.custom-hrir-row{padding:15px;margin:10px 0;border:1px solid #ffffff22;border-radius:18px;background:#ffffff0a}.custom-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.custom-fields label{color:#bcb7cb;font-size:12px;font-weight:700}.custom-fields input,.custom-fields select,#custom-device,#custom-name{width:100%;margin-top:5px;padding:12px;border:1px solid #ffffff25;border-radius:12px;background:#090b14;color:#fff}.custom-actions{margin-top:14px}.custom-create-launch{margin-top:28px!important}.spatial-visual{margin-top:18px;padding:14px;border:1px solid #ffffff22;border-radius:22px;background:radial-gradient(circle at 50% 42%,#32245f88,#090b14 68%);box-shadow:inset 0 1px #ffffff18}.spatial-visual canvas{display:block;width:100%;height:auto;aspect-ratio:1.45}.spatial-caption{text-align:center;color:#b9b4c5;font-size:12px;margin-top:8px}.custom-ranges{margin:14px 2px;color:#b9b4c5;font-size:13px}.mode-dialog{border:1px solid #ffffff33;border-radius:22px;background:#151221;color:#fff;padding:22px;width:min(420px,calc(100vw - 32px));box-shadow:0 24px 80px #000b}.mode-dialog::backdrop{background:#000a;backdrop-filter:blur(8px)}.mode-choice{display:block;padding:12px;margin:8px 0;border:1px solid #ffffff22;border-radius:13px}.mode-dialog-menu{display:flex;gap:10px;justify-content:flex-end;margin-top:18px}
+.safe-volume-button{width:100%;margin:10px 0 18px}.safe-mark{background-image:linear-gradient(90deg,transparent calc(var(--safe-point) - 1px),#ffca57 calc(var(--safe-point) - 1px),#ffca57 calc(var(--safe-point) + 1px),transparent calc(var(--safe-point) + 1px))}.safe-hidden{display:none!important}.custom-hrir-row{padding:15px;margin:10px 0;border:1px solid #ffffff22;border-radius:18px;background:#ffffff0a}.custom-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.custom-fields label{color:#bcb7cb;font-size:12px;font-weight:700}.custom-fields input,.custom-fields select,#custom-device,#custom-name{width:100%;margin-top:5px;padding:12px;border:1px solid #ffffff25;border-radius:12px;background:#090b14;color:#fff}.custom-actions{margin-top:14px}.custom-create-launch{margin-top:28px!important}.spatial-visual{margin-top:18px;padding:14px;border:1px solid #ffffff22;border-radius:22px;background:radial-gradient(circle at 50% 42%,#32245f88,#090b14 68%);box-shadow:inset 0 1px #ffffff18}.spatial-visual canvas{display:block;width:100%;height:auto;aspect-ratio:1.45}.spatial-caption{text-align:center;color:#b9b4c5;font-size:12px;margin-top:8px}.custom-ranges{margin:14px 2px;color:#b9b4c5;font-size:13px}.mode-dialog{border:1px solid #ffffff33;border-radius:22px;background:#151221;color:#fff;padding:22px;width:min(420px,calc(100vw - 32px));box-shadow:0 24px 80px #000b}.mode-dialog::backdrop{background:#000a;backdrop-filter:blur(8px)}.mode-choice{display:block;padding:12px;margin:8px 0;border:1px solid #ffffff22;border-radius:13px}.mode-dialog-menu{display:flex;gap:10px;justify-content:flex-end;margin-top:18px}
   </style>
  </head>
  <body>
@@ -1153,7 +1153,7 @@ body {
         </path>
        </svg>
       </span>
-     </div>
+     </div><button class="action safe-volume-button safe-hidden" id="system-safe-volume">Safe max</button>
      <div class="grid three">
       <button aria-label="Previous" class="transport" id="system-previous">
        <svg class="media-icon" viewbox="0 0 24 24">
@@ -1381,7 +1381,7 @@ body {
         </path>
        </svg>
       </span>
-     </div>
+     </div><button class="action safe-volume-button safe-hidden" id="local-safe-volume">Safe max</button>
      <div class="label mpv-gain-control">MPV volume</div>
      <div class="range-row">
       <span aria-hidden="true" class="volume-icon">
@@ -1940,7 +1940,11 @@ function renderPlaylistSnapshot(playlists){
   }
 }
 function updatePlaylistCover(player){if(!player?.playlist||!player.playing)return;for(const button of document.querySelectorAll('#playlists [data-playlist-name]')){if(button.dataset.playlistName!==player.playlist)continue;const old=button.querySelector('.item-cover .cover-art');if(!old)continue;const url=player.cover||'';if(url&&old.tagName==='IMG'&&old.getAttribute('src')===url)return;if(!url&&old.classList.contains('cover-fallback'))return;old.replaceWith(coverNode(url))}}
-function renderVolatile(data){
+const safeButtons=[$('#system-safe-volume'),$('#local-safe-volume')];
+const safeSliders=[$('#system-volume'),$('#volume')];
+function renderSafeVolume(info){const ok=!!(info&&info.available&&Number.isFinite(Number(info.percent)));const p=ok?Number(info.percent):0;for(const s of safeSliders){s.classList.toggle('safe-mark',ok);if(ok)s.style.setProperty('--safe-point',p+'%');else s.style.removeProperty('--safe-point')}for(const b of safeButtons){b.classList.toggle('safe-hidden',!ok);if(ok)b.textContent='Set safe max '+p.toFixed(6)+'%'}}
+for(const b of safeButtons)b.onclick=async()=>{try{const r=await post('/api/safe-volume',{});renderSafeVolume(r.safeVolume);note('Safe max '+Number(r.safeVolume.percent).toFixed(6)+'% applied')}catch(e){note(e.message,true)}};
+function renderVolatile(data){renderSafeVolume(data.safeVolume);
   const sonoAllowed=!!data.mode.sonobusWanted,airAllowed=!!data.mode.airplay;
   $('#restart-sonobus').disabled=!sonoAllowed;$('#restart-sonobus').setAttribute('aria-disabled',String(!sonoAllowed));
   $('#restart-airplay').disabled=!airAllowed;$('#restart-airplay').setAttribute('aria-disabled',String(!airAllowed));

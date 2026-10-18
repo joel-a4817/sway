@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Manage Raw and Limited H5 profiles using Raw HpCFs only."""
-import ast, math, re, os, shutil, subprocess, sys, tempfile, termios, textwrap, tty
+"""Manage limiter-backed H5 profiles and their safe master-volume limits."""
+import ast, math, re, os, json, shutil, subprocess, sys, tempfile, termios, textwrap, tty
 from datetime import datetime
 from pathlib import Path
 import numpy as np
@@ -47,7 +47,6 @@ HPCFS = (
     },
 )
 SAMPLE_RATE=96000
-CAMILLA_RAW_PLAYBACK_DEVICE='camilladsp_peak_integer'
 CAMILLA_LIMITED_PLAYBACK_DEVICE='camilladsp_peak_limited'
 CAMILLA_PLAYBACK_FORMAT='F32_LE'
 CAMILLA_ROOT=AUDIO_FILTERS
@@ -102,7 +101,8 @@ def devices_text(playback_device):
     device: "{playback_device}"
     format: {CAMILLA_PLAYBACK_FORMAT}
 '''
-def filterless_text():return '---\ntitle: "Filterless / Speakers"\ndescription: "Pass-through CamillaDSP profile with no filters"\n'+devices_text(CAMILLA_RAW_PLAYBACK_DEVICE)+'pipeline: []\n'
+def filterless_text():
+    return '# safe-volume-percent: 100.000000\n# peak-db: 0.000000000000\n---\ntitle: "Filterless / Speakers"\ndescription: "Pass-through CamillaDSP profile with no filters"\n'+devices_text(CAMILLA_LIMITED_PLAYBACK_DEVICE)+'pipeline: []\n'
 def profile_label(item):return str(item['label']).strip()
 def conv_text(name,path,channel):
     return f'''  {name}:
@@ -112,19 +112,14 @@ def conv_text(name,path,channel):
       filename: {yaml_string(path)}
       channel: {channel}
 '''
-def gain_text(gain):return f'''  auto_gain:
-    type: Gain
-    parameters:
-      gain: {gain:.12f}
-      scale: dB
-'''
 PROFILE_LAYOUTS = {
-    '': {'label':'S', 'file':'s', 'spatial':False, 'mono':False, 'swap_input':False},
-    '-mono': {'label':'M', 'file':'m', 'spatial':False, 'mono':True, 'swap_input':False},
-    '-360-stereo': {'label':'360 S', 'file':'360-s', 'spatial':True, 'mono':False, 'swap_input':False},
-    '-360-swapped-stereo': {'label':'360 X', 'file':'360-x', 'spatial':True, 'mono':False, 'swap_input':True},
-    '-360-mono': {'label':'360 M', 'file':'360-m', 'spatial':True, 'mono':True, 'swap_input':False},
+    'stereo': {'label':'Stereo', 'spatial':False, 'mono':False, 'swap_input':False},
+    'mono': {'label':'Mono', 'spatial':False, 'mono':True, 'swap_input':False},
+    '360-stereo': {'label':'360 Stereo', 'spatial':True, 'mono':False, 'swap_input':False},
+    '360-inverse': {'label':'360 Inverse Stereo', 'spatial':True, 'mono':False, 'swap_input':True},
+    '360-mono': {'label':'360 Mono', 'spatial':True, 'mono':True, 'swap_input':False},
 }
+
 def mono_mixer_definition():return '''  mono_input:
     channels:
       in: 2
@@ -172,25 +167,31 @@ def chain_gain_for_layout(chain_paths,layout):
     peak=float(np.max(output))
     if not np.isfinite(peak) or peak<=0.0:raise RuntimeError('Invalid routed complete-chain audible response')
     gain=-20.0*np.log10(peak);print(f"{layout['label']} complete route 20 Hz-20 kHz peak {-gain:.12f} dB; gain {gain:.12f} dB");return gain
-def make_profile(item,mode,hpcf_path,chain_paths,preamp_db):
-    base=next((value for value in ('raw','limited') if mode.startswith(value)),None);suffix=mode[len(base):] if base else None
-    if base is None or suffix not in PROFILE_LAYOUTS:raise ValueError('Unsupported profile mode: '+mode)
-    layout=PROFILE_LAYOUTS[suffix];device_dir=CAMILLA_ROOT/profile_directory_name(profile_label(item));playback=CAMILLA_LIMITED_PLAYBACK_DEVICE if base=='limited' else CAMILLA_RAW_PLAYBACK_DEVICE
-    text='---\ntitle: '+yaml_string(('Raw' if base=='raw' else 'Limited')+' '+layout['label'])+'\ndescription: '+yaml_string('B&K 5128 correction; mode '+('Raw' if base=='raw' else 'Limited')+'; layout '+layout['label']+'; stereo correction paths retained')+'\n'+devices_text(playback)
+def safe_volume_percent(peak_gain_db):
+    """wpctl control equivalent of the old Raw CamillaDSP auto_gain."""
+    # Preserve the exact old Raw auto_gain result. PipeWire applies the
+    # wpctl channel-volume control cubically, so control^3 must equal the
+    # old CamillaDSP linear gain 10^(dB/20): control=10^(dB/60).
+    value=min(100.0,100.0*10.0**(float(peak_gain_db)/60.0))
+    if not math.isfinite(value) or value<=0.0:raise RuntimeError('Invalid safe volume percentage')
+    return value
+
+def make_profile(item,layout_key,hpcf_path,chain_paths,peak_gain_db):
+    if layout_key not in PROFILE_LAYOUTS:raise ValueError('Unsupported profile layout: '+layout_key)
+    layout=PROFILE_LAYOUTS[layout_key];device_dir=CAMILLA_ROOT/profile_directory_name(profile_label(item))
+    safe=safe_volume_percent(peak_gain_db)
+    text='# safe-volume-percent: '+f'{safe:.6f}'+'\n# peak-db: '+f'{-peak_gain_db:.12f}'+'\n---\ntitle: '+yaml_string(layout['label'])+'\ndescription: '+yaml_string('B&K 5128 correction; '+layout['label']+'; external limiter safety net')+'\n'+devices_text(CAMILLA_LIMITED_PLAYBACK_DEVICE)
     mixers=[]
     if layout['mono']:mixers.append(mono_mixer_definition())
     if layout['swap_input']:mixers.append(channel_swap_mixer_definition())
     if mixers:text+='mixers:\n'+''.join(mixers)
     text+='filters:\n';names=[]
     for prefix,path in chain_paths:text+=conv_text(prefix+'_left',path,0)+conv_text(prefix+'_right',path,1);names.append(prefix)
-    if base=='raw':text+=gain_text(preamp_db)
     text+='pipeline:\n'
     if layout['mono']:text+='  - type: Mixer\n    name: mono_input\n'
     if layout['swap_input']:text+='  - type: Mixer\n    name: swap_channels\n'
-    for prefix in names:
-        text+=f'  - type: Filter\n    channels: [0]\n    names: [{prefix}_left]\n  - type: Filter\n    channels: [1]\n    names: [{prefix}_right]\n'
-    if base=='raw':text+='  - type: Filter\n    channels: [0, 1]\n    names: [auto_gain]\n'
-    return device_dir/(base+'-'+layout['file']+'.yml'),text
+    for prefix in names:text+=f'  - type: Filter\n    channels: [0]\n    names: [{prefix}_left]\n  - type: Filter\n    channels: [1]\n    names: [{prefix}_right]\n'
+    return device_dir/(layout_key+'.yml'),text
 def configured_path(item):
     path=Path(str(item.get('file',''))).expanduser();return (path if path.is_absolute() else HPCF_ANECHOIC/path).resolve()
 
@@ -213,10 +214,13 @@ def measurement_devices():
     return result
 
 def build_profile_candidates(all_measurements=False):
+    generated=[(CAMILLA_ROOT/'00-filterless.yml',filterless_text())]
+    configured=list(measurement_devices() if all_measurements else HPCFS)
+    if not configured:return generated,[]
     if not HPCF_ANECHOIC.is_dir():raise SystemExit(f'Missing B&K 5128 HpCF folder: {HPCF_ANECHOIC}')
     if not SOFA_AVERAGE_WAV.is_file():raise SystemExit(f'Missing SOFA average WAV: {SOFA_AVERAGE_WAV}')
-    devices=[];labels=set();directory_names=set();sources=set();generated=[]
-    for item in (measurement_devices() if all_measurements else HPCFS):
+    devices=[];labels=set();directory_names=set();sources=set()
+    for item in configured:
         label=profile_label(item);source=configured_path(item);kind=str(item.get('type','')).strip().lower()
         if kind not in ('in-ear','over-ear'):raise SystemExit(f'{label}: type must be in-ear or over-ear')
         if not source.is_file():raise SystemExit(f'Missing Raw HpCF WAV: {source}')
@@ -227,57 +231,25 @@ def build_profile_candidates(all_measurements=False):
         if kind=='over-ear':
             if not COMPENSATION_WAV.is_file():raise SystemExit(f'Missing over-ear compensation WAV: {COMPENSATION_WAV}')
             common.append(('fixture',COMPENSATION_WAV))
-        specs=[(base+suffix,PROFILE_LAYOUTS[suffix]) for suffix in PROFILE_LAYOUTS for base in ('raw','limited')]
-        for mode,layout in specs:
+        for layout_key,layout in PROFILE_LAYOUTS.items():
             chain=([('sofa',SOFA_AVERAGE_WAV)] if layout['spatial'] else [])+common+[('hpcf',source)]
-            gain=0.0 if mode.startswith('limited') else chain_gain_for_layout(chain,layout)
-            generated.append(make_profile(item,mode,source,chain,gain))
-    standard_profiles={(path.parent.resolve(),path.stem.split('-',1)[0]):text for path,text in generated if path.stem in ('raw-s','limited-s')}
+            peak_gain_db=chain_gain_for_layout(chain,layout)
+            generated.append(make_profile(item,layout_key,source,chain,peak_gain_db))
+    standard_profiles={path.parent.resolve():text for path,text in generated if path.stem=='stereo'}
     rebuilt_custom=[]
     for item,_source in devices:
         custom=CAMILLA_ROOT/profile_directory_name(profile_label(item))/'custom'
         if custom.is_dir():
             for path in sorted(custom.glob('*.y*ml')):
                 if path.is_file():rebuilt_custom.append((path,rebuild_custom_profile(path,path.read_text(encoding='utf-8'),standard_profiles)))
-    return [(CAMILLA_ROOT/'00-filterless.yml',filterless_text()),*generated,*rebuilt_custom],devices
+    return [*generated,*rebuilt_custom],devices
 
-def custom_raw_gain(config,points):
-    """Include the custom HRIR mix, with independent full-scale stereo inputs."""
-    base=[]
-    for name,definition in config['filters'].items():
-        if definition.get('type')=='Conv' and not name.startswith('custom_hrir_') and name.endswith('_left'):
-            base.append(read_fir(Path(definition['parameters']['filename']),2))
-    hrir=[read_fir(filename,2) for filename,source in points]
-    nfft=dense_response_nfft(*(len(data) for data in base+hrir))
-    frequencies=np.fft.rfftfreq(nfft,1.0/SAMPLE_RATE)
-    selected=(frequencies>=20.0)&(frequencies<=20000.0)
-    def response(data):
-        spectrum=np.fft.rfft(data,n=nfft,axis=0)[selected]
-        kernel=np.exp(-2j*np.pi*np.outer([20.0,20000.0],np.arange(len(data)))/SAMPLE_RATE)
-        return np.concatenate((spectrum,kernel@data),axis=0)
-    baseline=np.ones((int(selected.sum())+2,2),dtype=np.complex128)
-    for data in base:baseline*=response(data)
-    transfer=np.zeros((len(baseline),2,2),dtype=np.complex128)
-    for data,(_filename,source) in zip(hrir,points):
-        h=response(data)/len(points)
-        weights={'average':((0.5,0.5),(0.5,0.5)),
-                 'left':((1.0,0.0),(1.0,0.0)),
-                 'right':((0.0,1.0),(0.0,1.0)),
-                 'stereo':((1.0,0.0),(0.0,1.0)),
-                 'swap':((0.0,1.0),(1.0,0.0))}[source]
-        for ear in (0,1):
-            for channel in (0,1):transfer[:,ear,channel]+=h[:,ear]*weights[ear][channel]*baseline[:,channel]
-    peak=float(np.max(np.sum(np.abs(transfer),axis=2)))
-    if not np.isfinite(peak) or peak<=0.0:raise RuntimeError('Invalid custom Raw frequency response')
-    return -20.0*np.log10(peak)
 def rebuild_custom_profile(path,text,standard_profiles):
     """Rebase one generated custom HRIR profile onto its newly built baseline."""
     current=yaml.safe_load(text)
     if not isinstance(current,dict):raise RuntimeError(f'{path}: custom profile is not a YAML object')
-    match=re.search(r'Custom binaural HRIR filter based on (limited(?:-s)?|gain|raw(?:-s)?)\.yml;',str(current.get('description','')))
-    if not match:raise RuntimeError(f'{path}: cannot identify custom filter baseline')
-    mode='raw' if match.group(1)=='gain' else match.group(1).removesuffix('-s');baseline_text=standard_profiles.get((path.parent.parent.resolve(),mode))
-    if baseline_text is None:raise RuntimeError(f'{path}: newly generated {mode}.yml baseline is unavailable')
+    baseline_text=standard_profiles.get(path.parent.parent.resolve())
+    if baseline_text is None:raise RuntimeError(f'{path}: newly generated stereo.yml baseline is unavailable')
     config=yaml.safe_load(baseline_text)
     if not isinstance(config,dict):raise RuntimeError(f'{path}: generated baseline is not a YAML object')
     filters=current.get('filters') or {};spread=((current.get('mixers') or {}).get('custom_hrir_spread') or {}).get('mapping')
@@ -313,11 +285,7 @@ def rebuild_custom_profile(path,text,standard_profiles):
     mixers['custom_hrir_merge']={'channels':{'in':2*count,'out':2},'mapping':[{'dest':ear,'sources':[{'channel':2*i+ear,'gain':gain} for i in range(count)]} for ear in (0,1)]}
     pipeline.append({'type':'Mixer','name':'custom_hrir_spread'})
     for i in range(count):pipeline.extend(({'type':'Filter','channels':[2*i],'names':[f'custom_hrir_{i}_left']},{'type':'Filter','channels':[2*i+1],'names':[f'custom_hrir_{i}_right']}))
-    pipeline.append({'type':'Mixer','name':'custom_hrir_merge'});name=path.stem;config['title']=name;config['description']=f'Custom binaural HRIR filter based on {mode}-s.yml; {count} point(s)'
-    if mode=='raw':
-        new_filters['auto_gain']['parameters']['gain']=float(custom_raw_gain(config,points))
-        pipeline[:]=[stage for stage in pipeline if not (stage.get('type')=='Filter' and stage.get('names')==['auto_gain'])]
-        pipeline.append({'type':'Filter','channels':[0,1],'names':['auto_gain']})
+    pipeline.append({'type':'Mixer','name':'custom_hrir_merge'});name=path.stem;config['title']=name;config['description']=f'Custom binaural HRIR filter based on stereo.yml; {count} point(s)'
     return yaml.safe_dump(config,sort_keys=False)
 
 def commit_profiles(candidates):
@@ -374,14 +342,26 @@ def commit_profiles(candidates):
             if restore_errors:
                 raise RuntimeError('Profile commit failed and complete tree rollback failed: '+'; '.join(restore_errors)) from error
             raise RuntimeError('Profile commit failed; the complete previous filter tree was restored: '+str(error)) from error
+    safe_index={}
+    for profile_path,profile_text in expected.items():
+        match=re.search(r'(?m)^# safe-volume-percent: ([0-9]+(?:\.[0-9]+)?)$',profile_text)
+        peak=re.search(r'(?m)^# peak-db: (-?[0-9]+(?:\.[0-9]+)?)$',profile_text)
+        if match:
+            key=profile_path.relative_to(root).as_posix()
+            safe_index[key]={'percent':float(match.group(1)),'peakDb':float(peak.group(1)) if peak else 0.0}
+    index_path=root/'.safe-volume.json';index_temp=root/'.safe-volume.json.new'
+    index_temp.write_text(json.dumps({'version':1,'profiles':safe_index},indent=2,sort_keys=True)+'\n',encoding='utf-8')
+    index_temp.replace(index_path)
+    if json.loads(index_path.read_text(encoding='utf-8')).get('profiles')!=safe_index:
+        raise RuntimeError('Safe-volume index verification failed')
     changed=[path for path,text in expected.items() if path not in before_yaml]
     removed_yaml=sorted(before_yaml-set(expected))
     removed_dirs=sorted(before_dirs-expected_device_dirs)
     return changed,removed_yaml,removed_dirs
 def rebuild_all_filters(all_measurements=False):
+    print(f'Writing profiles and safe-volume index to: {CAMILLA_ROOT}')
     candidates,devices=build_profile_candidates(all_measurements)
-    uses_limiter=any(f'device: "{CAMILLA_LIMITED_PLAYBACK_DEVICE}"' in text for path,text in candidates)
-    if uses_limiter and not Path('/etc/camilladsp-peak-limiter-v11').is_file():raise SystemExit('Limited profiles require the installed NixOS peak-limiter-v11 module.')
+    if not Path('/etc/camilladsp-peak-limiter-v11').is_file():raise SystemExit('Generated profiles require the installed NixOS peak-limiter-v11 module.')
     camilladsp=Path('/run/current-system/sw/bin/camilladsp')
     if not camilladsp.is_file():raise SystemExit(f'Missing CamillaDSP executable: {camilladsp}')
     with tempfile.TemporaryDirectory() as validation_name:
@@ -392,10 +372,8 @@ def rebuild_all_filters(all_measurements=False):
     existed={path for path,text in candidates if path.is_file()};changed,removed,removed_dirs=commit_profiles(candidates)
     for path,text in candidates:
         print(f'{"Replaced existing" if path in existed else "Created"}: {path}')
-        match=re.search(r'  auto_gain:\n    type: Gain\n    parameters:\n      gain: ([^\n]+)',text)
-        if match:print(f'{path.name}: applied calculated gain {match.group(1)} dB')
-        elif f'device: "{CAMILLA_LIMITED_PLAYBACK_DEVICE}"' in text:print(f'{path.name}: NO static gain stage; routed through external ALSA lookahead limiter')
-        elif f'device: "{CAMILLA_RAW_PLAYBACK_DEVICE}"' in text:print(f'{path.name}: limiter bypassed; routed directly to FLOAT-to-S32 loopback conversion')
+        parsed=yaml.safe_load(text);meta=(parsed or {}).get('metadata') or {}
+        if 'safe_volume_percent' in meta:print(f"{path.name}: safe master {float(meta['safe_volume_percent']):.6f}% before limiter activity")
     print(f'Using {len(devices)} anechoic HpCF devices; verified {len(candidates)} CamillaDSP YAML profiles in {CAMILLA_ROOT}; {len(changed)} created, {len(removed)} obsolete YAMLs removed, {len(removed_dirs)} unconfigured device directories removed')
 TERMINALS=(('foot','-T','Manage Audio Device'),('kitty','--title','Manage Audio Device'),('alacritty','--title','Manage Audio Device','-e'))
 def row(number,label):

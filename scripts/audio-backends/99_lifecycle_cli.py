@@ -360,6 +360,10 @@ def topology_cli():
                     switch_profile(requested)
                 data={'profile':selected_filter(),'stopped':False}
             print(json.dumps(data,ensure_ascii=False));return
+        if len(sys.argv)==2 and sys.argv[1]=='--safe-volume-status':
+            print(json.dumps(safe_volume_state(),ensure_ascii=False));return
+        if len(sys.argv)==2 and sys.argv[1]=='--safe-volume-apply':
+            print(json.dumps(apply_safe_volume(),ensure_ascii=False));return
         if len(sys.argv)==2 and sys.argv[1]=='--normalize-menu-open':
             if STOPPED.exists():
                 print(json.dumps({'skipped':'audio stopped'}));return

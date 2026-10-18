@@ -238,5 +238,5 @@ def set_master_volume(value):
         MASTER_WRITE_UNTIL=time.monotonic()+2.0
         apply_master_volume(value,normalize_sinks=False)
         MASTER_VOLUME.parent.mkdir(parents=True,exist_ok=True)
-        atomic(MASTER_VOLUME,f'{value:.2f}%\n')
+        atomic(MASTER_VOLUME,f'{value:.6f}%\n')
     return {'volume':value}
