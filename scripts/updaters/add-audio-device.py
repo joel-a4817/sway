@@ -29,6 +29,7 @@ HPCF_ANECHOIC=AUDIO_ROOT/'b&k 5128 hpcfs'
 COMPENSATION_WAV=AUDIO_ROOT/'other/Beyerdynamic DT 990 Pro - B&K 5128 to SADIE H5 Approximate Compensation.wav'
 SOFA_AVERAGE_WAV=AUDIO_ROOT/'other/H5_2945_Weighted_Power_Average_UNNORMALIZED.wav'
 MEASUREMENTS_DIR=AUDIO_ROOT/'measurements'
+COMBINED_FILTER_ROOT=HOME/'Downloads-S5/filters'
 HPCFS = (
     {
         'file': 'Apple EarPods - B&K 5128 - HpCF - Raw.wav',
@@ -86,6 +87,86 @@ def chain_gain(paths):
     gain=-20.0*np.log10(peak)
     print(f'Complete chain 20 Hz-20 kHz peak {-gain:.12f} dB; gain {gain:.12f} dB')
     return gain
+
+def _matrix_convolve(left,right):
+    size=len(left)+len(right)-1;nfft=1<<(size-1).bit_length()
+    return np.fft.irfft(np.fft.rfft(left,nfft)*np.fft.rfft(right,nfft),nfft)[:size]
+def _pad_matrix(matrix,length):
+    if matrix.shape[2]==length:return matrix
+    return np.pad(matrix,((0,0),(0,0),(0,length-matrix.shape[2])))
+def _mix_transfer(transfer,mixer):
+    channels=mixer.get('channels') or {};outputs=int(channels.get('out',0));mapping=mixer.get('mapping') or []
+    if outputs<1:raise RuntimeError('Mixer has no output channels')
+    result=np.zeros((outputs,transfer.shape[1],transfer.shape[2]),dtype=np.float64)
+    for row in mapping:
+        destination=int(row['dest'])
+        for source in row.get('sources') or []:
+            channel=int(source['channel']);gain=10.0**(float(source.get('gain',0.0))/20.0)
+            result[destination]+=gain*transfer[channel]
+    return result
+def _filter_transfer(transfer,channels,names,filters):
+    if len(names)==1:assignments=[(channel,names[0]) for channel in channels]
+    elif len(names)==len(channels):assignments=list(zip(channels,names))
+    else:raise RuntimeError('Filter stage channel/name count mismatch')
+    result=transfer.copy()
+    expanded=[]
+    for channel,name in assignments:
+        definition=filters.get(name) or {}
+        if definition.get('type')!='Conv':raise RuntimeError(f'Unsupported combined-WAV filter type for {name}: {definition.get("type")}')
+        parameters=definition.get('parameters') or {}
+        if parameters.get('type')!='Wav':raise RuntimeError(f'{name}: only Wav convolution is supported')
+        data=read_fir(Path(parameters['filename']),max(2,int(parameters.get('channel',0))+1))
+        impulse=data[:,int(parameters.get('channel',0))]
+        rows=[_matrix_convolve(result[channel,input_channel],impulse) for input_channel in range(result.shape[1])]
+        expanded.append((channel,rows))
+    length=max([result.shape[2],*[len(row) for _channel,rows in expanded for row in rows]])
+    result=_pad_matrix(result,length)
+    for channel,rows in expanded:
+        for input_channel,row in enumerate(rows):result[channel,input_channel,:len(row)]=row;result[channel,input_channel,len(row):]=0.0
+    return result
+def profile_transfer_matrix(profile_text):
+    config=yaml.safe_load(profile_text) or {};transfer=np.zeros((2,2,1),dtype=np.float64);transfer[0,0,0]=1.0;transfer[1,1,0]=1.0
+    mixers=config.get('mixers') or {};filters=config.get('filters') or {}
+    for stage in config.get('pipeline') or []:
+        kind=stage.get('type')
+        if kind=='Mixer':transfer=_mix_transfer(transfer,mixers[stage['name']])
+        elif kind=='Filter':transfer=_filter_transfer(transfer,[int(x) for x in stage.get('channels') or []],list(stage.get('names') or []),filters)
+        else:raise RuntimeError(f'Unsupported combined-WAV pipeline stage: {kind}')
+    if transfer.shape[:2]!=(2,2):raise RuntimeError(f'Profile output is not stereo: {transfer.shape[:2]}')
+    if not np.isfinite(transfer).all():raise RuntimeError('Combined transfer contains non-finite samples')
+    # Sequential channel-specific stages may pad untouched paths with zeros.
+    # Remove only frames that are exactly zero across the entire 2x2 matrix.
+    used=np.flatnonzero(np.any(transfer!=0.0,axis=(0,1)))
+    return transfer[:,:,:used[-1]+1] if len(used) else transfer[:,:,:1]
+def combined_wav_candidates(profile_candidates):
+    exports={}
+    for profile_path,profile_text in profile_candidates:
+        relative=Path(profile_path).resolve().relative_to(CAMILLA_ROOT.resolve()).with_suffix('.wav')
+        matrix=profile_transfer_matrix(profile_text)
+        # Channel order is the complete 2x2 transfer matrix:
+        # Lout<-Lin, Lout<-Rin, Rout<-Lin, Rout<-Rin.
+        exports[relative]=np.column_stack((matrix[0,0],matrix[0,1],matrix[1,0],matrix[1,1]))
+    return exports
+def commit_combined_wavs(exports):
+    root=COMBINED_FILTER_ROOT.resolve();root.parent.mkdir(parents=True,exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='.combined-wavs-',dir=root.parent) as transaction:
+        stage=Path(transaction)/'filters';stage.mkdir();manifest={'version':1,'sampleRate':SAMPLE_RATE,'channels':['Lout<-Lin','Lout<-Rin','Rout<-Lin','Rout<-Rin'],'normalization':'none','files':{}}
+        for relative,data in sorted(exports.items(),key=lambda item:item[0].as_posix()):
+            destination=stage/relative;destination.parent.mkdir(parents=True,exist_ok=True);sf.write(destination,data,SAMPLE_RATE,subtype='DOUBLE')
+            check,rate=sf.read(destination,always_2d=True,dtype='float64')
+            if rate!=SAMPLE_RATE or not np.array_equal(check,data):raise RuntimeError(f'Combined WAV verification failed: {relative}')
+            peak=float(np.max(np.abs(data)));manifest['files'][relative.as_posix()]={'frames':len(data),'peakLinear':peak,'peakDb':20.0*math.log10(peak) if peak>0 else None}
+        (stage/'manifest.json').write_text(json.dumps(manifest,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+        backup=Path(transaction)/'previous'
+        try:
+            if root.exists():root.rename(backup)
+            stage.rename(root)
+        except BaseException:
+            if root.exists():shutil.rmtree(root)
+            if backup.exists():backup.rename(root)
+            raise
+    return root
+
 def devices_text(playback_device):
     return f'''devices:
   samplerate: {SAMPLE_RATE}
@@ -375,11 +456,14 @@ def rebuild_all_filters(all_measurements=False):
             candidate=Path(validation_name)/f'{number:04d}-{path.name}';candidate.write_text(text,encoding='utf-8')
             check=subprocess.run([str(camilladsp),'--check',str(candidate)],text=True,capture_output=True)
             if check.returncode:raise SystemExit(f'Invalid generated profile {path.name}: '+(check.stderr.strip() or check.stdout.strip()))
+    exports=combined_wav_candidates(candidates)
     existed={path for path,text in candidates if path.is_file()};changed,removed,removed_dirs=commit_profiles(candidates)
+    combined_root=commit_combined_wavs(exports)
     for path,text in candidates:
         print(f'{"Replaced existing" if path in existed else "Created"}: {path}')
         match=re.search(r'(?m)^# safe-volume-percent: ([0-9]+(?:\.[0-9]+)?)$',text)
         if match:print(f"{path.name}: safe master {float(match.group(1)):.6f}% before limiter activity")
+    print(f'Exported {len(exports)} exact unnormalized 2x2 FIR WAV matrices to {combined_root}')
     print(f'Using {len(devices)} anechoic HpCF devices; verified {len(candidates)} CamillaDSP YAML profiles in {CAMILLA_ROOT}; {len(changed)} created, {len(removed)} obsolete YAMLs removed, {len(removed_dirs)} unconfigured device directories removed')
 TERMINALS=(('foot','-T','Manage Audio Device'),('kitty','--title','Manage Audio Device'),('alacritty','--title','Manage Audio Device','-e'))
 def row(number,label):
@@ -448,6 +532,9 @@ def rebuild_after_change(entries,backup):
 def update_filters(_text=None):print('\nUpdating all CamillaDSP filters...');rebuild_all_filters();print('All CamillaDSP filters updated.')
 def clean_custom_filters(_text=None):
     removed=[]
+    if COMBINED_FILTER_ROOT.is_dir():
+        for custom in sorted(COMBINED_FILTER_ROOT.glob('*/custom')):
+            if custom.is_dir():shutil.rmtree(custom);removed.append(custom)
     if CAMILLA_ROOT.is_dir():
         for custom in sorted(CAMILLA_ROOT.glob('*/custom')):
             if custom.is_dir():shutil.rmtree(custom);removed.append(custom)
