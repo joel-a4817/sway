@@ -70,6 +70,63 @@ def read_fir(path,channels):
     if rate!=SAMPLE_RATE or data.shape[1]!=channels or not len(data):raise RuntimeError(f'{path}: expected nonempty {channels}-channel {SAMPLE_RATE} Hz FIR')
     if not np.isfinite(data).all():raise RuntimeError(f'{path}: non-finite FIR samples')
     return data
+def read_csv_frequency_range(path):
+    import csv
+    with Path(path).open(newline='',encoding='utf-8-sig') as handle:
+        rows=list(csv.DictReader(handle))
+    if len(rows)<2:raise RuntimeError(f'{path}: measurement CSV has fewer than two rows')
+    names={str(k).strip().lower():k for k in rows[0]}
+    key=next((names[x] for x in ('frequency_hz','frequency','freq','hz') if x in names),None)
+    if key is None:raise RuntimeError(f'{path}: measurement CSV has no frequency column')
+    frequency=np.asarray([float(row[key]) for row in rows],dtype=np.float64)
+    if not np.isfinite(frequency).all() or np.any(frequency<=0) or np.any(np.diff(frequency)<=0):raise RuntimeError(f'{path}: invalid frequency grid')
+    return float(frequency[0]),float(frequency[-1])
+
+def range_sidecar(path):return Path(path).with_suffix('.range.json')
+
+def fir_frequency_range(path):
+    path=Path(path).resolve();sidecar=range_sidecar(path)
+    if sidecar.is_file():
+        node=json.loads(sidecar.read_text(encoding='utf-8'));low=float(node['lowHz']);high=float(node['highHz'])
+    elif path==SOFA_AVERAGE_WAV.resolve() or '.assets' in path.parts:
+        low,high=20.0,20000.0
+    elif path.parent==HPCF_ANECHOIC.resolve():
+        base=path.stem.removesuffix(' - HpCF - Raw')
+        csv_path=(MEASUREMENTS_DIR/(base+'.csv')).resolve()
+        if not csv_path.is_file():raise RuntimeError(f'{path}: missing source measurement CSV needed for valid frequency range: {csv_path}')
+        low,high=read_csv_frequency_range(csv_path)
+    else:
+        raise RuntimeError(f'{path}: valid frequency range is unknown; add {sidecar.name}')
+    low=max(0.0,low);high=min(SAMPLE_RATE/2.0,high)
+    if not 0.0<low<high:raise RuntimeError(f'{path}: invalid valid frequency range {low}..{high} Hz')
+    return low,high
+
+def intersect_frequency_ranges(paths):
+    ranges=[fir_frequency_range(path) for path in paths]
+    low=max(value[0] for value in ranges);high=min(value[1] for value in ranges)
+    if not low<high:raise RuntimeError(f'No shared frequency range: {ranges}')
+    return low,high
+
+def profile_frequency_range(profile_text):
+    low=re.search(r'(?m)^# valid-frequency-low-hz: ([0-9]+(?:\.[0-9]+)?)$',profile_text)
+    high=re.search(r'(?m)^# valid-frequency-high-hz: ([0-9]+(?:\.[0-9]+)?)$',profile_text)
+    if not(low and high):raise RuntimeError('Profile is missing valid-frequency range comments')
+    values=float(low.group(1)),float(high.group(1))
+    if not 0.0<values[0]<values[1]:raise RuntimeError(f'Invalid profile frequency range: {values}')
+    return values
+
+def matrix_peak_in_range(matrix,low,high):
+    nfft=dense_response_nfft(matrix.shape[2]);frequency=np.fft.rfftfreq(nfft,1.0/SAMPLE_RATE);keep=(frequency>low)&(frequency<high)
+    H=np.fft.rfft(matrix,n=nfft,axis=2)[:,:,keep]
+    peak=float(np.max(np.sum(np.abs(H),axis=1))) if H.shape[2] else 0.0
+    kernel=np.exp(-2j*np.pi*np.outer([low,high],np.arange(matrix.shape[2]))/SAMPLE_RATE)
+    edges=np.empty((2,2,2),dtype=np.complex128)
+    for out_ch in range(2):
+        for in_ch in range(2):edges[out_ch,in_ch]=kernel@matrix[out_ch,in_ch]
+    peak=max(peak,float(np.max(np.sum(np.abs(edges),axis=1))))
+    if not math.isfinite(peak) or peak<=0.0:raise RuntimeError(f'Invalid matrix response in {low}..{high} Hz')
+    return peak
+
 def chain_gain(paths):
     """Shared stereo gain: negative complete-chain peak within 20-20000 Hz."""
     arrays=[read_fir(path,2) for path in paths]
@@ -80,7 +137,7 @@ def chain_gain(paths):
     edges=np.ones((2,2),dtype=np.float64)
     for data in arrays:
         combined*=np.abs(np.fft.rfft(data,n=nfft,axis=0)[keep])
-        kernel=np.exp(-2j*np.pi*np.outer([20.0,20000.0],np.arange(len(data)))/SAMPLE_RATE)
+        kernel=np.exp(-2j*np.pi*np.outer([low,high],np.arange(len(data)))/SAMPLE_RATE)
         edges*=np.abs(kernel@data)
     peak=max(float(np.max(combined)),float(np.max(edges)))
     if not np.isfinite(peak) or peak<=0:raise RuntimeError('Invalid complete-chain audible response')
@@ -89,6 +146,14 @@ def chain_gain(paths):
     return gain
 
 def _matrix_convolve(left,right):
+    # Matrix rows are zero-padded to a common storage length between YAML
+    # stages. Remove only those exact trailing padding samples before the next
+    # convolution, so padding cannot manufacture extra near-zero FFT tail taps.
+    def meaningful(values):
+        used=np.flatnonzero(values!=0.0)
+        return values[:used[-1]+1] if len(used) else values[:1]
+    left=meaningful(np.asarray(left,dtype=np.float64))
+    right=meaningful(np.asarray(right,dtype=np.float64))
     size=len(left)+len(right)-1;nfft=1<<(size-1).bit_length()
     return np.fft.irfft(np.fft.rfft(left,nfft)*np.fft.rfft(right,nfft),nfft)[:size]
 def _pad_matrix(matrix,length):
@@ -138,47 +203,88 @@ def profile_transfer_matrix(profile_text):
     # Remove only frames that are exactly zero across the entire 2x2 matrix.
     used=np.flatnonzero(np.any(transfer!=0.0,axis=(0,1)))
     return transfer[:,:,:used[-1]+1] if len(used) else transfer[:,:,:1]
-def stereo_audible_peak(stereo):
-    """Highest left/right magnitude from 20 Hz through 20 kHz, including exact edges."""
-    nfft=dense_response_nfft(len(stereo))
-    frequency=np.fft.rfftfreq(nfft,1.0/SAMPLE_RATE);keep=(frequency>=20.0)&(frequency<=20000.0)
-    peak=float(np.max(np.abs(np.fft.rfft(stereo,n=nfft,axis=0)[keep])))
-    kernel=np.exp(-2j*np.pi*np.outer([20.0,20000.0],np.arange(len(stereo)))/SAMPLE_RATE)
-    peak=max(peak,float(np.max(np.abs(kernel@stereo))))
-    if not math.isfinite(peak) or peak<=0.0:raise RuntimeError('Invalid combined stereo FIR response')
-    return peak
+JAMESDSP_EXPORT_STEMS = frozenset(PROFILE_LAYOUTS if 'PROFILE_LAYOUTS' in globals() else (
+    "stereo", "mono", "inverse", "360-stereo", "360-inverse", "360-mono"))
 
-def normalize_stereo_to_zero_db(stereo):
-    """Use one shared gain so the higher L/R audible response peak is exactly 0 dB."""
-    original_peak=stereo_audible_peak(stereo);gain=1.0/original_peak;normalized=stereo*gain
-    verified=stereo_audible_peak(normalized)
-    if not math.isclose(verified,1.0,rel_tol=1e-9,abs_tol=1e-9):raise RuntimeError(f'Stereo normalization verification failed: {verified}')
-    return normalized,original_peak,gain
+def _jamesdsp_export_kind(relative_yaml):
+    """Every convolution profile is exported as exact LL, LR, RL, RR."""
+    relative_yaml=Path(relative_yaml)
+    if len(relative_yaml.parts)==1:
+        return None  # filterless has no FIR transfer to export
+    if "custom" in relative_yaml.parts or relative_yaml.stem in JAMESDSP_EXPORT_STEMS:
+        return "true-stereo"
+    return None
+
+def true_stereo_audible_peak(matrix,low=20.0,high=20000.0):
+    return matrix_peak_in_range(matrix,low,high)
 
 def combined_wav_candidates(profile_candidates):
     exports={}
     for profile_path,profile_text in profile_candidates:
-        relative=Path(profile_path).resolve().relative_to(CAMILLA_ROOT.resolve()).with_suffix('.wav')
+        relative_yaml=Path(profile_path).resolve().relative_to(CAMILLA_ROOT.resolve())
+        if _jamesdsp_export_kind(relative_yaml) is None:
+            continue
+        relative=relative_yaml.with_suffix('.wav')
         matrix=profile_transfer_matrix(profile_text)
-        # Ordinary stereo export: add all paths feeding each CamillaDSP output.
-        # For diagonal profiles this is simply the convolved left/right chain.
-        stereo=np.column_stack((np.sum(matrix[0],axis=0),np.sum(matrix[1],axis=0)))
-        stereo,original_peak,gain=normalize_stereo_to_zero_db(stereo)
-        exports[relative]={'data':stereo,'originalPeakLinear':original_peak,'normalizationGainLinear':gain}
+        low,high=profile_frequency_range(profile_text)
+        original_peak=true_stereo_audible_peak(matrix,low,high)
+        gain=1.0/original_peak
+        normalized=matrix*gain
+        verified=true_stereo_audible_peak(normalized,low,high)
+        if not math.isclose(verified,1.0,rel_tol=1e-9,abs_tol=1e-9):
+            raise RuntimeError(f'True-stereo normalization verification failed: {verified}')
+        exports[relative]={
+            'data':np.column_stack((normalized[0,0],normalized[0,1],normalized[1,0],normalized[1,1])),
+            'matrix':normalized,
+            'sourceMatrix':matrix,
+            'kind':'true-stereo',
+            'channelOrder':['LL','LR','RL','RR'],
+            'originalPeakLinear':original_peak,
+            'normalizationGainLinear':gain,
+            'validFrequencyLowHz':low,
+            'validFrequencyHighHz':high,
+            'sourceYamlSha256':__import__('hashlib').sha256(profile_text.encode('utf-8')).hexdigest(),
+        }
     return exports
 
 def commit_combined_wavs(exports):
     root=COMBINED_FILTER_ROOT.resolve();root.parent.mkdir(parents=True,exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='.combined-wavs-',dir=root.parent) as transaction:
-        stage=Path(transaction)/'filters';stage.mkdir();manifest={'version':2,'sampleRate':SAMPLE_RATE,'channels':['left','right'],'normalization':'one shared gain to 0 dB highest L/R response from 20 Hz through 20 kHz','files':{}}
+        stage=Path(transaction)/'filters';stage.mkdir()
+        manifest={
+            'version':4,
+            'sampleRate':SAMPLE_RATE,
+            'normalization':'exact YAML 2x2 transfer matrix times one shared gain to 0 dB worst-case output response from 20 Hz through 20 kHz',
+            'files':{},
+        }
         for relative,export in sorted(exports.items(),key=lambda item:item[0].as_posix()):
-            data=export['data'];destination=stage/relative;destination.parent.mkdir(parents=True,exist_ok=True);sf.write(destination,data,SAMPLE_RATE,subtype='DOUBLE')
+            data=export['data'];destination=stage/relative;destination.parent.mkdir(parents=True,exist_ok=True)
+            sf.write(destination,data,SAMPLE_RATE,subtype='DOUBLE')
             check,rate=sf.read(destination,always_2d=True,dtype='float64')
-            if rate!=SAMPLE_RATE or not np.array_equal(check,data) or check.shape[1]!=2:raise RuntimeError(f'Combined stereo WAV verification failed: {relative}')
-            response_peak=stereo_audible_peak(check)
-            if not math.isclose(response_peak,1.0,rel_tol=1e-9,abs_tol=1e-9):raise RuntimeError(f'Written stereo WAV does not peak at 0 dB: {relative}: {response_peak}')
+            channels=4
+            if rate!=SAMPLE_RATE or not np.array_equal(check,data) or check.shape[1]!=channels:
+                raise RuntimeError(f'Combined JamesDSP WAV verification failed: {relative}')
+            restored=np.stack((np.stack((check[:,0],check[:,1])),np.stack((check[:,2],check[:,3]))))
+            if not np.array_equal(restored,export['matrix']):
+                raise RuntimeError(f'Written JamesDSP matrix differs from YAML-derived matrix: {relative}')
+            response_peak=true_stereo_audible_peak(restored,export['validFrequencyLowHz'],export['validFrequencyHighHz'])
+            if not math.isclose(response_peak,1.0,rel_tol=1e-9,abs_tol=1e-9):
+                raise RuntimeError(f'Written JamesDSP WAV does not peak at 0 dB: {relative}: {response_peak}')
             original=export['originalPeakLinear'];gain=export['normalizationGainLinear']
-            manifest['files'][relative.as_posix()]={'frames':len(data),'responsePeakLinear':response_peak,'responsePeakDb':20.0*math.log10(response_peak),'originalResponsePeakLinear':original,'originalResponsePeakDb':20.0*math.log10(original),'normalizationGainLinear':gain,'normalizationGainDb':20.0*math.log10(gain)}
+            manifest['files'][relative.as_posix()]={
+                'kind':'true-stereo',
+                'channels':export['channelOrder'],
+                'frames':len(data),
+                'responsePeakLinear':response_peak,
+                'responsePeakDb':20.0*math.log10(response_peak),
+                'originalResponsePeakLinear':original,
+                'originalResponsePeakDb':20.0*math.log10(original),
+                'normalizationGainLinear':gain,
+                'normalizationGainDb':20.0*math.log10(gain),
+            'validFrequencyLowHz':export['validFrequencyLowHz'],
+                'validFrequencyHighHz':export['validFrequencyHighHz'],
+                'sourceYamlSha256':export['sourceYamlSha256'],
+            }
         (stage/'manifest.json').write_text(json.dumps(manifest,indent=2,sort_keys=True)+'\n',encoding='utf-8')
         backup=Path(transaction)/'previous'
         try:
@@ -189,7 +295,6 @@ def commit_combined_wavs(exports):
             if backup.exists():backup.rename(root)
             raise
     return root
-
 
 def devices_text(playback_device):
     return f'''devices:
@@ -207,7 +312,7 @@ def devices_text(playback_device):
     format: {CAMILLA_PLAYBACK_FORMAT}
 '''
 def filterless_text():
-    return '# safe-volume-percent: 100.000000\n# peak-db: 0.000000000000\n---\ntitle: "Filterless / Speakers"\ndescription: "Pass-through CamillaDSP profile with no filters"\n'+devices_text(CAMILLA_LIMITED_PLAYBACK_DEVICE)+'pipeline: []\n'
+    return '# safe-volume-percent: 100.000000\n# peak-db: 0.000000000000\n# valid-frequency-low-hz: 20.000000000000\n# valid-frequency-high-hz: 20000.000000000000\n---\ntitle: "Filterless / Speakers"\ndescription: "Pass-through CamillaDSP profile with no filters"\n'+devices_text(CAMILLA_LIMITED_PLAYBACK_DEVICE)+'pipeline: []\n'
 def profile_label(item):return str(item['label']).strip()
 def conv_text(name,path,channel):
     return f'''  {name}:
@@ -261,8 +366,9 @@ def channel_swap_mixer_definition():return '''  swap_channels:
 def chain_gain_for_layout(chain_paths,layout):
     """Peak of the actual routed L/R FIR chain over 20-20000 Hz."""
     arrays=[(name,read_fir(path,2)) for name,path in chain_paths]
+    low,high=intersect_frequency_ranges([path for _name,path in chain_paths])
     nfft=dense_response_nfft(*(len(data) for _name,data in arrays))
-    frequency=np.fft.rfftfreq(nfft,1.0/SAMPLE_RATE);keep=(frequency>=20.0)&(frequency<=20000.0);responses=[]
+    frequency=np.fft.rfftfreq(nfft,1.0/SAMPLE_RATE);keep=(frequency>low)&(frequency<high);responses=[]
     for name,data in arrays:
         band=np.abs(np.fft.rfft(data,n=nfft,axis=0)[keep])
         kernel=np.exp(-2j*np.pi*np.outer([20.0,20000.0],np.arange(len(data)))/SAMPLE_RATE)
@@ -278,9 +384,9 @@ def chain_gain_for_layout(chain_paths,layout):
         stage_text.append(f"{name}={20.0*np.log10(stage_peak):+.6f} dB")
     gain=-20.0*np.log10(peak)
     print(f"{layout['label']} stages: "+', '.join(stage_text))
-    print(f"{layout['label']} complete route 20 Hz-20 kHz peak {-gain:.12f} dB; gain {gain:.12f} dB")
+    print(f"{layout['label']} complete route {low:.12f}-{high:.12f} Hz peak {-gain:.12f} dB; gain {gain:.12f} dB")
     if -gain>50.0:raise RuntimeError(f"{layout['label']}: implausible complete-chain peak {-gain:.6f} dB; refusing generation. Inspect stage peaks above.")
-    return gain
+    return gain,low,high
 def safe_volume_percent(peak_gain_db):
     """wpctl control equivalent of the old Raw CamillaDSP auto_gain."""
     # Preserve the exact old Raw auto_gain result. PipeWire applies the
@@ -290,11 +396,11 @@ def safe_volume_percent(peak_gain_db):
     if not math.isfinite(value) or value<=0.0:raise RuntimeError('Invalid safe volume percentage')
     return value
 
-def make_profile(item,layout_key,hpcf_path,chain_paths,peak_gain_db):
+def make_profile(item,layout_key,hpcf_path,chain_paths,peak_gain_db,valid_low,valid_high):
     if layout_key not in PROFILE_LAYOUTS:raise ValueError('Unsupported profile layout: '+layout_key)
     layout=PROFILE_LAYOUTS[layout_key];device_dir=CAMILLA_ROOT/profile_directory_name(profile_label(item))
     safe=safe_volume_percent(peak_gain_db)
-    text='# safe-volume-percent: '+f'{safe:.6f}'+'\n# peak-db: '+f'{-peak_gain_db:.12f}'+'\n---\ntitle: '+yaml_string(layout['label'])+'\ndescription: '+yaml_string('B&K 5128 correction; '+layout['label']+'; external limiter safety net')+'\n'+devices_text(CAMILLA_LIMITED_PLAYBACK_DEVICE)
+    text='# safe-volume-percent: '+f'{safe:.6f}'+'\n# peak-db: '+f'{-peak_gain_db:.12f}'+'\n# valid-frequency-low-hz: '+f'{valid_low:.12f}'+'\n# valid-frequency-high-hz: '+f'{valid_high:.12f}'+'\n---\ntitle: '+yaml_string(layout['label'])+'\ndescription: '+yaml_string('B&K 5128 correction; '+layout['label']+'; external limiter safety net')+'\n'+devices_text(CAMILLA_LIMITED_PLAYBACK_DEVICE)
     mixers=[]
     if layout['mono']:mixers.append(mono_mixer_definition())
     if layout['swap_input']:mixers.append(channel_swap_mixer_definition())
@@ -347,8 +453,8 @@ def build_profile_candidates(all_measurements=False):
             common.append(('fixture',COMPENSATION_WAV))
         for layout_key,layout in PROFILE_LAYOUTS.items():
             chain=([('sofa',SOFA_AVERAGE_WAV)] if layout['spatial'] else [])+common+[('hpcf',source)]
-            peak_gain_db=chain_gain_for_layout(chain,layout)
-            generated.append(make_profile(item,layout_key,source,chain,peak_gain_db))
+            peak_gain_db,valid_low,valid_high=chain_gain_for_layout(chain,layout)
+            generated.append(make_profile(item,layout_key,source,chain,peak_gain_db,valid_low,valid_high))
     standard_profiles={path.parent.resolve():text for path,text in generated if path.stem=='stereo'}
     rebuilt_custom=[]
     for item,_source in devices:
@@ -400,7 +506,19 @@ def rebuild_custom_profile(path,text,standard_profiles):
     pipeline.append({'type':'Mixer','name':prefix+'_spread'})
     for i in range(count):pipeline.extend(({'type':'Filter','channels':[2*i],'names':[f'{prefix}_{i}_left']},{'type':'Filter','channels':[2*i+1],'names':[f'{prefix}_{i}_right']}))
     pipeline.append({'type':'Mixer','name':prefix+'_merge'});name=path.stem;config['title']=name;config['description']=f'Custom free-field SOFA spatial filter based on stereo.yml; {count} measured point(s), full HRIR timing retained'
-    return yaml.safe_dump(config,sort_keys=False)
+    dumped=yaml.safe_dump(config,sort_keys=False)
+    baseline_low,baseline_high=profile_frequency_range(baseline_text)
+    point_low,point_high=intersect_frequency_ranges([filename for filename,_source in points])
+    valid_low=max(baseline_low,point_low);valid_high=min(baseline_high,point_high)
+    if not valid_low<valid_high:raise RuntimeError(f'{path}: custom profile has no shared frequency range')
+    matrix=profile_transfer_matrix(dumped)
+    peak=true_stereo_audible_peak(matrix,valid_low,valid_high)
+    peak_db=20.0*math.log10(peak)
+    if peak_db>50.0:
+        raise RuntimeError(f'{path}: implausible complete custom-chain peak {peak_db:.6f} dB')
+    gain_db=-peak_db
+    safe=safe_volume_percent(gain_db)
+    return f'# safe-volume-percent: {safe:.6f}\n# peak-db: {peak_db:.12f}\n# valid-frequency-low-hz: {valid_low:.12f}\n# valid-frequency-high-hz: {valid_high:.12f}\n---\n'+dumped
 
 def commit_profiles(candidates):
     """Atomically replace the updater-owned filter tree and remove stale devices."""
@@ -496,7 +614,7 @@ def rebuild_all_filters(all_measurements=False):
         print(f'{"Replaced existing" if path in existed else "Created"}: {path}')
         match=re.search(r'(?m)^# safe-volume-percent: ([0-9]+(?:\.[0-9]+)?)$',text)
         if match:print(f"{path.name}: safe master {float(match.group(1)):.6f}% before limiter activity")
-    print(f'Exported {len(exports)} 0 dB-normalized stereo FIR WAVs to {combined_root}')
+    print(f'Exported {len(exports)} 0 dB-normalized exact-YAML JamesDSP true-stereo FIR WAVs to {combined_root}')
     print(f'Using {len(devices)} anechoic HpCF devices; verified {len(candidates)} CamillaDSP YAML profiles in {CAMILLA_ROOT}; {len(changed)} created, {len(removed)} obsolete YAMLs removed, {len(removed_dirs)} unconfigured device directories removed')
 TERMINALS=(('foot','-T','Manage Audio Device'),('kitty','--title','Manage Audio Device'),('alacritty','--title','Manage Audio Device','-e'))
 def row(number,label):
