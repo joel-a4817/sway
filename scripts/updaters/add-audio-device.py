@@ -220,6 +220,7 @@ def conv_text(name,path,channel):
 PROFILE_LAYOUTS = {
     'stereo': {'label':'Stereo', 'spatial':False, 'mono':False, 'swap_input':False},
     'mono': {'label':'Mono', 'spatial':False, 'mono':True, 'swap_input':False},
+    'inverse': {'label':'Inverse Stereo', 'spatial':False, 'mono':False, 'swap_input':True},
     '360-stereo': {'label':'360 Stereo', 'spatial':True, 'mono':False, 'swap_input':False},
     '360-inverse': {'label':'360 Inverse Stereo', 'spatial':True, 'mono':False, 'swap_input':True},
     '360-mono': {'label':'360 Mono', 'spatial':True, 'mono':True, 'swap_input':False},
@@ -357,14 +358,14 @@ def rebuild_custom_profile(path,text,standard_profiles):
     if baseline_text is None:raise RuntimeError(f'{path}: newly generated stereo.yml baseline is unavailable')
     config=yaml.safe_load(baseline_text)
     if not isinstance(config,dict):raise RuntimeError(f'{path}: generated baseline is not a YAML object')
-    filters=current.get('filters') or {};spread=((current.get('mixers') or {}).get('custom_hrir_spread') or {}).get('mapping')
+    filters=current.get('filters') or {};mixers_current=current.get('mixers') or {};sofa_custom='custom_sofa_spread' in mixers_current;prefix='custom_sofa' if sofa_custom else 'custom_hrir';spread=((mixers_current.get(prefix+'_spread') or {}).get('mapping'))
     if not isinstance(spread,list) or len(spread)%2:raise RuntimeError(f'{path}: custom HRIR spread mapping is invalid')
     count=len(spread)//2
     if count<1:raise RuntimeError(f'{path}: custom filter has no HRIR points')
     points=[]
     for index in range(count):
-        left=((filters.get(f'custom_hrir_{index}_left') or {}).get('parameters') or {})
-        right=((filters.get(f'custom_hrir_{index}_right') or {}).get('parameters') or {})
+        left=((filters.get(f'{prefix}_{index}_left') or {}).get('parameters') or {})
+        right=((filters.get(f'{prefix}_{index}_right') or {}).get('parameters') or {})
         filename=left.get('filename')
         if not filename or right.get('filename')!=filename or left.get('channel')!=0 or right.get('channel')!=1:
             raise RuntimeError(f'{path}: HRIR point {index+1} convolution pair is invalid')
@@ -384,13 +385,13 @@ def rebuild_custom_profile(path,text,standard_profiles):
         elif source=='stereo':left_sources=[{'channel':0,'gain':0.0}];right_sources=[{'channel':1,'gain':0.0}]
         else:left_sources=[{'channel':1,'gain':0.0}];right_sources=[{'channel':0,'gain':0.0}]
         mapping.extend(({'dest':2*index,'sources':left_sources},{'dest':2*index+1,'sources':right_sources}))
-        new_filters[f'custom_hrir_{index}_left']={'type':'Conv','parameters':{'type':'Wav','filename':str(filename),'channel':0}}
-        new_filters[f'custom_hrir_{index}_right']={'type':'Conv','parameters':{'type':'Wav','filename':str(filename),'channel':1}}
-    mixers['custom_hrir_spread']={'channels':{'in':2,'out':2*count},'mapping':mapping};gain=-20*math.log10(count)
-    mixers['custom_hrir_merge']={'channels':{'in':2*count,'out':2},'mapping':[{'dest':ear,'sources':[{'channel':2*i+ear,'gain':gain} for i in range(count)]} for ear in (0,1)]}
-    pipeline.append({'type':'Mixer','name':'custom_hrir_spread'})
-    for i in range(count):pipeline.extend(({'type':'Filter','channels':[2*i],'names':[f'custom_hrir_{i}_left']},{'type':'Filter','channels':[2*i+1],'names':[f'custom_hrir_{i}_right']}))
-    pipeline.append({'type':'Mixer','name':'custom_hrir_merge'});name=path.stem;config['title']=name;config['description']=f'Custom binaural HRIR filter based on stereo.yml; {count} point(s)'
+        new_filters[f'{prefix}_{index}_left']={'type':'Conv','parameters':{'type':'Wav','filename':str(filename),'channel':0}}
+        new_filters[f'{prefix}_{index}_right']={'type':'Conv','parameters':{'type':'Wav','filename':str(filename),'channel':1}}
+    mixers[prefix+'_spread']={'channels':{'in':2,'out':2*count},'mapping':mapping};gain=-20*math.log10(count)
+    mixers[prefix+'_merge']={'channels':{'in':2*count,'out':2},'mapping':[{'dest':ear,'sources':[{'channel':2*i+ear,'gain':gain} for i in range(count)]} for ear in (0,1)]}
+    pipeline.append({'type':'Mixer','name':prefix+'_spread'})
+    for i in range(count):pipeline.extend(({'type':'Filter','channels':[2*i],'names':[f'{prefix}_{i}_left']},{'type':'Filter','channels':[2*i+1],'names':[f'{prefix}_{i}_right']}))
+    pipeline.append({'type':'Mixer','name':prefix+'_merge'});name=path.stem;config['title']=name;config['description']=f'Custom free-field SOFA spatial filter based on stereo.yml; {count} measured point(s), full HRIR timing retained'
     return yaml.safe_dump(config,sort_keys=False)
 
 def commit_profiles(candidates):
