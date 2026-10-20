@@ -48,6 +48,7 @@ HPCFS = (
     },
 )
 SAMPLE_RATE=96000
+JAMESDSP_WAV_CHANNEL_ORDER = ('LL', 'RL', 'LR', 'RR')
 CAMILLA_LIMITED_PLAYBACK_DEVICE='camilladsp_peak_limited'
 CAMILLA_PLAYBACK_FORMAT='F32_LE'
 CAMILLA_ROOT=AUDIO_FILTERS
@@ -234,11 +235,11 @@ def combined_wav_candidates(profile_candidates):
         if not math.isclose(verified,1.0,rel_tol=1e-9,abs_tol=1e-9):
             raise RuntimeError(f'True-stereo normalization verification failed: {verified}')
         exports[relative]={
-            'data':np.column_stack((normalized[0,0],normalized[0,1],normalized[1,0],normalized[1,1])),
+            'data':np.column_stack((normalized[0,0],normalized[1,0],normalized[0,1],normalized[1,1])),
             'matrix':normalized,
             'sourceMatrix':matrix,
             'kind':'true-stereo',
-            'channelOrder':['LL','LR','RL','RR'],
+            'channelOrder':['LL','RL','LR','RR'],
             'originalPeakLinear':original_peak,
             'normalizationGainLinear':gain,
             'validFrequencyLowHz':low,
@@ -264,7 +265,7 @@ def commit_combined_wavs(exports):
             channels=4
             if rate!=SAMPLE_RATE or not np.array_equal(check,data) or check.shape[1]!=channels:
                 raise RuntimeError(f'Combined JamesDSP WAV verification failed: {relative}')
-            restored=np.stack((np.stack((check[:,0],check[:,1])),np.stack((check[:,2],check[:,3]))))
+            restored=np.stack((np.stack((check[:,0],check[:,2])),np.stack((check[:,1],check[:,3]))))
             if not np.array_equal(restored,export['matrix']):
                 raise RuntimeError(f'Written JamesDSP matrix differs from YAML-derived matrix: {relative}')
             response_peak=true_stereo_audible_peak(restored,export['validFrequencyLowHz'],export['validFrequencyHighHz'])
