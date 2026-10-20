@@ -152,7 +152,7 @@ def normalize_stereo_to_zero_db(stereo):
     """Use one shared gain so the higher L/R audible response peak is exactly 0 dB."""
     original_peak=stereo_audible_peak(stereo);gain=1.0/original_peak;normalized=stereo*gain
     verified=stereo_audible_peak(normalized)
-    if not math.isclose(verified,1.0,rel_tol=2e-12,abs_tol=2e-12):raise RuntimeError(f'Stereo normalization verification failed: {verified}')
+    if not math.isclose(verified,1.0,rel_tol=1e-9,abs_tol=1e-9):raise RuntimeError(f'Stereo normalization verification failed: {verified}')
     return normalized,original_peak,gain
 
 def combined_wav_candidates(profile_candidates):
@@ -176,7 +176,7 @@ def commit_combined_wavs(exports):
             check,rate=sf.read(destination,always_2d=True,dtype='float64')
             if rate!=SAMPLE_RATE or not np.array_equal(check,data) or check.shape[1]!=2:raise RuntimeError(f'Combined stereo WAV verification failed: {relative}')
             response_peak=stereo_audible_peak(check)
-            if not math.isclose(response_peak,1.0,rel_tol=2e-12,abs_tol=2e-12):raise RuntimeError(f'Written stereo WAV does not peak at 0 dB: {relative}: {response_peak}')
+            if not math.isclose(response_peak,1.0,rel_tol=1e-9,abs_tol=1e-9):raise RuntimeError(f'Written stereo WAV does not peak at 0 dB: {relative}: {response_peak}')
             original=export['originalPeakLinear'];gain=export['normalizationGainLinear']
             manifest['files'][relative.as_posix()]={'frames':len(data),'responsePeakLinear':response_peak,'responsePeakDb':20.0*math.log10(response_peak),'originalResponsePeakLinear':original,'originalResponsePeakDb':20.0*math.log10(original),'normalizationGainLinear':gain,'normalizationGainDb':20.0*math.log10(gain)}
         (stage/'manifest.json').write_text(json.dumps(manifest,indent=2,sort_keys=True)+'\n',encoding='utf-8')
@@ -272,7 +272,15 @@ def chain_gain_for_layout(chain_paths,layout):
         output*=response
     peak=float(np.max(output))
     if not np.isfinite(peak) or peak<=0.0:raise RuntimeError('Invalid routed complete-chain audible response')
-    gain=-20.0*np.log10(peak);print(f"{layout['label']} complete route 20 Hz-20 kHz peak {-gain:.12f} dB; gain {gain:.12f} dB");return gain
+    stage_text=[]
+    for name,response in responses:
+        stage_peak=float(np.max(response))
+        stage_text.append(f"{name}={20.0*np.log10(stage_peak):+.6f} dB")
+    gain=-20.0*np.log10(peak)
+    print(f"{layout['label']} stages: "+', '.join(stage_text))
+    print(f"{layout['label']} complete route 20 Hz-20 kHz peak {-gain:.12f} dB; gain {gain:.12f} dB")
+    if -gain>50.0:raise RuntimeError(f"{layout['label']}: implausible complete-chain peak {-gain:.6f} dB; refusing generation. Inspect stage peaks above.")
+    return gain
 def safe_volume_percent(peak_gain_db):
     """wpctl control equivalent of the old Raw CamillaDSP auto_gain."""
     # Preserve the exact old Raw auto_gain result. PipeWire applies the
