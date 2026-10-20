@@ -138,24 +138,47 @@ def profile_transfer_matrix(profile_text):
     # Remove only frames that are exactly zero across the entire 2x2 matrix.
     used=np.flatnonzero(np.any(transfer!=0.0,axis=(0,1)))
     return transfer[:,:,:used[-1]+1] if len(used) else transfer[:,:,:1]
+def stereo_audible_peak(stereo):
+    """Highest left/right magnitude from 20 Hz through 20 kHz, including exact edges."""
+    nfft=dense_response_nfft(len(stereo))
+    frequency=np.fft.rfftfreq(nfft,1.0/SAMPLE_RATE);keep=(frequency>=20.0)&(frequency<=20000.0)
+    peak=float(np.max(np.abs(np.fft.rfft(stereo,n=nfft,axis=0)[keep])))
+    kernel=np.exp(-2j*np.pi*np.outer([20.0,20000.0],np.arange(len(stereo)))/SAMPLE_RATE)
+    peak=max(peak,float(np.max(np.abs(kernel@stereo))))
+    if not math.isfinite(peak) or peak<=0.0:raise RuntimeError('Invalid combined stereo FIR response')
+    return peak
+
+def normalize_stereo_to_zero_db(stereo):
+    """Use one shared gain so the higher L/R audible response peak is exactly 0 dB."""
+    original_peak=stereo_audible_peak(stereo);gain=1.0/original_peak;normalized=stereo*gain
+    verified=stereo_audible_peak(normalized)
+    if not math.isclose(verified,1.0,rel_tol=2e-12,abs_tol=2e-12):raise RuntimeError(f'Stereo normalization verification failed: {verified}')
+    return normalized,original_peak,gain
+
 def combined_wav_candidates(profile_candidates):
     exports={}
     for profile_path,profile_text in profile_candidates:
         relative=Path(profile_path).resolve().relative_to(CAMILLA_ROOT.resolve()).with_suffix('.wav')
         matrix=profile_transfer_matrix(profile_text)
-        # Channel order is the complete 2x2 transfer matrix:
-        # Lout<-Lin, Lout<-Rin, Rout<-Lin, Rout<-Rin.
-        exports[relative]=np.column_stack((matrix[0,0],matrix[0,1],matrix[1,0],matrix[1,1]))
+        # Ordinary stereo export: add all paths feeding each CamillaDSP output.
+        # For diagonal profiles this is simply the convolved left/right chain.
+        stereo=np.column_stack((np.sum(matrix[0],axis=0),np.sum(matrix[1],axis=0)))
+        stereo,original_peak,gain=normalize_stereo_to_zero_db(stereo)
+        exports[relative]={'data':stereo,'originalPeakLinear':original_peak,'normalizationGainLinear':gain}
     return exports
+
 def commit_combined_wavs(exports):
     root=COMBINED_FILTER_ROOT.resolve();root.parent.mkdir(parents=True,exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='.combined-wavs-',dir=root.parent) as transaction:
-        stage=Path(transaction)/'filters';stage.mkdir();manifest={'version':1,'sampleRate':SAMPLE_RATE,'channels':['Lout<-Lin','Lout<-Rin','Rout<-Lin','Rout<-Rin'],'normalization':'none','files':{}}
-        for relative,data in sorted(exports.items(),key=lambda item:item[0].as_posix()):
-            destination=stage/relative;destination.parent.mkdir(parents=True,exist_ok=True);sf.write(destination,data,SAMPLE_RATE,subtype='DOUBLE')
+        stage=Path(transaction)/'filters';stage.mkdir();manifest={'version':2,'sampleRate':SAMPLE_RATE,'channels':['left','right'],'normalization':'one shared gain to 0 dB highest L/R response from 20 Hz through 20 kHz','files':{}}
+        for relative,export in sorted(exports.items(),key=lambda item:item[0].as_posix()):
+            data=export['data'];destination=stage/relative;destination.parent.mkdir(parents=True,exist_ok=True);sf.write(destination,data,SAMPLE_RATE,subtype='DOUBLE')
             check,rate=sf.read(destination,always_2d=True,dtype='float64')
-            if rate!=SAMPLE_RATE or not np.array_equal(check,data):raise RuntimeError(f'Combined WAV verification failed: {relative}')
-            peak=float(np.max(np.abs(data)));manifest['files'][relative.as_posix()]={'frames':len(data),'peakLinear':peak,'peakDb':20.0*math.log10(peak) if peak>0 else None}
+            if rate!=SAMPLE_RATE or not np.array_equal(check,data) or check.shape[1]!=2:raise RuntimeError(f'Combined stereo WAV verification failed: {relative}')
+            response_peak=stereo_audible_peak(check)
+            if not math.isclose(response_peak,1.0,rel_tol=2e-12,abs_tol=2e-12):raise RuntimeError(f'Written stereo WAV does not peak at 0 dB: {relative}: {response_peak}')
+            original=export['originalPeakLinear'];gain=export['normalizationGainLinear']
+            manifest['files'][relative.as_posix()]={'frames':len(data),'responsePeakLinear':response_peak,'responsePeakDb':20.0*math.log10(response_peak),'originalResponsePeakLinear':original,'originalResponsePeakDb':20.0*math.log10(original),'normalizationGainLinear':gain,'normalizationGainDb':20.0*math.log10(gain)}
         (stage/'manifest.json').write_text(json.dumps(manifest,indent=2,sort_keys=True)+'\n',encoding='utf-8')
         backup=Path(transaction)/'previous'
         try:
@@ -166,6 +189,7 @@ def commit_combined_wavs(exports):
             if backup.exists():backup.rename(root)
             raise
     return root
+
 
 def devices_text(playback_device):
     return f'''devices:
@@ -463,7 +487,7 @@ def rebuild_all_filters(all_measurements=False):
         print(f'{"Replaced existing" if path in existed else "Created"}: {path}')
         match=re.search(r'(?m)^# safe-volume-percent: ([0-9]+(?:\.[0-9]+)?)$',text)
         if match:print(f"{path.name}: safe master {float(match.group(1)):.6f}% before limiter activity")
-    print(f'Exported {len(exports)} exact unnormalized 2x2 FIR WAV matrices to {combined_root}')
+    print(f'Exported {len(exports)} 0 dB-normalized stereo FIR WAVs to {combined_root}')
     print(f'Using {len(devices)} anechoic HpCF devices; verified {len(candidates)} CamillaDSP YAML profiles in {CAMILLA_ROOT}; {len(changed)} created, {len(removed)} obsolete YAMLs removed, {len(removed_dirs)} unconfigured device directories removed')
 TERMINALS=(('foot','-T','Manage Audio Device'),('kitty','--title','Manage Audio Device'),('alacritty','--title','Manage Audio Device','-e'))
 def row(number,label):
