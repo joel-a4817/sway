@@ -176,4 +176,4 @@
 
 ### SOFA-backed custom spatial filters
 
-Custom Spatial Filter reads coordinates directly from `~/Documents/prefs/audio/H5/H5_HRIR_SOFA/H5_96K_24bit_512tap_FIR_SOFA.sofa`. It accepts only a 96 kHz `SimpleFreeFieldHRIR` dataset marked `free field`, extracts only selected measured coordinates into each profile's private `.assets` directory, preserves all supplied HRIR samples and embedded timing, applies `Data.Delay` when nonzero, and adds no room or reverberation stage. The existing updater still rebuilds the complete custom profile and its Safe max metadata.
+Custom Spatial Filter reads P0082 free-field-compensated minimum-phase-compensation coordinates directly from `~/Documents/prefs/audio/P0082/HRTF/HRTF/96kHz/P0082_FreeFieldCompMinPhase_96kHz.sofa`. It accepts only a 96 kHz `SimpleFreeFieldHRIR` dataset marked `free field`, extracts only selected measured coordinates into each profile's private `.assets` directory, preserves all supplied HRIR samples and embedded timing, applies `Data.Delay` when nonzero, and adds no room or reverberation stage. The existing updater still rebuilds the complete custom profile and its Safe max metadata.
