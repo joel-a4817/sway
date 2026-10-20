@@ -463,7 +463,7 @@ def commit_profiles(candidates):
         if match:
             key=profile_path.relative_to(root).as_posix()
             safe_index[key]={'percent':float(match.group(1)),'peakDb':float(peak.group(1)) if peak else 0.0}
-    index_path=root/'.safe-volume.json';index_temp=root/'.safe-volume.json.new';previous_index=index_path.read_bytes() if index_path.is_file() else None
+    index_path=root/'safe-volume.json';index_temp=root/'safe-volume.json.new';previous_index=index_path.read_bytes() if index_path.is_file() else None
     try:
         index_temp.write_text(json.dumps({'version':1,'profiles':safe_index},indent=2,sort_keys=True)+'\n',encoding='utf-8')
         index_temp.replace(index_path)

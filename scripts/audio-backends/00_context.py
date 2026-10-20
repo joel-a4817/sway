@@ -18,7 +18,7 @@ SONOSET=HOME/'.config/sonobus/SonoBus.settings'; EXTS={'.m4a','.aac','.mp3','.fl
 CAMPID=STATE/'camilladsp.pid'; ACTIVE=STATE/'active-profile'; SERVERPID=STATE/'web-server.pid'
 NO_FILTER='__no_filter__'; BYPASSPID=STATE/'no-filter-bridge.pid'
 MPVPID=STATE/'mpv.pid'; MPVSOCK=STATE/'mpv.sock'; MPVLOG=STATE/'mpv.log'; MODE=STATE/'mode'
-MASTER_VOLUME=SWITCH_STATE/'master-volume'; MPV_GAIN=SWITCH_STATE/'mpv-gain'; SAFE_VOLUME_INDEX=PROFILES/'.safe-volume.json'; CAM_WS_PORT=8767
+MASTER_VOLUME=SWITCH_STATE/'master-volume'; MPV_GAIN=SWITCH_STATE/'mpv-gain'; SAFE_VOLUME_INDEX=PROFILES/'safe-volume.json'; CAM_WS_PORT=8767
 QUEUE_FILE=STATE/'mpv-queue.json'; QUEUE_SOURCE=STATE/'mpv-queue-source.json'; RESTORE_LIST=STATE/'mpv-restore.m3u'; PLAYLIST_COVERS=STATE/'playlist-last-played.json'
 QUEUE_SAVE_LOCK=threading.RLock(); LAST_QUEUE_WRITE=0.0; LAST_QUEUE_DATA=None; LAST_QUEUE_RAW=None
 LOCK=threading.RLock(); MEDIA_TRANSACTION=threading.local(); PLAYERLOCK=threading.RLock(); MPRISLOCK=threading.RLock(); LAST_MPRIS=None
