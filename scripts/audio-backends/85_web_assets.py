@@ -1323,9 +1323,9 @@ body {
    <section class="hidden" id="custom-filter-page">
     <div class="header"><button class="back" data-back="listening-page">Back</button><h1>Custom Spatial Filter</h1><div></div></div>
     <div class="card"><div class="label">Device</div><select id="custom-device"></select><div class="label" style="margin-top:14px">Filter name</div><input id="custom-name" placeholder="My spatial filter"/></div>
-    <div class="section-title">HRIR points</div><div id="custom-hrir-list"></div>
+    <div class="section-title">Measured SOFA points</div><div id="custom-sofa-list"></div>
     <div class="custom-ranges" id="custom-ranges"></div>
-    <div class="grid two custom-actions"><button class="action" id="add-custom-hrir">Add HRIR</button><button class="action primary" id="review-custom-filter">Add filter</button></div><div class="spatial-visual"><canvas id="custom-sphere" width="720" height="500" aria-label="Spatial HRIR point visualization"></canvas><div class="spatial-caption">Live spatial preview • front is at the center, rear points wrap behind the sphere</div></div>
+    <div class="grid two custom-actions"><button class="action" id="add-custom-sofa-point">Add SOFA point</button><button class="action primary" id="review-custom-filter">Create filter</button></div><div class="spatial-visual"><canvas id="custom-sphere" width="720" height="500" aria-label="Spatial SOFA point visualization"></canvas><div class="spatial-caption">Live spatial preview • front is at the center, rear points wrap behind the sphere</div></div>
     <dialog class="mode-dialog" id="custom-mode-dialog"><h2>Select filter mode</h2><div id="custom-mode-options"></div><div class="mode-dialog-menu"><button class="action" id="cancel-custom-mode">Cancel</button><button class="action primary" id="apply-custom-filter">Apply</button></div></dialog>
    </section>
    <section class="hidden" id="pc">
@@ -1987,7 +1987,7 @@ async function refreshStatic(){if(staticRefreshRunning)return;staticRefreshRunni
 async function refreshVolatile(){if(volatileRefreshRunning||document.hidden)return;volatileRefreshRunning=true;try{renderVolatile(await api('/api/volatile'));}catch(error){console.warn('volatile refresh failed',error)}finally{volatileRefreshRunning=false}}
 
 let customSchema=null,customRowCount=0;
-function customHrirRow(){
+function customSofaPointRow(){
   const row=document.createElement('div');row.className='custom-hrir-row';row.dataset.row=String(++customRowCount);
   row.innerHTML='<div class="custom-fields"><label>Azimuth<input inputmode="text" data-field="azimuth" placeholder="20.5"></label><label>Elevation<input inputmode="text" data-field="elevation" placeholder="-15"></label><label>Audio at this point<select data-field="source"><option value="" selected disabled>Select audio source…</option><option value="average">Average left + right</option><option value="left">Left only</option><option value="right">Right only</option><option value="stereo">Stereo L→L, R→R</option><option value="swap">Stereo L→R, R→L</option></select></label><button class="action" type="button">Remove HRIR</button></div>';
   row.querySelector('button').onclick=()=>{if(document.querySelectorAll('.custom-hrir-row').length>1){row.remove();drawCustomSphere()}else note('At least one HRIR is required',true)};row.querySelectorAll('input,select').forEach(control=>control.addEventListener('input',drawCustomSphere));return row
@@ -1995,7 +1995,7 @@ function customHrirRow(){
 async function openCustomFilterPage(){
   customSchema=await api('/api/custom-filter/schema');if(!customSchema.devices.length)throw new Error('No compatible device baselines found');
   const select=$('#custom-device');select.replaceChildren(selectPrompt('Select device…'),...customSchema.devices.map(d=>new Option(d.label,d.id)));select.value='';$('#custom-name').value='';
-  const list=$('#custom-hrir-list');list.replaceChildren(customHrirRow());drawCustomSphere();$('#custom-ranges').textContent=`Available ranges • azimuth ${customSchema.azimuth.min} to ${customSchema.azimuth.max} • elevation ${customSchema.elevation.min} to ${customSchema.elevation.max}. Enter each coordinate as one decimal number. Filename 20,5 is entered as 20.5.`;show('custom-filter-page')
+  const list=$('#custom-sofa-list');list.replaceChildren(customSofaPointRow());drawCustomSphere();$('#custom-ranges').textContent=`Available ranges • azimuth ${customSchema.azimuth.min} to ${customSchema.azimuth.max} • elevation ${customSchema.elevation.min} to ${customSchema.elevation.max}. Enter each coordinate as one decimal number. Filename 20,5 is entered as 20.5.`;show('custom-filter-page')
 }
 function customPoints(){return [...document.querySelectorAll('.custom-hrir-row')].map(row=>Object.fromEntries([...row.querySelectorAll('[data-field]')].map(input=>[input.dataset.field,input.value.trim()]))) }
 function customDecimal(value){const text=String(value).trim().replace(',','.');return /^-?\d+(?:\.\d+)?$/.test(text)?Number(text):NaN}
@@ -2010,7 +2010,7 @@ function drawCustomSphere(){
   ctx.font='12px sans-serif';ctx.textAlign='left';let lx=24;for(const [name,color] of Object.entries(colors)){ctx.fillStyle=color;ctx.beginPath();ctx.arc(lx,h-20,5,0,Math.PI*2);ctx.fill();ctx.fillStyle='#c8c2d4';ctx.fillText(name,lx+10,h-16);lx+=105}
 }
 $('#open-custom-filter').onclick=()=>openCustomFilterPage().catch(error=>note(error.message,true));
-$('#add-custom-hrir').onclick=()=>{const status=validateCustomPoints();if(!status.valid)return note(status.message,true);$('#custom-hrir-list').append(customHrirRow());drawCustomSphere()};
+$('#add-custom-sofa-point').onclick=()=>{const status=validateCustomPoints();if(!status.valid)return note(status.message,true);$('#custom-sofa-list').append(customSofaPointRow());drawCustomSphere()};
 $('#review-custom-filter').onclick=()=>{const device=customSchema.devices.find(d=>d.id===$('#custom-device').value);if(!device||!$('#custom-name').value.trim())return note('Choose a device and enter a filter name',true);const pointStatus=validateCustomPoints();if(!pointStatus.valid)return note(pointStatus.message,true);const options=$('#custom-mode-options');options.replaceChildren(...device.modes.map(mode=>{const label=document.createElement('label');label.className='mode-choice';label.innerHTML=`<input type="radio" name="custom-mode" value="${mode}" > ${mode[0].toUpperCase()+mode.slice(1)}`;return label}));$('#custom-mode-dialog').showModal()};
 $('#cancel-custom-mode').onclick=()=>$('#custom-mode-dialog').close();
 $('#apply-custom-filter').onclick=async()=>{try{const mode=document.querySelector('input[name="custom-mode"]:checked')?.value;if(!mode)throw new Error('Select a mode');const result=await post('/api/custom-filter/create',{device:$('#custom-device').value,name:$('#custom-name').value.trim(),mode,points:customPoints()});$('#custom-mode-dialog').close();note('Created '+result.profile);show('listening-page');await openFilterDirectory($('#custom-device').value+'/custom')}catch(error){if(error.message.startsWith('Custom filter already exists:')){$('#custom-mode-dialog').close();note('That name already exists for this device. Enter another name.',true);$('#custom-name').focus();$('#custom-name').select();return}note(error.message,true)}};
