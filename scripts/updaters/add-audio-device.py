@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Manage limiter-backed SONICOM P0082 profiles and their safe master-volume limits."""
+"""Manage limiter-backed SONICOM P0135 profiles and their safe master-volume limits."""
 import ast, math, re, os, json, shutil, subprocess, sys, tempfile, termios, textwrap, tty
 from datetime import datetime
 from pathlib import Path
@@ -26,8 +26,8 @@ SCRIPT_DIR=CONTEXT_PATHS['UPDATERS']
 CONFIG_SCRIPT=Path(__file__).resolve()
 BACKUP_DIR=CONTEXT_PATHS['AUDIO_DEVICE_BACKUPS']
 HPCF_ANECHOIC=AUDIO_ROOT/'b&k 5128 hpcfs'
-COMPENSATION_WAV=AUDIO_ROOT/'other/Sennheiser HD650 - B&K 5128 to SONICOM P0082 Approximate Compensation.wav'
-SOFA_AVERAGE_WAV=AUDIO_ROOT/'other/P0082_Open_Sphere_Timed.wav'
+COMPENSATION_WAV=AUDIO_ROOT/'other/Sennheiser HD650 - B&K 5128 to SONICOM P0135 Approximate Compensation.wav'
+SOFA_AVERAGE_WAV=AUDIO_ROOT/'other/P0135_Open_Sphere_Timed.wav'
 MEASUREMENTS_DIR=AUDIO_ROOT/'measurements'
 COMBINED_FILTER_ROOT=HOME/'Downloads-S5/filters'
 HPCFS = (

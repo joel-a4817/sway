@@ -1,6 +1,6 @@
 # Shared custom binaural filter builder using measured points directly from SOFA.
 import yaml
-SOFA_PATH=HOME/'Documents/prefs/audio/P0082/HRTF/HRTF/96kHz/P0082_FreeFieldCompMinPhase_96kHz.sofa'
+SOFA_PATH=HOME/'Documents/prefs/audio/P0135/HRTF/HRTF/96kHz/P0135_FreeFieldCompMinPhase_96kHz.sofa'
 CUSTOM_FILTER_LOCK=HOME/'.local/state/sway/custom-audio-filter.lock'
 SOFA_SAMPLE_RATE=96000
 
