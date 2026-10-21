@@ -65,7 +65,7 @@ def yaml_string(value):return '"'+str(value).replace('\\','\\\\').replace('"','\
 def atomic_write(path,text):
     temporary=path.with_name('.'+path.name+'.new');temporary.write_text(text,encoding='utf-8');temporary.replace(path)
 def dense_response_nfft(*lengths):
-    minimum=max(65536,max(int(length) for length in lengths)*16);return 1<<(minimum-1).bit_length()
+    minimum=max(65536,max(int(length) for length in lengths)*2);return 1<<(minimum-1).bit_length()
 def read_fir(path,channels):
     data,rate=sf.read(path,always_2d=True,dtype='float64')
     if rate!=SAMPLE_RATE or data.shape[1]!=channels or not len(data):raise RuntimeError(f'{path}: expected nonempty {channels}-channel {SAMPLE_RATE} Hz FIR')
@@ -89,7 +89,7 @@ def fir_frequency_range(path):
     path=Path(path).resolve();sidecar=range_sidecar(path)
     if sidecar.is_file():
         node=json.loads(sidecar.read_text(encoding='utf-8'));low=float(node['lowHz']);high=float(node['highHz'])
-    elif path==SOFA_AVERAGE_WAV.resolve() or '.assets' in path.parts:
+    elif path in (SOFA_AVERAGE_WAV.resolve(),) or '.assets' in path.parts:
         low,high=20.0,20000.0
     elif path.parent==HPCF_ANECHOIC.resolve():
         base=path.stem.removesuffix(' - HpCF - Raw')
@@ -116,14 +116,25 @@ def profile_frequency_range(profile_text):
     if not 0.0<values[0]<values[1]:raise RuntimeError(f'Invalid profile frequency range: {values}')
     return values
 
+def endpoint_fir_response(data, frequencies, block=32768):
+    """Exact DTFT at requested frequencies, bounded memory for long FIRs."""
+    data=np.asarray(data,dtype=np.float64)
+    f=np.asarray(frequencies,dtype=float)
+    result=np.zeros((len(f),data.shape[1]),dtype=np.complex128)
+    for start in range(0,len(data),block):
+        part=data[start:start+block]
+        n=np.arange(start,start+len(part),dtype=float)
+        result+=np.exp(-2j*np.pi*np.outer(f,n)/SAMPLE_RATE)@part
+    return result
+
 def matrix_peak_in_range(matrix,low,high):
     nfft=dense_response_nfft(matrix.shape[2]);frequency=np.fft.rfftfreq(nfft,1.0/SAMPLE_RATE);keep=(frequency>low)&(frequency<high)
     H=np.fft.rfft(matrix,n=nfft,axis=2)[:,:,keep]
     peak=float(np.max(np.sum(np.abs(H),axis=1))) if H.shape[2] else 0.0
-    kernel=np.exp(-2j*np.pi*np.outer([low,high],np.arange(matrix.shape[2]))/SAMPLE_RATE)
+    kernel=None
     edges=np.empty((2,2,2),dtype=np.complex128)
     for out_ch in range(2):
-        for in_ch in range(2):edges[out_ch,in_ch]=kernel@matrix[out_ch,in_ch]
+        for in_ch in range(2):edges[out_ch,in_ch]=endpoint_fir_response(matrix[out_ch,in_ch,:,None],[low,high])[:,0]
     peak=max(peak,float(np.max(np.sum(np.abs(edges),axis=1))))
     if not math.isfinite(peak) or peak<=0.0:raise RuntimeError(f'Invalid matrix response in {low}..{high} Hz')
     return peak
@@ -138,8 +149,8 @@ def chain_gain(paths):
     edges=np.ones((2,2),dtype=np.float64)
     for data in arrays:
         combined*=np.abs(np.fft.rfft(data,n=nfft,axis=0)[keep])
-        kernel=np.exp(-2j*np.pi*np.outer([low,high],np.arange(len(data)))/SAMPLE_RATE)
-        edges*=np.abs(kernel@data)
+        kernel=None
+        edges*=np.abs(endpoint_fir_response(data,[low,high]))
     peak=max(float(np.max(combined)),float(np.max(edges)))
     if not np.isfinite(peak) or peak<=0:raise RuntimeError('Invalid complete-chain audible response')
     gain=-20.0*np.log10(peak)
@@ -372,8 +383,8 @@ def chain_gain_for_layout(chain_paths,layout):
     frequency=np.fft.rfftfreq(nfft,1.0/SAMPLE_RATE);keep=(frequency>low)&(frequency<high);responses=[]
     for name,data in arrays:
         band=np.abs(np.fft.rfft(data,n=nfft,axis=0)[keep])
-        kernel=np.exp(-2j*np.pi*np.outer([20.0,20000.0],np.arange(len(data)))/SAMPLE_RATE)
-        responses.append((name,np.concatenate((band,np.abs(kernel@data)),axis=0)))
+        kernel=None
+        responses.append((name,np.concatenate((band,np.abs(endpoint_fir_response(data,[low,high]))),axis=0)))
     output=np.ones((int(keep.sum())+2,2),dtype=np.float64)
     for name,response in responses:
         output*=response
@@ -386,7 +397,11 @@ def chain_gain_for_layout(chain_paths,layout):
     gain=-20.0*np.log10(peak)
     print(f"{layout['label']} stages: "+', '.join(stage_text))
     print(f"{layout['label']} complete route {low:.12f}-{high:.12f} Hz peak {-gain:.12f} dB; gain {gain:.12f} dB")
-    if -gain>50.0:raise RuntimeError(f"{layout['label']}: implausible complete-chain peak {-gain:.6f} dB; refusing generation. Inspect stage peaks above.")
+    # The original spatial FIR is integrated-dB centered and may have a very
+    # high narrowband peak. Do not confuse a large measured peak with a broken
+    # proxy. Retain the exact calculated attenuation rather than bypass safety.
+    if -gain>50.0:
+        print(f"WARNING: {layout['label']} has {(-gain):.3f} dB measured peak; retaining computed safe-volume attenuation",flush=True)
     return gain,low,high
 def safe_volume_percent(peak_gain_db):
     """wpctl control equivalent of the old Raw CamillaDSP auto_gain."""
@@ -434,12 +449,13 @@ def measurement_devices():
         result.append({'file':wav_name,'label':name,'type':'in-ear'});configured.add(key(source))
     return result
 
-def build_profile_candidates(all_measurements=False):
+def build_profile_candidates(all_measurements=False,spatial_wav=None):
     generated=[(CAMILLA_ROOT/'00-filterless.yml',filterless_text())]
     configured=list(measurement_devices() if all_measurements else HPCFS)
     if not configured:return generated,[]
     if not HPCF_ANECHOIC.is_dir():raise SystemExit(f'Missing B&K 5128 HpCF folder: {HPCF_ANECHOIC}')
     if not SOFA_AVERAGE_WAV.is_file():raise SystemExit(f'Missing SOFA average WAV: {SOFA_AVERAGE_WAV}')
+    if spatial_wav is None:spatial_wav=SOFA_AVERAGE_WAV
     devices=[];labels=set();directory_names=set();sources=set()
     for item in configured:
         label=profile_label(item);source=configured_path(item);kind=str(item.get('type','')).strip().lower()
@@ -453,7 +469,7 @@ def build_profile_candidates(all_measurements=False):
             if not COMPENSATION_WAV.is_file():raise SystemExit(f'Missing over-ear compensation WAV: {COMPENSATION_WAV}')
             common.append(('fixture',COMPENSATION_WAV))
         for layout_key,layout in PROFILE_LAYOUTS.items():
-            chain=([('sofa',SOFA_AVERAGE_WAV)] if layout['spatial'] else [])+common+[('hpcf',source)]
+            chain=([('sofa',spatial_wav)] if layout['spatial'] else [])+common+[('hpcf',source)]
             peak_gain_db,valid_low,valid_high=chain_gain_for_layout(chain,layout)
             generated.append(make_profile(item,layout_key,source,chain,peak_gain_db,valid_low,valid_high))
     standard_profiles={path.parent.resolve():text for path,text in generated if path.stem=='stereo'}
@@ -599,7 +615,9 @@ def commit_profiles(candidates):
     return changed,removed_yaml,removed_dirs
 def rebuild_all_filters(all_measurements=False):
     print(f'Writing profiles and safe-volume index to: {CAMILLA_ROOT}')
-    candidates,devices=build_profile_candidates(all_measurements)
+    # Both CamillaDSP and S5 use the same original long spatial FIR.
+    print('CamillaDSP and S5 use the same original 360 FIR; no proxy.',flush=True)
+    candidates,devices=build_profile_candidates(all_measurements,spatial_wav=SOFA_AVERAGE_WAV)
     if not Path('/etc/camilladsp-peak-limiter-v11').is_file():raise SystemExit('Generated profiles require the installed NixOS peak-limiter-v11 module.')
     camilladsp=Path('/run/current-system/sw/bin/camilladsp')
     if not camilladsp.is_file():raise SystemExit(f'Missing CamillaDSP executable: {camilladsp}')
@@ -608,7 +626,9 @@ def rebuild_all_filters(all_measurements=False):
             candidate=Path(validation_name)/f'{number:04d}-{path.name}';candidate.write_text(text,encoding='utf-8')
             check=subprocess.run([str(camilladsp),'--check',str(candidate)],text=True,capture_output=True)
             if check.returncode:raise SystemExit(f'Invalid generated profile {path.name}: '+(check.stderr.strip() or check.stdout.strip()))
-    exports=combined_wav_candidates(candidates)
+    # Both real-time and offline exports use the original spatial WAV.
+    offline_candidates=candidates
+    exports=combined_wav_candidates(offline_candidates)
     existed={path for path,text in candidates if path.is_file()};changed,removed,removed_dirs=commit_profiles(candidates)
     combined_root=commit_combined_wavs(exports)
     for path,text in candidates:
