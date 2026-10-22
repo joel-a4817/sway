@@ -10,8 +10,10 @@ def safe_volume_state():
         row=(data.get('profiles') or {}).get(key)
         if not isinstance(row,dict):raise KeyError(key)
         percent=float(row['percent']);peak=float(row.get('peakDb',0.0))
+        match=re.search(r'(?m)^# integral-center-gain-db: (-?[0-9]+(?:\.[0-9]+)?)$',path.read_text(encoding='utf-8'))
+        integral=float(match.group(1)) if match else float(row.get('integralCenterGainDb',0.0))
         if not math.isfinite(percent) or not 0<percent<=100:raise ValueError('Invalid safe point')
-        return {'available':True,'percent':percent,'peakDb':peak,'profile':key}
+        return {'available':True,'percent':percent,'peakDb':peak,'integralCenterGainDb':integral,'profile':key}
     except (OSError,ValueError,TypeError,KeyError,RuntimeError,json.JSONDecodeError):
         return {'available':False,'reason':'No safe point'}
 

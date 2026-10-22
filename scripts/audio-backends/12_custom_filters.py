@@ -141,7 +141,6 @@ def create_custom_filter(request):
     pipeline.append({'type':'Mixer','name':'custom_sofa_merge'});config['title']=name;config['description']=f'Custom free-field SOFA spatial filter based on stereo.yml; {count} measured point(s), full HRIR timing retained'
     import runpy
     updater=runpy.run_path(str(ADD_AUDIO_DEVICE),run_name='audio_device_helpers');baseline_map={device.resolve():baseline.read_text(encoding='utf-8')}
-    config=yaml.safe_load(updater['rebuild_custom_profile'](target,yaml.safe_dump(config,sort_keys=False),baseline_map))
     CUSTOM_FILTER_LOCK.parent.mkdir(parents=True,exist_ok=True)
     with CUSTOM_FILTER_LOCK.open('a+') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
@@ -149,7 +148,36 @@ def create_custom_filter(request):
         custom.mkdir(parents=True,exist_ok=True)
         try:
             for i,(index,source,az,el) in enumerate(points):_write_sofa_point(assets/f'point-{i:03d}-az-{az}-el-{el}.wav',index,ir,rate,delay)
-            temp=target.with_name('.'+target.name+'.new');temp.write_text(yaml.safe_dump(config,sort_keys=False),encoding='utf-8');temp.replace(target)
+            # Rebase only AFTER measured point assets exist. Preserve the safe
+            # volume and integral-normalization metadata comments verbatim.
+            rebuilt=updater['rebuild_custom_profile'](target,yaml.safe_dump(config,sort_keys=False),baseline_map)
+            # Publish the safe-max entry alongside the newly created custom YAML.
+            safe_match=re.search(r'(?m)^# safe-volume-percent: ([0-9]+(?:\.[0-9]+)?)$',rebuilt)
+            peak_match=re.search(r'(?m)^# peak-db: (-?[0-9]+(?:\.[0-9]+)?)$',rebuilt)
+            if not (safe_match and peak_match):raise RuntimeError('Missing custom safe-volume metadata')
+            index_file=PROFILES/'safe-volume.json'
+            index=json.loads(index_file.read_text(encoding='utf-8')) if index_file.is_file() else {'version':1,'profiles':{}}
+            if not isinstance(index,dict) or not isinstance(index.get('profiles'),dict):
+                raise RuntimeError('Invalid safe-volume index')
+            integral_match=re.search(r'(?m)^# integral-center-gain-db: (-?[0-9]+(?:\.[0-9]+)?)$',rebuilt)
+            index['profiles'][_filter_relative(target)]={'percent':float(safe_match.group(1)),
+                'peakDb':float(peak_match.group(1)),
+                'integralCenterGainDb':float(integral_match.group(1)) if integral_match else 0.0}
+            # Prepare both files before committing, and roll back if index update fails.
+            temp=target.with_name('.'+target.name+'.new')
+            index_temp=index_file.with_name('.safe-volume.json.new')
+            original_index=index_file.read_bytes() if index_file.is_file() else None
+            try:
+                temp.write_text(rebuilt,encoding='utf-8')
+                index_temp.write_text(json.dumps(index,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+                temp.replace(target)
+                index_temp.replace(index_file)
+            except BaseException:
+                temp.unlink(missing_ok=True);index_temp.unlink(missing_ok=True)
+                target.unlink(missing_ok=True)
+                if original_index is None:index_file.unlink(missing_ok=True)
+                else:index_file.write_bytes(original_index)
+                raise
         except BaseException:
             shutil.rmtree(assets,ignore_errors=True);raise
     with CACHELOCK:CACHE['profiles']=(0.0,[])

@@ -231,6 +231,69 @@ def _jamesdsp_export_kind(relative_yaml):
 def true_stereo_audible_peak(matrix,low=20.0,high=20000.0):
     return matrix_peak_in_range(matrix,low,high)
 
+def logarithmic_signed_db_area(matrix,low,high):
+    """Signed log-frequency area of the worst-case stereo output magnitude.
+
+    Uses the complete 2x2 complex transfer matrix. At each frequency the
+    largest absolute row sum bounds arbitrary input channel phases. The
+    shared dB correction makes positive and negative *signed areas* equal.
+    """
+    if not (0.0 < low < high <= SAMPLE_RATE/2):
+        raise RuntimeError('Invalid integration band')
+    nfft=dense_response_nfft(matrix.shape[2])
+    freq=np.fft.rfftfreq(nfft,1/SAMPLE_RATE)
+    mask=(freq>low)&(freq<high)
+    selected=np.concatenate(([low],freq[mask],[high]))
+    response=np.fft.rfft(matrix,n=nfft,axis=2)
+    magnitude=np.max(np.sum(np.abs(response[:,:,mask]),axis=1),axis=0)
+    edge=np.empty((2,2,2),dtype=np.complex128)
+    for out_ch in range(2):
+        for in_ch in range(2):
+            edge[out_ch,in_ch]=endpoint_fir_response(matrix[out_ch,in_ch,:,None],[low,high])[:,0]
+    edge_magnitude=np.max(np.sum(np.abs(edge),axis=1),axis=0)
+    magnitude=np.concatenate(([edge_magnitude[0]],magnitude,[edge_magnitude[1]]))
+    if not np.isfinite(magnitude).all() or np.any(magnitude<=0):
+        raise RuntimeError('Complete matrix has zero or invalid response within integration band')
+    x=np.log(selected)
+    db=20*np.log10(magnitude)
+    mean_db=float(np.trapezoid(db,x)/(x[-1]-x[0])) if hasattr(np,'trapezoid') else float(np.trapz(db,x)/(x[-1]-x[0]))
+    return mean_db
+
+
+def center_camilla_profile(path,text):
+    """Apply one common gain after all routing; keep source WAVs unchanged."""
+    low,high=profile_frequency_range(text)
+    config=yaml.safe_load(text)
+    matrix=profile_transfer_matrix(text)
+    offset=-logarithmic_signed_db_area(matrix,low,high)
+    if not math.isfinite(offset):raise RuntimeError(f'{path}: invalid integral gain')
+    # Mixer gain avoids modifying source WAVs and preserves stereo crossfeeds.
+    if abs(offset)>1e-10:
+        mixers=config.setdefault('mixers',{})
+        name='camilla_integral_center'
+        if name in mixers:raise RuntimeError(f'{path}: reserved mixer name already exists')
+        mixers[name]={'channels':{'in':2,'out':2},'mapping':[
+            {'dest':i,'sources':[{'channel':i,'gain':float(offset)}]} for i in range(2)]}
+        config.setdefault('pipeline',[]).append({'type':'Mixer','name':name})
+    centered=yaml.safe_dump(config,sort_keys=False)
+    actual=profile_transfer_matrix(centered)
+    residue=logarithmic_signed_db_area(actual,low,high)
+    if abs(residue)>2e-7:raise RuntimeError(f'{path}: integral normalization residual {residue} dB')
+    peak=true_stereo_audible_peak(actual,low,high)
+    peak_db=20*math.log10(peak)
+    safe=safe_volume_percent(-peak_db)
+    if (safe/100)**3*peak>1+1e-8:
+        raise RuntimeError(f'{path}: unsafe calculated master volume')
+    header=(f'# safe-volume-percent: {safe:.6f}\n'
+            f'# peak-db: {peak_db:.12f}\n'
+            f'# valid-frequency-low-hz: {low:.12f}\n'
+            f'# valid-frequency-high-hz: {high:.12f}\n'
+            f'# integral-center-gain-db: {offset:.12f}\n'
+            f'# signed-log-frequency-db-area-residual: {residue:.12f}\n---\n')
+    print(f'{path.name}: integral gain {offset:+.6f} dB, peak {peak_db:+.6f} dB, safe {safe:.6f}%')
+    return header+centered
+
+
 def jamesdsp_target_peak_db(relative_yaml):
     """All six standard and all custom S5/JamesDSP exports target +15 dB."""
     return 15.0
@@ -521,6 +584,8 @@ def build_profile_candidates(all_measurements=False,spatial_wav=None):
                 raise RuntimeError(f'{profile_path}: computed safe volume exceeds 0 dBFS response limit')
             print(f'{layout["label"]}: exact 2x2 matrix peak {exact_peak_db:+.9f} dB; safe wpctl {actual_safe:.6f}%')
             generated.append((profile_path,profile_text))
+    generated=[(path,center_camilla_profile(path,text)) if path.name!='00-filterless.yml' else (path,text)
+               for path,text in generated]
     standard_profiles={path.parent.resolve():text for path,text in generated if path.stem=='stereo'}
     rebuilt_custom=[]
     for item,_source in devices:
@@ -538,6 +603,12 @@ def rebuild_custom_profile(path,text,standard_profiles):
     if baseline_text is None:raise RuntimeError(f'{path}: newly generated stereo.yml baseline is unavailable')
     config=yaml.safe_load(baseline_text)
     if not isinstance(config,dict):raise RuntimeError(f'{path}: generated baseline is not a YAML object')
+    # Custom chain is different from the standard baseline; remove its
+    # baseline-only normalization before appending custom convolutions.
+    if 'camilla_integral_center' in config.get('mixers',{}):
+        del config['mixers']['camilla_integral_center']
+        config['pipeline']=[stage for stage in config.get('pipeline',[])
+                            if not (stage.get('type')=='Mixer' and stage.get('name')=='camilla_integral_center')]
     filters=current.get('filters') or {};mixers_current=current.get('mixers') or {};sofa_custom='custom_sofa_spread' in mixers_current;prefix='custom_sofa' if sofa_custom else 'custom_hrir';spread=((mixers_current.get(prefix+'_spread') or {}).get('mapping'))
     if not isinstance(spread,list) or len(spread)%2:raise RuntimeError(f'{path}: custom HRIR spread mapping is invalid')
     count=len(spread)//2
@@ -577,16 +648,10 @@ def rebuild_custom_profile(path,text,standard_profiles):
     point_low,point_high=intersect_frequency_ranges([filename for filename,_source in points])
     valid_low=max(baseline_low,point_low);valid_high=min(baseline_high,point_high)
     if not valid_low<valid_high:raise RuntimeError(f'{path}: custom profile has no shared frequency range')
-    matrix=profile_transfer_matrix(dumped)
-    peak=true_stereo_audible_peak(matrix,valid_low,valid_high)
-    peak_db=20.0*math.log10(peak)
-    if peak_db>50.0:
-        raise RuntimeError(f'{path}: implausible complete custom-chain peak {peak_db:.6f} dB')
-    gain_db=-peak_db
-    safe=safe_volume_percent(gain_db)
-    if (safe/100.0)**3*peak>1.0+1e-10:
-        raise RuntimeError(f'{path}: custom safe volume exceeds 0 dBFS matrix response limit')
-    return f'# safe-volume-percent: {safe:.6f}\n# peak-db: {peak_db:.12f}\n# valid-frequency-low-hz: {valid_low:.12f}\n# valid-frequency-high-hz: {valid_high:.12f}\n---\n'+dumped
+    # Assets must already exist when the custom transfer is evaluated.
+    prefix_header=(f'# valid-frequency-low-hz: {valid_low:.12f}\n'
+                   f'# valid-frequency-high-hz: {valid_high:.12f}\n---\n')
+    return center_camilla_profile(path,prefix_header+dumped)
 
 def commit_profiles(candidates):
     """Atomically replace the updater-owned filter tree and remove stale devices."""
@@ -648,7 +713,9 @@ def commit_profiles(candidates):
         peak=re.search(r'(?m)^# peak-db: (-?[0-9]+(?:\.[0-9]+)?)$',profile_text)
         if match:
             key=profile_path.relative_to(root).as_posix()
-            safe_index[key]={'percent':float(match.group(1)),'peakDb':float(peak.group(1)) if peak else 0.0}
+            integral=re.search(r'(?m)^# integral-center-gain-db: (-?[0-9]+(?:\.[0-9]+)?)$',profile_text)
+          safe_index[key]={'percent':float(match.group(1)),'peakDb':float(peak.group(1)) if peak else 0.0,
+                           'integralCenterGainDb':float(integral.group(1)) if integral else 0.0}
     index_path=root/'safe-volume.json';index_temp=root/'safe-volume.json.new';previous_index=index_path.read_bytes() if index_path.is_file() else None
     try:
         index_temp.write_text(json.dumps({'version':1,'profiles':safe_index},indent=2,sort_keys=True)+'\n',encoding='utf-8')

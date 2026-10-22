@@ -17,7 +17,8 @@ ARGS+=( -z "$VNC_TOGGLE_LABEL" "printf '%s\n' vnc-toggle > '$CARD_SELECTION_FILE
 SAFE_JSON="$(python3 "$TOPOLOGY_SCRIPT" --safe-volume-status 2>>"$ACTION_LOG" || true)"
 if [[ "$(jq -r '.available // false' <<<"$SAFE_JSON" 2>/dev/null)" == true ]]; then
   SAFE_PERCENT="$(jq -r '.percent' <<<"$SAFE_JSON")"
-  ARGS+=( -z "Safe max ${SAFE_PERCENT}%" "printf '%s\n' safe-volume > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
+  SAFE_INTEGRAL_DB="$(jq -r '(.integralCenterGainDb // 0) | if . >= 0 then "+" + (tostring) else tostring end' <<<"$SAFE_JSON")"
+  ARGS+=( -z "Safe max ${SAFE_PERCENT}% (integral ${SAFE_INTEGRAL_DB} dB)" "printf '%s\n' safe-volume > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
 else
   ARGS+=( -z 'Safe max N/A' "printf '%s\n' safe-volume-na > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
 fi
