@@ -1,4 +1,5 @@
 # Shared custom binaural filter builder using measured points directly from SOFA.
+import numpy as np
 import yaml
 SOFA_PATH=HOME/'Documents/prefs/audio/P0135/HRTF/HRTF/96kHz/P0135_FreeFieldCompMinPhase_96kHz.sofa'
 CUSTOM_FILTER_LOCK=HOME/'.local/state/sway/custom-audio-filter.lock'
@@ -172,6 +173,9 @@ def create_custom_filter(request):
                 index_temp.write_text(json.dumps(index,indent=2,sort_keys=True)+'\n',encoding='utf-8')
                 temp.replace(target)
                 index_temp.replace(index_file)
+                # CamillaDSP YAML is authoritative. Mirror all exportable YAMLs
+                # to S5 atomically, creating this counterpart and pruning orphans.
+                updater['sync_s5_with_camilla_profiles']()
             except BaseException:
                 temp.unlink(missing_ok=True);index_temp.unlink(missing_ok=True)
                 target.unlink(missing_ok=True)
@@ -181,7 +185,7 @@ def create_custom_filter(request):
         except BaseException:
             shutil.rmtree(assets,ignore_errors=True);raise
     with CACHELOCK:CACHE['profiles']=(0.0,[])
-    return {'profile':_filter_relative(target),'points':count,'source':'SOFA','freeField':True}
+    return {'profile':_filter_relative(target),'s5':str(updater['COMBINED_FILTER_ROOT']/Path(_filter_relative(target)).with_suffix('.wav')),'points':count,'source':'SOFA','freeField':True}
 
 def custom_filter_cli():
     schema=custom_filter_schema();devices=schema['devices']

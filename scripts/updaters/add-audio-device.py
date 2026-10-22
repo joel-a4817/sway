@@ -140,24 +140,6 @@ def matrix_peak_in_range(matrix,low,high):
     if not math.isfinite(peak) or peak<=0.0:raise RuntimeError(f'Invalid matrix response in {low}..{high} Hz')
     return peak
 
-def chain_gain(paths):
-    """Shared stereo gain: negative complete-chain peak within 20-20000 Hz."""
-    arrays=[read_fir(path,2) for path in paths]
-    low,high=intersect_frequency_ranges(paths)
-    nfft=dense_response_nfft(*(len(x) for x in arrays))
-    frequency=np.fft.rfftfreq(nfft,1.0/SAMPLE_RATE)
-    keep=(frequency>=20.0)&(frequency<=20000.0)
-    combined=np.ones((int(keep.sum()),2),dtype=np.float64)
-    edges=np.ones((2,2),dtype=np.float64)
-    for data in arrays:
-        combined*=np.abs(np.fft.rfft(data,n=nfft,axis=0)[keep])
-        edges*=np.abs(endpoint_fir_response(data,[low,high]))
-    peak=max(float(np.max(combined)),float(np.max(edges)))
-    if not np.isfinite(peak) or peak<=0:raise RuntimeError('Invalid complete-chain audible response')
-    gain=-20.0*np.log10(peak)
-    print(f'Complete chain 20 Hz-20 kHz peak {-gain:.12f} dB; gain {gain:.12f} dB')
-    return gain
-
 def _matrix_convolve(left,right):
     # Matrix rows are zero-padded to a common storage length between YAML
     # stages. Remove only those exact trailing padding samples before the next
@@ -294,42 +276,67 @@ def center_camilla_profile(path,text):
     return header+centered
 
 
-def jamesdsp_target_peak_db(relative_yaml):
-    """All six standard and all custom S5/JamesDSP exports target +15 dB."""
-    return 15.0
+S5_INTEGRAL_CENTER_DB=15.0
+
+
+def s5_integral_center_gain_db(matrix,low,high):
+    """Shared gain making signed log-frequency dB area balance about +15 dB."""
+    current=logarithmic_signed_db_area(matrix,low,high)
+    gain=S5_INTEGRAL_CENTER_DB-current
+    if not math.isfinite(gain):raise RuntimeError('Invalid S5 integral-centering gain')
+    return gain
+
 
 def combined_wav_candidates(profile_candidates):
+    """Build limiter-free S5 FIRs from the exact complete CamillaDSP YAML matrix."""
     exports={}
     for profile_path,profile_text in profile_candidates:
         relative_yaml=Path(profile_path).resolve().relative_to(CAMILLA_ROOT.resolve())
-        if _jamesdsp_export_kind(relative_yaml) is None:
-            continue
+        if _jamesdsp_export_kind(relative_yaml) is None:continue
         relative=relative_yaml.with_suffix('.wav')
         matrix=profile_transfer_matrix(profile_text)
         low,high=profile_frequency_range(profile_text)
-        original_peak=true_stereo_audible_peak(matrix,low,high)
-        target_db=jamesdsp_target_peak_db(relative_yaml)
-        target_linear=10.0**(target_db/20.0)
-        gain=target_linear/original_peak
+        original_mean=logarithmic_signed_db_area(matrix,low,high)
+        gain_db=s5_integral_center_gain_db(matrix,low,high)
+        gain=10.0**(gain_db/20.0)
         normalized=matrix*gain
-        verified=true_stereo_audible_peak(normalized,low,high)
-        if not math.isclose(verified,target_linear,rel_tol=1e-9,abs_tol=1e-9):
-            raise RuntimeError(f'True-stereo normalization verification failed for {relative}: {verified}, target {target_linear}')
+        verified=logarithmic_signed_db_area(normalized,low,high)
+        if not math.isclose(verified,S5_INTEGRAL_CENTER_DB,rel_tol=0.0,abs_tol=2e-7):
+            raise RuntimeError(f'S5 integral normalization failed for {relative}: {verified} dB')
+        peak=true_stereo_audible_peak(normalized,low,high)
         exports[relative]={
             'data':np.column_stack((normalized[0,0],normalized[1,0],normalized[0,1],normalized[1,1])),
-            'matrix':normalized,
-            'sourceMatrix':matrix,
-            'kind':'true-stereo',
-            'channelOrder':['LL','RL','LR','RR'],
-            'originalPeakLinear':original_peak,
-            'targetPeakDb':target_db,
-            'targetPeakLinear':target_linear,
-            'normalizationGainLinear':gain,
-            'validFrequencyLowHz':low,
-            'validFrequencyHighHz':high,
+            'matrix':normalized,'sourceMatrix':matrix,'kind':'true-stereo',
+            'channelOrder':['LL','RL','LR','RR'],'responsePeakLinear':peak,
+            'targetIntegralCenterDb':S5_INTEGRAL_CENTER_DB,
+            'originalIntegralCenterDb':original_mean,
+            'normalizationGainLinear':gain,'normalizationGainDb':gain_db,
+            'validFrequencyLowHz':low,'validFrequencyHighHz':high,
             'sourceYamlSha256':__import__('hashlib').sha256(profile_text.encode('utf-8')).hexdigest(),
         }
     return exports
+
+
+def camilla_profile_candidates_from_disk(overrides=None):
+    """Read every authoritative YAML; optional text overrides support transactions."""
+    overrides={Path(path).resolve():text for path,text in (overrides or {}).items()}
+    found={}
+    if CAMILLA_ROOT.is_dir():
+        for pattern in ('*.yml','*.yaml'):
+            for path in CAMILLA_ROOT.rglob(pattern):
+                if path.is_file() and not path.name.startswith('.'):
+                    found[path.resolve()]=overrides.pop(path.resolve(),path.read_text(encoding='utf-8'))
+    found.update(overrides)
+    return sorted(found.items(),key=lambda row:row[0].relative_to(CAMILLA_ROOT.resolve()).as_posix())
+
+
+def sync_s5_with_camilla_profiles(overrides=None):
+    """Make S5 exactly mirror all exportable CamillaDSP YAML profiles."""
+    candidates=camilla_profile_candidates_from_disk(overrides)
+    exports=combined_wav_candidates(candidates)
+    root=commit_combined_wavs(exports)
+    return {'root':str(root),'count':len(exports),'profiles':[p.as_posix() for p in sorted(exports)]}
+
 
 def commit_combined_wavs(exports):
     root=COMBINED_FILTER_ROOT.resolve();root.parent.mkdir(parents=True,exist_ok=True)
@@ -338,7 +345,7 @@ def commit_combined_wavs(exports):
         manifest={
             'version':4,
             'sampleRate':SAMPLE_RATE,
-            'normalization':'exact YAML 2x2 transfer matrix, shared gain to +15 dB for all standard and custom exports over each profile valid frequency range',
+            'normalization':'exact limiter-free YAML 2x2 transfer matrix; signed log-frequency dB area centered at +15 dB',
             'files':{},
         }
         for relative,export in sorted(exports.items(),key=lambda item:item[0].as_posix()):
@@ -352,21 +359,18 @@ def commit_combined_wavs(exports):
             if not np.array_equal(restored,export['matrix']):
                 raise RuntimeError(f'Written JamesDSP matrix differs from YAML-derived matrix: {relative}')
             response_peak=true_stereo_audible_peak(restored,export['validFrequencyLowHz'],export['validFrequencyHighHz'])
-            target_linear=export['targetPeakLinear']
-            if not math.isclose(response_peak,target_linear,rel_tol=1e-9,abs_tol=1e-9):
-                raise RuntimeError(f'Written JamesDSP WAV does not peak at {export["targetPeakDb"]} dB: {relative}: {response_peak}')
-            original=export['originalPeakLinear'];gain=export['normalizationGainLinear']
+            response_mean=logarithmic_signed_db_area(restored,export['validFrequencyLowHz'],export['validFrequencyHighHz'])
+            if not math.isclose(response_mean,S5_INTEGRAL_CENTER_DB,rel_tol=0.0,abs_tol=2e-7):
+                raise RuntimeError(f'Written S5 WAV is not area-centered at +15 dB: {relative}: {response_mean}')
+            gain=export['normalizationGainLinear']
             manifest['files'][relative.as_posix()]={
-                'kind':'true-stereo',
-                'channels':export['channelOrder'],
-                'frames':len(data),
-                'responsePeakLinear':response_peak,
-                'targetPeakDb':export['targetPeakDb'],
-                'responsePeakDb':20.0*math.log10(response_peak),
-                'originalResponsePeakLinear':original,
-                'originalResponsePeakDb':20.0*math.log10(original),
+                'kind':'true-stereo','channels':export['channelOrder'],'frames':len(data),
+                'responsePeakLinear':response_peak,'responsePeakDb':20.0*math.log10(response_peak),
+                'targetIntegralCenterDb':S5_INTEGRAL_CENTER_DB,
+                'responseIntegralCenterDb':response_mean,
+                'originalIntegralCenterDb':export['originalIntegralCenterDb'],
                 'normalizationGainLinear':gain,
-                'normalizationGainDb':20.0*math.log10(gain),
+                'normalizationGainDb':export['normalizationGainDb'],
             'validFrequencyLowHz':export['validFrequencyLowHz'],
                 'validFrequencyHighHz':export['validFrequencyHighHz'],
                 'sourceYamlSha256':export['sourceYamlSha256'],
@@ -745,16 +749,16 @@ def rebuild_all_filters(all_measurements=False):
             candidate=Path(validation_name)/f'{number:04d}-{path.name}';candidate.write_text(text,encoding='utf-8')
             check=subprocess.run([str(camilladsp),'--check',str(candidate)],text=True,capture_output=True)
             if check.returncode:raise SystemExit(f'Invalid generated profile {path.name}: '+(check.stderr.strip() or check.stdout.strip()))
-    # Both real-time and offline exports use the original spatial WAV.
-    offline_candidates=candidates
-    exports=combined_wav_candidates(offline_candidates)
+    # Fully render and verify S5 before mutating either output tree. This catches
+    # YAML/DSP errors while both existing trees are untouched.
+    exports=combined_wav_candidates(candidates)
     existed={path for path,text in candidates if path.is_file()};changed,removed,removed_dirs=commit_profiles(candidates)
-    combined_root=commit_combined_wavs(exports)
+    combined_root=commit_combined_wavs(exports);exports_count=len(exports)
     for path,text in candidates:
         print(f'{"Replaced existing" if path in existed else "Created"}: {path}')
         match=re.search(r'(?m)^# safe-volume-percent: ([0-9]+(?:\.[0-9]+)?)$',text)
         if match:print(f"{path.name}: safe master {float(match.group(1)):.6f}% before limiter activity")
-    print(f'Exported {len(exports)} exact-YAML JamesDSP true-stereo FIR WAVs (+15 dB for all standard and custom exports) to {combined_root}')
+    print(f'Exported {exports_count} exact-YAML S5 true-stereo FIR WAVs (log-frequency area centered at +15 dB) to {combined_root}')
     print(f'Using {len(devices)} anechoic HpCF devices; verified {len(candidates)} CamillaDSP YAML profiles in {CAMILLA_ROOT}; {len(changed)} created, {len(removed)} obsolete YAMLs removed, {len(removed_dirs)} unconfigured device directories removed')
 TERMINALS=(('foot','-T','Manage Audio Device'),('kitty','--title','Manage Audio Device'),('alacritty','--title','Manage Audio Device','-e'))
 def row(number,label):
