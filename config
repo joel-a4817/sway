@@ -131,13 +131,10 @@ bindsym --no-repeat $mod+Mod1+g fullscreen disable; exec glide
 bindsym --no-repeat $mod+Mod1+z fullscreen disable; exec solaar
 bindsym --no-repeat $mod+Mod1+x fullscreen disable; exec kamoso
 bindsym --no-repeat $mod+Mod1+w fullscreen disable; exec karere
-bindsym --no-repeat $mod+Mod1+a fullscreen disable; exec anki
 bindsym --no-repeat $mod+Mod1+d fullscreen disable; exec discord
 bindsym --no-repeat $mod+Mod1+s fullscreen disable; exec signal-desktop
 bindsym --no-repeat $mod+Mod1+m fullscreen disable; exec prismlauncher
-bindsym --no-repeat $mod+Mod1+k fullscreen disable; exec kicad
-bindsym --no-repeat $mod+Mod1+b fullscreen disable; exec bambu-studio
-bindsym --no-repeat $mod+Mod1+f fullscreen disable; exec bash -c 'appimage-run /home/joel/Downloads/Apps/FreeCAD.AppImage'
+bindsym --no-repeat $mod+Mod1+b fullscreen disable; exec blender
 bindsym --no-repeat $mod+Mod1+y fullscreen disable; exec bash -c 'appimage-run /home/joel/Downloads/Apps/Antra.AppImage'
 bindsym --no-repeat $mod+Mod1+v fullscreen disable, exec sonobus
 
