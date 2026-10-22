@@ -17,7 +17,6 @@ swaynag \
     -z "Update flake and rebuild" \
 '
 /home/joel/nixos/artcraft/update-releases.py
-nix flake update --flake ~/nixos/artcraft
 nix flake update --flake ~/nixos
 sudo nixos-rebuild switch --impure --flake ~/nixos#rt4817
 touch "$RESULT_FILE"
@@ -25,7 +24,6 @@ touch "$RESULT_FILE"
     -z "Update flake and rebuild (low system load)" \
 '
 /home/joel/nixos/artcraft/update-releases.py
-nix flake update --flake ~/nixos/artcraft
 nix flake update --flake ~/nixos
 sudo nixos-rebuild switch --impure --flake ~/nixos#rt4817 --cores 1 --max-jobs 1
 touch "$RESULT_FILE"
