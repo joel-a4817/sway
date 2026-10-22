@@ -28,6 +28,7 @@ BACKUP_DIR=CONTEXT_PATHS['AUDIO_DEVICE_BACKUPS']
 HPCF_ANECHOIC=AUDIO_ROOT/'b&k 5128 hpcfs'
 COMPENSATION_WAV=AUDIO_ROOT/'other/Sennheiser HD650 - B&K 5128 to SONICOM P0135 Approximate Compensation.wav'
 SOFA_AVERAGE_WAV=AUDIO_ROOT/'other/P0135_96k_360_adaptive_finite_preview.wav'
+SOFA_RENDER_REPORT=AUDIO_ROOT/'other/P0135_96k_360_adaptive_report.json'
 MEASUREMENTS_DIR=AUDIO_ROOT/'measurements'
 COMBINED_FILTER_ROOT=HOME/'Downloads-S5/filters'
 HPCFS = (
@@ -142,6 +143,7 @@ def matrix_peak_in_range(matrix,low,high):
 def chain_gain(paths):
     """Shared stereo gain: negative complete-chain peak within 20-20000 Hz."""
     arrays=[read_fir(path,2) for path in paths]
+    low,high=intersect_frequency_ranges(paths)
     nfft=dense_response_nfft(*(len(x) for x in arrays))
     frequency=np.fft.rfftfreq(nfft,1.0/SAMPLE_RATE)
     keep=(frequency>=20.0)&(frequency<=20000.0)
@@ -149,7 +151,6 @@ def chain_gain(paths):
     edges=np.ones((2,2),dtype=np.float64)
     for data in arrays:
         combined*=np.abs(np.fft.rfft(data,n=nfft,axis=0)[keep])
-        kernel=None
         edges*=np.abs(endpoint_fir_response(data,[low,high]))
     peak=max(float(np.max(combined)),float(np.max(edges)))
     if not np.isfinite(peak) or peak<=0:raise RuntimeError('Invalid complete-chain audible response')
@@ -230,6 +231,10 @@ def _jamesdsp_export_kind(relative_yaml):
 def true_stereo_audible_peak(matrix,low=20.0,high=20000.0):
     return matrix_peak_in_range(matrix,low,high)
 
+def jamesdsp_target_peak_db(relative_yaml):
+    """Every S5/JamesDSP true-stereo export targets a 0 dB matrix response peak."""
+    return 0.0
+
 def combined_wav_candidates(profile_candidates):
     exports={}
     for profile_path,profile_text in profile_candidates:
@@ -240,11 +245,13 @@ def combined_wav_candidates(profile_candidates):
         matrix=profile_transfer_matrix(profile_text)
         low,high=profile_frequency_range(profile_text)
         original_peak=true_stereo_audible_peak(matrix,low,high)
-        gain=1.0/original_peak
+        target_db=jamesdsp_target_peak_db(relative_yaml)
+        target_linear=10.0**(target_db/20.0)
+        gain=target_linear/original_peak
         normalized=matrix*gain
         verified=true_stereo_audible_peak(normalized,low,high)
-        if not math.isclose(verified,1.0,rel_tol=1e-9,abs_tol=1e-9):
-            raise RuntimeError(f'True-stereo normalization verification failed: {verified}')
+        if not math.isclose(verified,target_linear,rel_tol=1e-9,abs_tol=1e-9):
+            raise RuntimeError(f'True-stereo normalization verification failed for {relative}: {verified}, target {target_linear}')
         exports[relative]={
             'data':np.column_stack((normalized[0,0],normalized[1,0],normalized[0,1],normalized[1,1])),
             'matrix':normalized,
@@ -252,6 +259,8 @@ def combined_wav_candidates(profile_candidates):
             'kind':'true-stereo',
             'channelOrder':['LL','RL','LR','RR'],
             'originalPeakLinear':original_peak,
+            'targetPeakDb':target_db,
+            'targetPeakLinear':target_linear,
             'normalizationGainLinear':gain,
             'validFrequencyLowHz':low,
             'validFrequencyHighHz':high,
@@ -266,7 +275,7 @@ def commit_combined_wavs(exports):
         manifest={
             'version':4,
             'sampleRate':SAMPLE_RATE,
-            'normalization':'exact YAML 2x2 transfer matrix times one shared gain to 0 dB worst-case output response from 20 Hz through 20 kHz',
+            'normalization':'exact YAML 2x2 transfer matrix, shared gain to 0 dB for every export over each profile valid frequency range',
             'files':{},
         }
         for relative,export in sorted(exports.items(),key=lambda item:item[0].as_posix()):
@@ -280,14 +289,16 @@ def commit_combined_wavs(exports):
             if not np.array_equal(restored,export['matrix']):
                 raise RuntimeError(f'Written JamesDSP matrix differs from YAML-derived matrix: {relative}')
             response_peak=true_stereo_audible_peak(restored,export['validFrequencyLowHz'],export['validFrequencyHighHz'])
-            if not math.isclose(response_peak,1.0,rel_tol=1e-9,abs_tol=1e-9):
-                raise RuntimeError(f'Written JamesDSP WAV does not peak at 0 dB: {relative}: {response_peak}')
+            target_linear=export['targetPeakLinear']
+            if not math.isclose(response_peak,target_linear,rel_tol=1e-9,abs_tol=1e-9):
+                raise RuntimeError(f'Written JamesDSP WAV does not peak at {export["targetPeakDb"]} dB: {relative}: {response_peak}')
             original=export['originalPeakLinear'];gain=export['normalizationGainLinear']
             manifest['files'][relative.as_posix()]={
                 'kind':'true-stereo',
                 'channels':export['channelOrder'],
                 'frames':len(data),
                 'responsePeakLinear':response_peak,
+                'targetPeakDb':export['targetPeakDb'],
                 'responsePeakDb':20.0*math.log10(response_peak),
                 'originalResponsePeakLinear':original,
                 'originalResponsePeakDb':20.0*math.log10(original),
@@ -430,6 +441,23 @@ def make_profile(item,layout_key,hpcf_path,chain_paths,peak_gain_db,valid_low,va
     return device_dir/(layout_key+'.yml'),text
 def configured_path(item):
     path=Path(str(item.get('file',''))).expanduser();return (path if path.is_absolute() else HPCF_ANECHOIC/path).resolve()
+
+def validate_current_spatial_fir():
+    """Validate the single v66 spatial WAV, without generating any proxy."""
+    path=SOFA_AVERAGE_WAV
+    if not path.is_file():
+        raise RuntimeError(f'Missing spatial WAV: {path}. Run p0135-open-sphere-timed.py first.')
+    info=sf.info(path)
+    if info.samplerate!=SAMPLE_RATE or info.channels!=2 or info.frames<2:
+        raise RuntimeError(f'{path}: expected a nonempty stereo {SAMPLE_RATE} Hz FIR')
+    if SOFA_RENDER_REPORT.is_file():
+        report=json.loads(SOFA_RENDER_REPORT.read_text(encoding='utf-8'))
+        if report.get('filter_samples') is not None and int(report['filter_samples'])!=info.frames:
+            raise RuntimeError('Spatial WAV length differs from renderer report; regenerate the spatial WAV.')
+        if report.get('filter_seconds') is not None and abs(float(report['filter_seconds'])-info.frames/info.samplerate)>2/info.samplerate:
+            raise RuntimeError('Spatial WAV duration differs from renderer report; regenerate the spatial WAV.')
+    print(f'Spatial FIR: {info.frames} samples ({info.frames/info.samplerate:.3f} s), stereo {info.samplerate} Hz',flush=True)
+    return path
 
 def measurement_devices():
     if not MEASUREMENTS_DIR.is_dir():raise SystemExit(f'Missing measurement folder: {MEASUREMENTS_DIR}')
@@ -615,8 +643,9 @@ def commit_profiles(candidates):
     return changed,removed_yaml,removed_dirs
 def rebuild_all_filters(all_measurements=False):
     print(f'Writing profiles and safe-volume index to: {CAMILLA_ROOT}')
-    # Both CamillaDSP and S5 use the same original long spatial FIR.
-    print('CamillaDSP and S5 use the same original 360 FIR; no proxy.',flush=True)
+    # One spatial source, identical for CamillaDSP and JamesDSP exports.
+    validate_current_spatial_fir()
+    print('CamillaDSP and S5 use the same v66 spatial WAV; no proxy or fallback.',flush=True)
     candidates,devices=build_profile_candidates(all_measurements,spatial_wav=SOFA_AVERAGE_WAV)
     if not Path('/etc/camilladsp-peak-limiter-v11').is_file():raise SystemExit('Generated profiles require the installed NixOS peak-limiter-v11 module.')
     camilladsp=Path('/run/current-system/sw/bin/camilladsp')
@@ -635,7 +664,7 @@ def rebuild_all_filters(all_measurements=False):
         print(f'{"Replaced existing" if path in existed else "Created"}: {path}')
         match=re.search(r'(?m)^# safe-volume-percent: ([0-9]+(?:\.[0-9]+)?)$',text)
         if match:print(f"{path.name}: safe master {float(match.group(1)):.6f}% before limiter activity")
-    print(f'Exported {len(exports)} 0 dB-normalized exact-YAML JamesDSP true-stereo FIR WAVs to {combined_root}')
+    print(f'Exported {len(exports)} exact-YAML JamesDSP true-stereo FIR WAVs (0 dB for every export) to {combined_root}')
     print(f'Using {len(devices)} anechoic HpCF devices; verified {len(candidates)} CamillaDSP YAML profiles in {CAMILLA_ROOT}; {len(changed)} created, {len(removed)} obsolete YAMLs removed, {len(removed_dirs)} unconfigured device directories removed')
 TERMINALS=(('foot','-T','Manage Audio Device'),('kitty','--title','Manage Audio Device'),('alacritty','--title','Manage Audio Device','-e'))
 def row(number,label):
