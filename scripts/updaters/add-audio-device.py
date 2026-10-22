@@ -49,6 +49,8 @@ HPCFS = (
     },
 )
 SAMPLE_RATE=96000
+ANALYSIS_LOW_HZ=20.0
+ANALYSIS_HIGH_HZ=20000.0
 JAMESDSP_WAV_CHANNEL_ORDER = ('LL', 'RL', 'LR', 'RR')
 CAMILLA_LIMITED_PLAYBACK_DEVICE='camilladsp_peak_limited'
 CAMILLA_PLAYBACK_FORMAT='F32_LE'
@@ -99,8 +101,9 @@ def fir_frequency_range(path):
         low,high=read_csv_frequency_range(csv_path)
     else:
         raise RuntimeError(f'{path}: valid frequency range is unknown; add {sidecar.name}')
-    low=max(0.0,low);high=min(SAMPLE_RATE/2.0,high)
-    if not 0.0<low<high:raise RuntimeError(f'{path}: invalid valid frequency range {low}..{high} Hz')
+    low=max(ANALYSIS_LOW_HZ,low);high=min(ANALYSIS_HIGH_HZ,high)
+    if not ANALYSIS_LOW_HZ<=low<high<=ANALYSIS_HIGH_HZ:
+        raise RuntimeError(f'{path}: no valid frequency range inside {ANALYSIS_LOW_HZ}..{ANALYSIS_HIGH_HZ} Hz')
     return low,high
 
 def intersect_frequency_ranges(paths):
@@ -113,8 +116,9 @@ def profile_frequency_range(profile_text):
     low=re.search(r'(?m)^# valid-frequency-low-hz: ([0-9]+(?:\.[0-9]+)?)$',profile_text)
     high=re.search(r'(?m)^# valid-frequency-high-hz: ([0-9]+(?:\.[0-9]+)?)$',profile_text)
     if not(low and high):raise RuntimeError('Profile is missing valid-frequency range comments')
-    values=float(low.group(1)),float(high.group(1))
-    if not 0.0<values[0]<values[1]:raise RuntimeError(f'Invalid profile frequency range: {values}')
+    values=max(ANALYSIS_LOW_HZ,float(low.group(1))),min(ANALYSIS_HIGH_HZ,float(high.group(1)))
+    if not ANALYSIS_LOW_HZ<=values[0]<values[1]<=ANALYSIS_HIGH_HZ:
+        raise RuntimeError(f'Profile has no valid range inside {ANALYSIS_LOW_HZ}..{ANALYSIS_HIGH_HZ} Hz')
     return values
 
 def endpoint_fir_response(data, frequencies, block=32768):
@@ -210,7 +214,7 @@ def _jamesdsp_export_kind(relative_yaml):
         return "true-stereo"
     return None
 
-def true_stereo_audible_peak(matrix,low=20.0,high=20000.0):
+def true_stereo_audible_peak(matrix,low=ANALYSIS_LOW_HZ,high=ANALYSIS_HIGH_HZ):
     return matrix_peak_in_range(matrix,low,high)
 
 def logarithmic_signed_db_area(matrix,low,high):
@@ -276,11 +280,11 @@ def center_camilla_profile(path,text):
     return header+centered
 
 
-S5_INTEGRAL_CENTER_DB=15.0
+S5_INTEGRAL_CENTER_DB=-15.0
 
 
 def s5_integral_center_gain_db(matrix,low,high):
-    """Shared gain making signed log-frequency dB area balance about +15 dB."""
+    """Shared gain making signed log-frequency dB area balance about -15 dB."""
     current=logarithmic_signed_db_area(matrix,low,high)
     gain=S5_INTEGRAL_CENTER_DB-current
     if not math.isfinite(gain):raise RuntimeError('Invalid S5 integral-centering gain')
@@ -345,7 +349,7 @@ def commit_combined_wavs(exports):
         manifest={
             'version':4,
             'sampleRate':SAMPLE_RATE,
-            'normalization':'exact limiter-free YAML 2x2 transfer matrix; signed log-frequency dB area centered at +15 dB',
+            'normalization':'exact limiter-free YAML 2x2 transfer matrix; signed log-frequency dB area centered at -15 dB',
             'files':{},
         }
         for relative,export in sorted(exports.items(),key=lambda item:item[0].as_posix()):
@@ -361,7 +365,7 @@ def commit_combined_wavs(exports):
             response_peak=true_stereo_audible_peak(restored,export['validFrequencyLowHz'],export['validFrequencyHighHz'])
             response_mean=logarithmic_signed_db_area(restored,export['validFrequencyLowHz'],export['validFrequencyHighHz'])
             if not math.isclose(response_mean,S5_INTEGRAL_CENTER_DB,rel_tol=0.0,abs_tol=2e-7):
-                raise RuntimeError(f'Written S5 WAV is not area-centered at +15 dB: {relative}: {response_mean}')
+                raise RuntimeError(f'Written S5 WAV is not area-centered at -15 dB: {relative}: {response_mean}')
             gain=export['normalizationGainLinear']
             manifest['files'][relative.as_posix()]={
                 'kind':'true-stereo','channels':export['channelOrder'],'frames':len(data),
@@ -758,7 +762,7 @@ def rebuild_all_filters(all_measurements=False):
         print(f'{"Replaced existing" if path in existed else "Created"}: {path}')
         match=re.search(r'(?m)^# safe-volume-percent: ([0-9]+(?:\.[0-9]+)?)$',text)
         if match:print(f"{path.name}: safe master {float(match.group(1)):.6f}% before limiter activity")
-    print(f'Exported {exports_count} exact-YAML S5 true-stereo FIR WAVs (log-frequency area centered at +15 dB) to {combined_root}')
+    print(f'Exported {exports_count} exact-YAML S5 true-stereo FIR WAVs (log-frequency area centered at -15 dB) to {combined_root}')
     print(f'Using {len(devices)} anechoic HpCF devices; verified {len(candidates)} CamillaDSP YAML profiles in {CAMILLA_ROOT}; {len(changed)} created, {len(removed)} obsolete YAMLs removed, {len(removed_dirs)} unconfigured device directories removed')
 TERMINALS=(('foot','-T','Manage Audio Device'),('kitty','--title','Manage Audio Device'),('alacritty','--title','Manage Audio Device','-e'))
 def row(number,label):
