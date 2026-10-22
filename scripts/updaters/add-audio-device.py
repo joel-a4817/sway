@@ -232,8 +232,8 @@ def true_stereo_audible_peak(matrix,low=20.0,high=20000.0):
     return matrix_peak_in_range(matrix,low,high)
 
 def jamesdsp_target_peak_db(relative_yaml):
-    """Every S5/JamesDSP true-stereo export targets a 0 dB matrix response peak."""
-    return 0.0
+    """All six standard and all custom S5/JamesDSP exports target +15 dB."""
+    return 15.0
 
 def combined_wav_candidates(profile_candidates):
     exports={}
@@ -275,7 +275,7 @@ def commit_combined_wavs(exports):
         manifest={
             'version':4,
             'sampleRate':SAMPLE_RATE,
-            'normalization':'exact YAML 2x2 transfer matrix, shared gain to 0 dB for every export over each profile valid frequency range',
+            'normalization':'exact YAML 2x2 transfer matrix, shared gain to +15 dB for all standard and custom exports over each profile valid frequency range',
             'files':{},
         }
         for relative,export in sorted(exports.items(),key=lambda item:item[0].as_posix()):
@@ -415,7 +415,12 @@ def chain_gain_for_layout(chain_paths,layout):
         print(f"WARNING: {layout['label']} has {(-gain):.3f} dB measured peak; retaining computed safe-volume attenuation",flush=True)
     return gain,low,high
 def safe_volume_percent(peak_gain_db):
-    """wpctl control equivalent of the old Raw CamillaDSP auto_gain."""
+    """wpctl % giving <=0 dB full-scale complete-matrix frequency response.
+
+    Assumes PipeWire cubic channel-volume mapping. This is a steady-state
+    spectral response bound, not a guarantee against arbitrary waveform
+    transient/sample or intersample overshoots. The external limiter remains.
+    """
     # Preserve the exact old Raw auto_gain result. PipeWire applies the
     # wpctl channel-volume control cubically, so control^3 must equal the
     # old CamillaDSP linear gain 10^(dB/20): control=10^(dB/60).
@@ -498,8 +503,24 @@ def build_profile_candidates(all_measurements=False,spatial_wav=None):
             common.append(('fixture',COMPENSATION_WAV))
         for layout_key,layout in PROFILE_LAYOUTS.items():
             chain=([('sofa',spatial_wav)] if layout['spatial'] else [])+common+[('hpcf',source)]
-            peak_gain_db,valid_low,valid_high=chain_gain_for_layout(chain,layout)
-            generated.append(make_profile(item,layout_key,source,chain,peak_gain_db,valid_low,valid_high))
+            estimated_gain_db,valid_low,valid_high=chain_gain_for_layout(chain,layout)
+            # Safe volume must be based on the ACTUAL YAML 2x2 routing, not
+            # a diagonal shortcut that could miss cross-channel summation.
+            profile_path,provisional=make_profile(item,layout_key,source,chain,estimated_gain_db,valid_low,valid_high)
+            matrix=profile_transfer_matrix(provisional)
+            peak=true_stereo_audible_peak(matrix,valid_low,valid_high)
+            exact_peak_db=20.0*math.log10(peak)
+            if not math.isfinite(exact_peak_db):raise RuntimeError('Nonfinite complete-matrix peak')
+            safe_db=-exact_peak_db
+            profile_path,profile_text=make_profile(item,layout_key,source,chain,safe_db,valid_low,valid_high)
+            actual_safe=safe_volume_percent(safe_db)
+            # This assumes the existing PipeWire cubic control law. A safe
+            # setting cannot exceed 100%, even when the filter attenuates.
+            effective_linear=(actual_safe/100.0)**3
+            if effective_linear*peak>1.0+1e-10:
+                raise RuntimeError(f'{profile_path}: computed safe volume exceeds 0 dBFS response limit')
+            print(f'{layout["label"]}: exact 2x2 matrix peak {exact_peak_db:+.9f} dB; safe wpctl {actual_safe:.6f}%')
+            generated.append((profile_path,profile_text))
     standard_profiles={path.parent.resolve():text for path,text in generated if path.stem=='stereo'}
     rebuilt_custom=[]
     for item,_source in devices:
@@ -563,6 +584,8 @@ def rebuild_custom_profile(path,text,standard_profiles):
         raise RuntimeError(f'{path}: implausible complete custom-chain peak {peak_db:.6f} dB')
     gain_db=-peak_db
     safe=safe_volume_percent(gain_db)
+    if (safe/100.0)**3*peak>1.0+1e-10:
+        raise RuntimeError(f'{path}: custom safe volume exceeds 0 dBFS matrix response limit')
     return f'# safe-volume-percent: {safe:.6f}\n# peak-db: {peak_db:.12f}\n# valid-frequency-low-hz: {valid_low:.12f}\n# valid-frequency-high-hz: {valid_high:.12f}\n---\n'+dumped
 
 def commit_profiles(candidates):
@@ -664,7 +687,7 @@ def rebuild_all_filters(all_measurements=False):
         print(f'{"Replaced existing" if path in existed else "Created"}: {path}')
         match=re.search(r'(?m)^# safe-volume-percent: ([0-9]+(?:\.[0-9]+)?)$',text)
         if match:print(f"{path.name}: safe master {float(match.group(1)):.6f}% before limiter activity")
-    print(f'Exported {len(exports)} exact-YAML JamesDSP true-stereo FIR WAVs (0 dB for every export) to {combined_root}')
+    print(f'Exported {len(exports)} exact-YAML JamesDSP true-stereo FIR WAVs (+15 dB for all standard and custom exports) to {combined_root}')
     print(f'Using {len(devices)} anechoic HpCF devices; verified {len(candidates)} CamillaDSP YAML profiles in {CAMILLA_ROOT}; {len(changed)} created, {len(removed)} obsolete YAMLs removed, {len(removed_dirs)} unconfigured device directories removed')
 TERMINALS=(('foot','-T','Manage Audio Device'),('kitty','--title','Manage Audio Device'),('alacritty','--title','Manage Audio Device','-e'))
 def row(number,label):
