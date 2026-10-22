@@ -279,9 +279,21 @@ def require_airplay_services():
     if failed:raise RuntimeError('AirPlay 2 service did not become active: '+', '.join(failed))
     return health
 def airplay(start):
-    action='restart' if start else 'stop'; r=run(['systemctl',action,*AIRPLAY_SERVICES],False)
-    if r.returncode:raise RuntimeError(r.stderr.strip() or 'Could not change AirPlay services')
+    """Manage only the necessary system-unit transitions, one job at a time.
+
+    Separate jobs avoid systemd's multi-unit EnqueueUnitJobMany authorization
+    path. A genuinely denied individual job remains an explicit error.
+    """
+    action='restart' if start else 'stop'
+    health=airplay_health()
+    for service in AIRPLAY_SERVICES:
+        if not start and not health['services'][service]:
+            continue
+        result=run(['systemctl',action,service],False,30)
+        if result.returncode:
+            raise RuntimeError(f'{service}: '+(result.stderr.strip() or result.stdout.strip() or f'Could not {action} service'))
     if start:require_airplay_services()
+
 def apply_source_services(source,direct=False):
     if source=='airplay':
         # Keep the system-audio sink exposed. The NixOS service is neutral and

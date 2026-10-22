@@ -714,7 +714,7 @@ def commit_profiles(candidates):
         if match:
             key=profile_path.relative_to(root).as_posix()
             integral=re.search(r'(?m)^# integral-center-gain-db: (-?[0-9]+(?:\.[0-9]+)?)$',profile_text)
-          safe_index[key]={'percent':float(match.group(1)),'peakDb':float(peak.group(1)) if peak else 0.0,
+            safe_index[key]={'percent':float(match.group(1)),'peakDb':float(peak.group(1)) if peak else 0.0,
                            'integralCenterGainDb':float(integral.group(1)) if integral else 0.0}
     index_path=root/'safe-volume.json';index_temp=root/'safe-volume.json.new';previous_index=index_path.read_bytes() if index_path.is_file() else None
     try:

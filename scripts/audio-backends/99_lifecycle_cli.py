@@ -48,7 +48,7 @@ def start_runtime(force=False):
     if STOPPED.exists() and not force:
         if OUTPUT_PREVIEW.exists():_recover_stale_cli_preview()
         MODE.write_text('laptop_laptop\n')
-        run(['systemctl','stop','shairport-sync.service','nqptp.service'],False,10)
+        airplay(False)
         return
     if OUTPUT_PREVIEW.exists():_recover_stale_cli_preview()
     # Keep persisted master until the route has been restored; a newly
@@ -270,7 +270,10 @@ def main():
     try:
         start_runtime()
     except Exception as error:
-        fallback_to_clean_audio(error)
+        # start_runtime performs its own recovery when a route fails.
+        # Do not recursively repeat an unsuccessful fallback.
+        print('Audio startup failed: '+str(error),flush=True)
+        raise
     if not STOPPED.exists():normalize_audio_volumes(saved_master)
     threading.Thread(target=watch_master_volume,args=(watcher_stop,),daemon=True).start()
     threading.Thread(target=watch_output_preview,args=(watcher_stop,),daemon=True).start()
