@@ -1,7 +1,37 @@
+
+def public_error(path,error):
+    text=str(error or '')
+    lowered=text.casefold()
+    if path.startswith('/api/ytmusic/') and any(token in lowered for token in ('cookie','auth','401','403','unauthor','forbidden','sapisid','visitor data','browser.json','consent')):
+        return 'Refresh YouTube Music cookie'
+    return text.splitlines()[0][:180] or 'Request failed'
+
 class H(BaseHTTPRequestHandler):
+    def extension_origin(self):
+        origin=self.headers.get('Origin','')
+        return origin if origin.startswith('moz-extension://') else ''
+    def cors_headers(self):
+        origin=self.extension_origin()
+        if origin:
+            self.send_header('Access-Control-Allow-Origin',origin)
+            self.send_header('Vary','Origin')
+    def do_OPTIONS(self):
+        origin=self.extension_origin()
+        requested=self.headers.get('Access-Control-Request-Method','').upper()
+        if self.path not in ('/api/ytmusic/current','/api/ytmusic/refresh-cookie') or not origin or requested!='POST':
+            self.send_response(403);self.send_header('Content-Length','0');self.send_header('Cache-Control','no-store');self.end_headers();return
+        self.send_response(204)
+        self.send_header('Access-Control-Allow-Origin',origin)
+        self.send_header('Access-Control-Allow-Methods','POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers','Content-Type')
+        self.send_header('Access-Control-Max-Age','600')
+        self.send_header('Vary','Origin, Access-Control-Request-Method, Access-Control-Request-Headers')
+        if self.headers.get('Access-Control-Request-Private-Network','').lower()=='true':
+            self.send_header('Access-Control-Allow-Private-Network','true')
+        self.send_header('Content-Length','0');self.send_header('Cache-Control','no-store');self.end_headers()
     def data(self,n,t,b):
         try:
-            self.send_response(n);self.send_header('Content-Type',t);self.send_header('Content-Length',str(len(b)));self.send_header('Cache-Control','private, max-age=3600' if n==200 and t=='image/jpeg' else 'no-store');self.end_headers();self.wfile.write(b)
+            self.send_response(n);self.send_header('Content-Type',t);self.send_header('Content-Length',str(len(b)));self.send_header('Cache-Control','private, max-age=3600' if n==200 and t=='image/jpeg' else 'no-store');self.cors_headers();self.end_headers();self.wfile.write(b)
         except (BrokenPipeError,ConnectionResetError):
             self.close_connection=True
     def out(self,n,d):self.data(n,'application/json; charset=utf-8',json.dumps(d,separators=(',',':')).encode())
@@ -34,6 +64,9 @@ class H(BaseHTTPRequestHandler):
             elif p=='/api/away-display':r=away_display_state()
             elif p=='/api/vnc-state':r=vnc_state()
             elif p=='/api/outputs':r=output_state()
+            elif p=='/api/ytmusic/liked':r=ytmusic_liked()
+            elif p=='/api/ytmusic/current-status':r=ytmusic_current_status()
+            elif p=='/api/ytmusic/refresh-cookie-status':r=ytmusic_refresh_cookie_status()
             elif p=='/api/system-media':r=system_state()
             elif p=='/api/player':r=player_state()
             elif p=='/api/playlists':r={'playlists':lists()}
@@ -41,12 +74,20 @@ class H(BaseHTTPRequestHandler):
             elif p=='/api/playlist':n=q.get('name',[''])[0];r={'name':n,'songs':song_objects(files(pdir(n)))}
             else:self.out(404,{'ok':False,'error':'Not found'});return
             self.out(200,{'ok':True,**r})
-        except Exception as e:self.out(500,{'ok':False,'error':str(e)})
+        except Exception as e:self.out(500,{'ok':False,'error':public_error(p,e)})
     def do_POST(self):
         p=urlparse(self.path).path
         try:
             d=self.body()
-            if p=='/api/output-preview-begin':r=begin_output_preview()
+            if p=='/api/ytmusic/refresh-cookie-begin':r=ytmusic_begin_cookie_refresh()
+            elif p=='/api/ytmusic/refresh-cookie':r=ytmusic_refresh_cookie(d.get('headers'))
+            elif p=='/api/ytmusic/quickpicks':r=ytmusic_quick_picks()
+            elif p=='/api/ytmusic/play-item':r=ytmusic_play_item(d.get('videoId'),d.get('title',''))
+            elif p=='/api/ytmusic/current':r=ytmusic_report_current(d)
+            elif p=='/api/ytmusic/rate-current':r=ytmusic_rate_current(d.get('rating'))
+            elif p=='/api/ytmusic/rate-item':r=ytmusic_rate_item(d.get('videoId'),d.get('title',''),d.get('rating'))
+            elif p=='/api/ytmusic/remove-items':r=ytmusic_remove_items(d.get('items'))
+            elif p=='/api/output-preview-begin':r=begin_output_preview()
             elif p=='/api/output-preview-renew':r=renew_output_preview(d.get('token'))
             elif p=='/api/output-preview-cancel':r=cancel_output_preview(token=d.get('token'))
             elif p=='/api/output-device-stage':r=select_output_device_stage(d.get('card'),origin=('cli' if d.get('origin')=='cli' and self.client_address[0] in ('127.0.0.1','::1') else 'web'),token=d.get('token'))
@@ -86,7 +127,7 @@ class H(BaseHTTPRequestHandler):
             self.out(200,{'ok':True,**r})
         except FileExistsError as e:self.out(409,{'ok':False,'error':str(e)})
         except (ValueError,TypeError,KeyError,FileNotFoundError,json.JSONDecodeError) as e:self.out(400,{'ok':False,'error':str(e)})
-        except Exception as e:self.out(500,{'ok':False,'error':str(e)})
+        except Exception as e:self.out(500,{'ok':False,'error':public_error(p,e)})
     def log_message(self,*a):pass
 class S(ThreadingHTTPServer):allow_reuse_address=True;daemon_threads=True
 

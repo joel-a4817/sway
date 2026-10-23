@@ -13,6 +13,7 @@
 60_output_transactions.py
 65_routing_modes.py
 70_player_commands.py
+72_ytmusic_api.py
 75_display.py
 80_state_api.py
 85_web_assets.py

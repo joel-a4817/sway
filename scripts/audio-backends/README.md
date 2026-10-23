@@ -177,3 +177,7 @@
 ### SOFA-backed custom spatial filters
 
 Custom Spatial Filter reads P0135 free-field-compensated minimum-phase-compensation coordinates directly from `~/Documents/prefs/audio/P0135/HRTF/HRTF/96kHz/P0135_FreeFieldCompMinPhase_96kHz.sofa`. It accepts only a 96 kHz `SimpleFreeFieldHRIR` dataset marked `free field`, extracts only selected measured coordinates into each profile's private `.assets` directory, preserves all supplied HRIR samples and embedded timing, applies `Data.Delay` when nonzero, and adds no room or reverberation stage. The existing updater still rebuilds the complete custom profile and its Safe max metadata.
+
+### YouTube Music authenticated server and Glide bridge
+
+`72_ytmusic_api.py` owns Quick Picks, authenticated ratings, Liked Music playback and multi-select removal, and in-place browser-cookie refresh through `/home/joel/ytmusicapi` and `~/.config/ytmusicapi/browser.json`. The Refresh cookie button opens YouTube Music in Glide. The bundled Glide bridge captures the next signed-in YouTube Music API request automatically, sends its request headers only to the local Media Control server, and atomically replaces the cookie-backed browser authentication file only after validation. It deliberately contains no MPRIS logic. The Glide temporary extension reports the current `videoId` and physically activates YouTube Music's Start playback control for URLs marked `mcautoplay=1`.

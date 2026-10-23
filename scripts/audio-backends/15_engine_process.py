@@ -308,15 +308,16 @@ def media_transaction(function):
         with media_change():return function(*args,**kwargs)
     return wrapped
 
+VNC_SERVICE='camilladsp-wayvnc.service'
+
 def vnc_state():
-    running=run(['systemctl','--user','is-active','--quiet',
-                 'camilladsp-wayvnc.service'],False,5).returncode==0
+    running=run(['systemctl','--user','is-active','--quiet',VNC_SERVICE],False,5).returncode==0
     return {'running':running}
 
 def restart_vnc():
-    # VNC is independent of audio and server lifecycle; do not enter media_change().
+    # Toggle the dedicated VNC unit. The backend itself is launched by the Python script.
     before=vnc_state()['running']
-    user_service('stop' if before else 'start','camilladsp-wayvnc.service')
+    user_service('stop' if before else 'start',VNC_SERVICE)
     after=vnc_state()['running']
     if after==before:
         raise RuntimeError('VNC did not '+('stop' if before else 'start'))

@@ -222,6 +222,39 @@ button {
   padding-right:120px;
   min-height:76px;
 }
+.liked-toolbar {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  margin-top:12px;
+  margin-bottom:2px;
+}
+.liked-toolbar .action {
+  width:auto;
+  min-height:40px;
+  padding:9px 14px;
+  border-radius:14px;
+}
+.liked-toolbar .details {margin:0 2px 0 auto;white-space:nowrap}
+.playlist-select-wrap {
+  position:absolute;
+  right:12px;
+  top:50%;
+  transform:translateY(-50%);
+  display:grid;
+  place-items:center;
+  width:44px;
+  height:44px;
+  z-index:1;
+}
+.playlist-select {
+  width:20px;
+  height:20px;
+  margin:0;
+  accent-color:var(--g);
+  cursor:pointer;
+}
 .playlist-controls {
   position:absolute;
   right:12px;
@@ -362,11 +395,13 @@ button:disabled {
 .action,.item,.transport,.back {
   will-change:transform;
 }
-.action.busy::after,.item.busy::after {
+button.busy::after {
   content:"";
   position:absolute;
   inset:0;
-  background:linear-gradient(105deg,transparent 25%,#ffffff2e 50%,transparent 75%);
+  background:linear-gradient(105deg,transparent 22%,var(--busy-sheen,#ffffff47) 50%,transparent 78%);
+  pointer-events:none;
+  z-index:3;
   animation:ui-shine .8s linear infinite;
 }
 @keyframes ui-shine{
@@ -1102,7 +1137,11 @@ body {
 }
 
 .safe-volume-button{width:100%;margin:10px 0 18px}.safe-mark{background-image:linear-gradient(#ffca57,#ffca57);background-repeat:no-repeat;background-size:2px 25px;background-position:var(--safe-x,50%) center}.safe-hidden{display:none!important}.custom-hrir-row{padding:15px;margin:10px 0;border:1px solid #ffffff22;border-radius:18px;background:#ffffff0a}.custom-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.custom-fields label{color:#bcb7cb;font-size:12px;font-weight:700}.custom-fields input,.custom-fields select,#custom-device,#custom-name{width:100%;margin-top:5px;padding:12px;border:1px solid #ffffff25;border-radius:12px;background:#090b14;color:#fff}.custom-actions{margin-top:14px}.custom-create-launch{margin-top:28px!important}.spatial-visual{margin-top:18px;padding:14px;border:1px solid #ffffff22;border-radius:22px;background:radial-gradient(circle at 50% 42%,#32245f88,#090b14 68%);box-shadow:inset 0 1px #ffffff18}.spatial-visual canvas{display:block;width:100%;height:auto;aspect-ratio:1.45}.spatial-caption{text-align:center;color:#b9b4c5;font-size:12px;margin-top:8px}.custom-ranges{margin:14px 2px;color:#b9b4c5;font-size:13px}.mode-dialog{border:1px solid #ffffff33;border-radius:22px;background:#151221;color:#fff;padding:22px;width:min(420px,calc(100vw - 32px));box-shadow:0 24px 80px #000b}.mode-dialog::backdrop{background:#000a;backdrop-filter:blur(8px)}.mode-choice{display:block;padding:12px;margin:8px 0;border:1px solid #ffffff22;border-radius:13px}.mode-dialog-menu{display:flex;gap:10px;justify-content:flex-end;margin-top:18px}
-  </style>
+  
+.task-feedback-action{margin-left:10px;padding:7px 11px;border:1px solid rgba(255,255,255,.22);border-radius:10px;background:rgba(255,255,255,.12);color:inherit;font-weight:800}
+.yt-rating-icon{width:38px;min-width:38px;height:34px;padding:0;display:inline-grid;place-items:center;font-size:18px;line-height:1;border-radius:10px}
+.yt-rating-icon svg{width:18px;height:18px;fill:currentColor}
+</style>
  </head>
  <body>
   <main>
@@ -1188,6 +1227,15 @@ body {
     <button class="action accent-violet" id="open-audio-options" style="margin-top:10px" type="button">
      Audio options
     </button>
+    <div class="section-title">
+     YouTube Music
+    </div>
+    <div class="grid two" id="youtube-music-card">
+     <button class="action accent-violet" id="ytmusic-quickpicks">Quick Picks</button>
+     <button class="action accent-red" id="ytmusic-like">Like</button>
+     <button class="action accent-cyan" id="ytmusic-liked">Liked Music</button>
+     <button class="action accent-mint" id="ytmusic-refresh-cookie">Refresh cookie</button>
+    </div>
     <div class="section-title" id="restart-heading">
      Media services
     </div>
@@ -1515,10 +1563,19 @@ body {
      </div>
     </div>
    </div>
+  <section class="hidden" id="ytmusic-liked-page">
+   <div class="page-head">
+    <button class="back" id="ytmusic-liked-back" type="button">Back</button>
+    <div><h1>Liked Music</h1></div>
+   </div>
+   <input class="search" id="ytmusic-liked-search" type="search" placeholder="Search liked songs or artists" autocomplete="off" aria-label="Search Liked Music">
+   <div class="liked-toolbar"><button class="action accent-red" id="ytmusic-remove-selected" disabled>Remove selected</button><span class="details" id="ytmusic-selected-count">0 selected</span></div>
+   <div class="list" id="ytmusic-liked-list"></div>
+  </section>
   </main>
   <script>
    const $=selector=>document.querySelector(selector);
-const screens=['profiles','audio-options-page','pc','songs','playlist','groups-page','listening-page','custom-filter-page'].map(id=>$('#'+id));
+const screens=['profiles','audio-options-page','pc','songs','playlist','groups-page','listening-page','custom-filter-page','ytmusic-liked-page'].map(id=>$('#'+id));
 let all=[],inside=[],current='';
 const state={
   system:{slider:$('#system-seek'),elapsed:$('#system-elapsed'),durationLabel:$('#system-duration'),volume:$('#system-volume'),duration:0,dragging:false,polling:false,repoll:false,clockPosition:0,clockAt:0,clockPlaying:false,lastAvailableAt:0,trackKey:'',skipPending:false,skipFrom:'',skipStarted:0,skipWarned:false,volumeHold:0,volumeTimer:null,volumePending:null},
@@ -1528,7 +1585,44 @@ const fmt=value=>{const v=Math.max(0,Number(value)||0);return Math.floor(v/60)+'
 function show(id){screens.forEach(screen=>screen.classList.toggle('hidden',screen.id!==id));scrollTo({top:0,behavior:'smooth'});updateBackToTop()}
 function updateBackToTop(){const visible=['songs','playlist'].some(id=>!$('#'+id).classList.contains('hidden'));$('#back-to-top').classList.toggle('hidden',!visible||window.scrollY<320)}
 window.addEventListener('scroll',updateBackToTop,{passive:true});$('#back-to-top').onclick=()=>window.scrollTo({top:0,behavior:'smooth'});$('#open-groups').onclick=()=>show('groups-page');$('#open-listening').onclick=()=>{show('listening-page');filterDirectoryPath='';openFilterDirectory('').catch(error=>note(error.message,true))};
-function notificationBox(){const banners=[...document.querySelectorAll('#global-task-feedback')];let banner=banners.shift()||null;banners.forEach(item=>item.remove());if(!banner){banner=document.createElement('div');banner.id='global-task-feedback';banner.className='task-feedback hidden';banner.setAttribute('role','status');banner.setAttribute('aria-live','polite');const message=document.createElement('span');message.className='task-feedback-message';const close=document.createElement('button');close.type='button';close.className='task-feedback-close';close.textContent='×';close.setAttribute('aria-label','Close notification');close.addEventListener('click',()=>{clearTimeout(showTaskFeedback.timer);banner.classList.add('hidden')});banner.append(message,close);document.body.appendChild(banner)}return banner}function showTaskFeedback(message,kind='working'){const banner=notificationBox(),messageNode=banner.querySelector('.task-feedback-message');if(messageNode)messageNode.textContent=String(message||'Working…');banner.classList.remove('working','done','error','hidden');banner.classList.add(['working','done','error'].includes(kind)?kind:'working');clearTimeout(showTaskFeedback.timer);if(kind!=='working')showTaskFeedback.timer=setTimeout(()=>banner.classList.add('hidden'),10000)}function note(message,error=false){if(error&&message)showTaskFeedback(message,'error')}
+function notificationBox(){const banners=[...document.querySelectorAll('#global-task-feedback')];let banner=banners.shift()||null;banners.forEach(item=>item.remove());if(!banner){banner=document.createElement('div');banner.id='global-task-feedback';banner.className='task-feedback hidden';banner.setAttribute('role','status');banner.setAttribute('aria-live','polite');const message=document.createElement('span');message.className='task-feedback-message';const close=document.createElement('button');close.type='button';close.className='task-feedback-close';close.textContent='×';close.setAttribute('aria-label','Close notification');close.addEventListener('click',()=>{clearTimeout(showTaskFeedback.timer);banner.classList.add('hidden')});banner.append(message,close);document.body.appendChild(banner)}return banner}function showTaskFeedback(message,kind='working'){const banner=notificationBox(),messageNode=banner.querySelector('.task-feedback-message');banner.querySelectorAll('.task-feedback-action').forEach(action=>action.remove());if(messageNode)messageNode.textContent=String(message||'Working…');banner.classList.remove('working','done','error','hidden');banner.classList.add(['working','done','error'].includes(kind)?kind:'working');clearTimeout(showTaskFeedback.timer);if(kind!=='working')showTaskFeedback.timer=setTimeout(()=>banner.classList.add('hidden'),10000)}function note(message,error=false){if(!message)return;if(error===true){showTaskFeedback(message,'error');return}showTaskFeedback(message,'done');if(error&&typeof error==='object'&&error.label&&typeof error.action==='function'){const banner=notificationBox(),action=document.createElement('button');action.type='button';action.className='task-feedback-action';action.textContent=error.label;action.onclick=async()=>{action.disabled=true;try{await error.action();banner.classList.add('hidden')}catch(e){showTaskFeedback(e?.message||String(e),'error')}finally{action.disabled=false}};banner.insertBefore(action,banner.querySelector('.task-feedback-close'))}}
+/* FEEDBACK_POLICY_V13: only actions without inherent page/audio feedback get an in-button loader. */
+const requestCounts=new WeakMap(),requestWasDisabled=new WeakMap();
+let requestClick=null;
+function rgbChannels(value){const match=String(value).match(/[\d.]+/g);return match?match.slice(0,3).map(Number):[0,0,0]}
+function busySheenFor(button){
+ const [r,g,b]=rgbChannels(getComputedStyle(button).backgroundColor);
+ const light=(.2126*r+.7152*g+.0722*b)/255;
+ return light>.58?'rgba(0,0,0,.28)':'rgba(255,255,255,.34)'
+}
+function refreshButtonSheen(button){if(button?.classList.contains('busy'))button.style.setProperty('--busy-sheen',busySheenFor(button))}
+function beginButtonRequest(button){
+ if(!button||button.dataset.loading==='off')return;
+ const count=requestCounts.get(button)||0;
+ if(count===0){requestWasDisabled.set(button,button.disabled);button.disabled=true;button.classList.add('busy');refreshButtonSheen(button)}
+ requestCounts.set(button,count+1)
+}
+function endButtonRequest(button){
+ if(!button||button.dataset.loading==='off')return;
+ const count=Math.max(0,(requestCounts.get(button)||1)-1);
+ if(count){requestCounts.set(button,count);return}
+ requestCounts.delete(button);button.classList.remove('busy');button.style.removeProperty('--busy-sheen');button.disabled=Boolean(requestWasDisabled.get(button));requestWasDisabled.delete(button)
+}
+new MutationObserver(records=>records.forEach(record=>refreshButtonSheen(record.target))).observe(document.documentElement,{subtree:true,attributes:true,attributeFilter:['class','style','aria-pressed','aria-selected']});
+document.addEventListener('click',event=>{
+ const button=event.target.closest('button');
+ if(!button||button.disabled||button.dataset.loading==='off')return;
+ requestClick=button;beginButtonRequest(button);
+ setTimeout(()=>{if(requestClick===button)requestClick=null;endButtonRequest(button)},450)
+},true);
+const mediaControlFetch=window.fetch.bind(window);
+window.fetch=(...args)=>{
+ const button=requestClick;requestClick=null;
+ if(button)beginButtonRequest(button);
+ const request=mediaControlFetch(...args);
+ if(button)request.finally(()=>endButtonRequest(button));
+ return request
+};
 async function api(url,options={}){const response=await fetch(url,{cache:'no-store',...options});const data=await response.json().catch(()=>null);if(!data||typeof data!=='object'||Array.isArray(data))throw Error('Invalid server response');if(!response.ok||data.ok===false)throw Error(data.error||'Request failed');return data}
 const post=(url,data={})=>api(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
 function fill(element,value,maximum){const max=Number(maximum),v=Number(value);const percent=Number.isFinite(max)&&max>0&&Number.isFinite(v)?Math.max(0,Math.min(100,v/max*100)):0;element.style.setProperty('--fill',percent+'%')}
@@ -1564,7 +1658,7 @@ async function refreshVncState(){
   try{renderVncState(await api('/api/vnc-state'))}
   catch(error){console.warn('VNC state refresh failed',error)}
 }
-async function busy(button,work,label='Working…',doneLabel='Done',feedback=false){if(button.disabled)return;const original=button.innerHTML;button.disabled=true;button.classList.add('busy');if(!button.classList.contains('transport'))button.textContent=label;if(feedback)showTaskFeedback(label,'working');try{const result=await work();if(feedback&&doneLabel)showTaskFeedback(doneLabel,'done');return result}catch(error){showTaskFeedback(error?.message||String(error),'error');throw error}finally{button.disabled=false;button.classList.remove('busy');button.innerHTML=original}}
+async function busy(button,work,label='Working…',doneLabel=null,feedback=false){try{const result=await work();if(feedback&&doneLabel)showTaskFeedback(doneLabel,'done');return result}catch(error){if(feedback)showTaskFeedback(error?.message||String(error),'error');else console.error(error);throw error}}
 function setPlayIcon(shape,button,playing){if(!shape||!button)return;shape.setAttribute('d',playing?'M8 5h3v14H8z M14 5h3v14h-3z':'M8 5.5 19 12 8 18.5z');button.setAttribute('aria-label',playing?'Pause':'Play');button.classList.toggle('playing',playing)}
 function setSystemAvailability(data){for(const id of ['system-previous','system-toggle','system-next'])$('#'+id).disabled=!data.available;$('#system-seek').disabled=!data.available||!data.seekable}
 function systemTrackKey(data){
@@ -1719,7 +1813,7 @@ function bindMpvGain(){
 function coverNode(url,large=false){const node=document.createElement(url?'img':'div');node.className='cover-art'+(large?' large':'')+(url?'':' cover-fallback');if(url){node.src=url;node.loading=large?'eager':'lazy';node.alt='Album cover';node.onerror=()=>{const fallback=coverNode('',large);fallback.id=node.id;fallback.dataset.failedCover=url;node.replaceWith(fallback)}}else{node.textContent='♫';node.setAttribute('aria-label','No album art')}return node}
 let localNowArtworkURL='';
 function updateLocalNowArtwork(url){const next=url||'';if(next===localNowArtworkURL)return;localNowArtworkURL=next;const tile=$('#now-cover');tile.replaceChildren();if(!next)return;const image=document.createElement('img');image.alt='';image.decoding='async';image.addEventListener('error',()=>image.remove(),{once:true});image.src=next;tile.appendChild(image)}
-function render(sel,data,query){const list=$(sel);list.replaceChildren();const term=query.toLowerCase();const filtered=data.filter(song=>!term||[song.title,song.artist,song.album,song.relative].join(' ').toLowerCase().includes(term));if(!filtered.length){const empty=document.createElement('div');empty.className='card details';empty.textContent=query?'No matches':'Nothing here yet';list.append(empty);return}const fragment=document.createDocumentFragment();for(const song of filtered){const button=document.createElement('button');button.className='item';button.innerHTML='<span class="name"></span><span class="meta"></span>';button.children[0].textContent=song.title;button.children[1].textContent=[song.artist,song.album].filter(Boolean).join(' • ')||song.relative;const wrap=document.createElement('div');wrap.className='item-cover';const copy=document.createElement('div');copy.className='copy';copy.append(...button.children);wrap.append(coverNode(song.cover),copy);button.append(wrap);button.onclick=async()=>{try{await busy(button,()=>post('/api/play/song',{path:song.path}),'Playing…');note('Playing '+song.title);await refreshVolatile()}catch(error){note(error.message,true)}};fragment.append(button)}list.append(fragment)}
+function render(sel,data,query){const list=$(sel);list.replaceChildren();const term=query.toLowerCase();const filtered=data.filter(song=>!term||[song.title,song.artist,song.album,song.relative].join(' ').toLowerCase().includes(term));if(!filtered.length){const empty=document.createElement('div');empty.className='card details';empty.textContent=query?'No matches':'Nothing here yet';list.append(empty);return}const fragment=document.createDocumentFragment();for(const song of filtered){const button=document.createElement('button');button.className='item';button.innerHTML='<span class="name"></span><span class="meta"></span>';button.children[0].textContent=song.title;button.children[1].textContent=[song.artist,song.album].filter(Boolean).join(' • ')||song.relative;const wrap=document.createElement('div');wrap.className='item-cover';const copy=document.createElement('div');copy.className='copy';copy.append(...button.children);wrap.append(coverNode(song.cover),copy);button.append(wrap);button.onclick=async()=>{try{await post('/api/play/song',{path:song.path});await refreshVolatile()}catch(error){console.error(error)}};fragment.append(button)}list.append(fragment)}
 function selectPrompt(label){const option=new Option(label,'',false,false);option.disabled=true;return option}
 const MODE_LABELS={ipad_ipad:'External',laptop_laptop:'PC',ipad_laptop:'PC',ipad_both:'Both',laptop_ipad:'External',laptop_both:'Both'};const LOCAL_MODES=new Set(['ipad_laptop','ipad_both','laptop_laptop','laptop_both']);let pendingMode=null,outputTopology=null,outputProfileBusy=false,outputPreviewToken=null;const outputCard=$('#output-card'),outputProfile=$('#output-profile'),outputRoute=$('#output-route'),outputSink=$('#output-sink');function selectedCard(){return outputTopology?.cards.find(item=>item.name===outputCard.value)}
 function labelledOutputOption(row){return /^\[(?:N\/A|INT|MON|LOOP|VIRT)\] /.test(String(row?.label||''))}
@@ -1789,7 +1883,7 @@ function fillCards(preferred=''){
 async function refreshDevicePicker(cardName){
   outputTopology=await api('/api/outputs');fillCards(cardName);
 }
-async function applyMode(mode,output=null){const b=document.querySelector(`[data-mode="${mode}"]`);try{await busy(b,()=>post('/api/mode',{mode,password:$('#group-password').value,output}),'Applying audio route…','Audio route activated',true);await refreshAll()}catch(error){note(error.message,true)}}
+async function applyMode(mode,output=null){const b=document.querySelector(`[data-mode="${mode}"]`);try{await post('/api/mode',{mode,password:$('#group-password').value,output});await refreshAll()}catch(error){note(error.message,true)}}
 let outputStep='card';
 const outputSteps=['card','profile','route','sink'];
 function showOutputStep(step){
@@ -1874,19 +1968,63 @@ async function closeOutputPicker(){
   showOutputStep('card');outputProfileBusy=false;
 }
 $('#output-cancel').onclick=()=>{closeOutputPicker()}
-;function loadGroups(data){const state=data.groups,select=$('#group-select');select.replaceChildren(selectPrompt('Select group…'),...Object.entries(state.profiles).map(([key,g])=>new Option(key+' • '+g.group,key,key===state.active,key===state.active)));const show=()=>{const key=select.value||state.active,g=state.profiles[key];if(!g)return;$('#group-key').value=key;$('#group-name').value=g.group;$('#group-user').value=g.username;$('#group-server').value=g.server;$('#group-required').checked=!!g.passwordRequired};select.onchange=show;show()}$('#save-group').onclick=async()=>{try{await busy($('#save-group'),()=>post('/api/groups/save',{key:$('#group-key').value,group:$('#group-name').value,username:$('#group-user').value,server:$('#group-server').value,passwordRequired:$('#group-required').checked}),'Saving group…',null,false);await refreshAll();note('Group profile saved')}catch(error){note(error.message,true)}};$('#open-audio-options').onclick=()=>show('audio-options-page');
+;function loadGroups(data){const state=data.groups,select=$('#group-select');select.replaceChildren(selectPrompt('Select group…'),...Object.entries(state.profiles).map(([key,g])=>new Option(key+' • '+g.group,key,key===state.active,key===state.active)));const show=()=>{const key=select.value||state.active,g=state.profiles[key];if(!g)return;$('#group-key').value=key;$('#group-name').value=g.group;$('#group-user').value=g.username;$('#group-server').value=g.server;$('#group-required').checked=!!g.passwordRequired};select.onchange=show;show()}$('#save-group').onclick=async()=>{try{await post('/api/groups/save',{key:$('#group-key').value,group:$('#group-name').value,username:$('#group-user').value,server:$('#group-server').value,passwordRequired:$('#group-required').checked});await refreshAll()}catch(error){note(error.message,true)}};function ytIcon(label,path){const b=document.createElement('button');b.type='button';b.className='playlist-icon yt-rating-icon';b.title=label;b.setAttribute('aria-label',label);b.innerHTML=`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${path}"/></svg>`;return b}
+let ytLikedSongs=[],ytLikedSelected=new Set();
+function updateYtLikedSelection(){
+ const count=ytLikedSelected.size,button=$('#ytmusic-remove-selected');
+ $('#ytmusic-selected-count').textContent=count+' selected';button.disabled=!count;
+}
+async function removeYtLiked(items,button){
+ if(!items.length)return;
+ const label=items.length===1?(items[0].title||'this song'):items.length+' selected songs';
+ if(!confirm('Are you sure you want to remove '+label+' from Liked Music?'))return;
+ const result=await post('/api/ytmusic/remove-items',{items});
+ const removed=new Set(items.map(song=>song.videoId));
+ ytLikedSongs=ytLikedSongs.filter(song=>!removed.has(song.videoId));
+ for(const id of removed)ytLikedSelected.delete(id);
+ renderYtLiked();await refreshYtLike();return result;
+}
+function renderYtLiked(){
+ const box=$('#ytmusic-liked-list'),query=$('#ytmusic-liked-search').value.trim().toLocaleLowerCase();
+ const songs=query?ytLikedSongs.filter(song=>(song.title+'\n'+song.artist).toLocaleLowerCase().includes(query)):ytLikedSongs;
+ box.replaceChildren();updateYtLikedSelection();
+ if(!songs.length){const empty=document.createElement('div');empty.className='details';empty.textContent=query?'No matching liked music':'No liked music';box.append(empty);return}
+ for(const song of songs){
+  const row=document.createElement('div');row.className='playlist-row';
+  const selectWrap=document.createElement('label');selectWrap.className='playlist-select-wrap';
+  const select=document.createElement('input');select.type='checkbox';select.className='playlist-select';select.checked=ytLikedSelected.has(song.videoId);select.setAttribute('aria-label','Select '+(song.title||'track'));
+  select.onchange=()=>{select.checked?ytLikedSelected.add(song.videoId):ytLikedSelected.delete(song.videoId);updateYtLikedSelection()};selectWrap.append(select);
+  const info=document.createElement('button');info.type='button';info.className='item playlist-open';info.setAttribute('aria-label','Play '+(song.title||'track'));
+  const name=document.createElement('span');name.className='name';name.textContent=song.title||song.videoId;
+  const meta=document.createElement('span');meta.className='meta';meta.textContent=song.artist||'';info.append(name,meta);
+  info.onclick=async()=>{try{await post('/api/ytmusic/play-item',song)}catch(e){note(e.message,true)}};
+  row.append(info,selectWrap);box.append(row)
+ }
+}
+async function loadYtLiked(){const data=await api('/api/ytmusic/liked');ytLikedSongs=Array.isArray(data.songs)?data.songs:[];const ids=new Set(ytLikedSongs.map(song=>song.videoId));ytLikedSelected=new Set([...ytLikedSelected].filter(id=>ids.has(id)));renderYtLiked();await refreshYtLike()}
+$('#ytmusic-liked-search').addEventListener('input',renderYtLiked);
+$('#ytmusic-remove-selected').onclick=async()=>{try{await removeYtLiked(ytLikedSongs.filter(song=>ytLikedSelected.has(song.videoId)),$('#ytmusic-remove-selected'))}catch(e){note(e.message,true)}};
+$('#ytmusic-quickpicks').onclick=async()=>{try{await post('/api/ytmusic/quickpicks',{})}catch(e){console.error(e)}};
+$('#ytmusic-refresh-cookie').onclick=async()=>{const button=$('#ytmusic-refresh-cookie');try{await post('/api/ytmusic/refresh-cookie-begin',{});button.disabled=true;button.classList.add('busy');note('YouTube Music opened; capturing signed-in request…');const until=Date.now()+125000;while(Date.now()<until){await new Promise(resolve=>setTimeout(resolve,1000));const result=await api('/api/ytmusic/refresh-cookie-status');if(result.status==='saved'){note('YouTube Music cookie refreshed');return}if(result.status==='failed')throw Error(result.error||'Cookie refresh failed')}throw Error('No YouTube Music request was captured')}catch(e){note(e.message,true)}finally{button.disabled=false;button.classList.remove('busy')}};
+
+async function refreshYtLike(){const button=$('#ytmusic-like');try{const status=await api('/api/ytmusic/current-status');button.textContent=status.liked?'Unlike':'Like';button.dataset.liked=status.liked?'1':'0';button.title=status.title||'';return status}catch(error){button.title=error.message||String(error);return null}}
+$('#ytmusic-like').onclick=async()=>{const button=$('#ytmusic-like');try{const result=await post('/api/ytmusic/rate-current',{rating:'TOGGLE'});button.textContent=result.liked?'Unlike':'Like';button.dataset.liked=result.liked?'1':'0';if(result.liked){if(!ytLikedSongs.some(song=>song.videoId===result.videoId))ytLikedSongs.unshift({videoId:result.videoId,title:result.title,artist:''})}else ytLikedSongs=ytLikedSongs.filter(song=>song.videoId!==result.videoId);renderYtLiked()}catch(e){note(e.message,true)}};
+$('#ytmusic-liked').onclick=async()=>{show('ytmusic-liked-page');try{await loadYtLiked()}catch(e){show('profiles');note(e.message,true)}};
+$('#ytmusic-liked-back').onclick=()=>show('profiles');
+refreshYtLike();setInterval(refreshYtLike,2000);
+$('#open-audio-options').onclick=()=>show('audio-options-page');
 $('#open-pc').onclick=async()=>{try{show('pc');await refreshStatic()}catch(error){note(error.message,true)}};
-$('#away-display-toggle').onclick=async()=>{try{await busy($('#away-display-toggle'),()=>post('/api/away-display'),'Switching away/display…',null,false);await refreshVolatile()}catch(error){note(error.message,true)}};
+$('#away-display-toggle').onclick=async()=>{try{await busy($('#away-display-toggle'),()=>post('/api/away-display'),'Switching away/display…','Away/display state changed',true);await refreshVolatile()}catch(error){note(error.message,true)}};
 $('#pc-back').onclick=()=>show('profiles');
 $('#all-songs').onclick=async()=>{try{all=(await api('/api/songs')).songs;show('songs');render('#song-list',all,'');}catch(error){note(error.message,true)}};
 $('#song-search').oninput=()=>render('#song-list',all,$('#song-search').value);
 $('#playlist-search').oninput=()=>render('#playlist-songs',inside,$('#playlist-search').value);
 document.querySelectorAll('[data-back]').forEach(button=>button.onclick=()=>show(button.dataset.back));
-document.querySelectorAll('[data-cmd]').forEach(button=>button.onclick=async()=>{try{await busy(button,()=>post('/api/player/command',{command:button.dataset.cmd}),'…',null,false);await pollLocal()}catch(error){note(error.message,true)}});
-$('#repeat').onclick=async()=>{try{const data=await api('/api/player');await post('/api/player/repeat',{mode:{off:'all',all:'one',one:'off'}[data.repeat]||'off'});await pollLocal()}catch(error){note(error.message,true)}};
-$('#shuffle').onclick=async()=>{try{await busy($('#shuffle'),()=>post('/api/player/shuffle'),'Shuffling remaining queue…','Remaining queue shuffled.',true)}catch(error){note(error.message,true)}};
-for(const [id,command] of [['system-previous','previous'],['system-toggle','toggle'],['system-next','next']])$('#'+id).onclick=async()=>{if(command!=='toggle'){const media=state.system;media.skipPending=true;media.skipFrom=media.trackKey;media.skipStarted=performance.now();media.skipWarned=false;resetSystemPosition()}else{state.system.skipPending=false}try{await busy($('#'+id),()=>post('/api/system-media',{command}),'…',null,false);await pollSystem(true)}catch(error){if(command!=='toggle')systemPositionError('System media skip failed: '+(error?.message||String(error)));else note(error.message,true)}};
-$('#audio-toggle').onclick=async()=>{try{await busy($('#audio-toggle'),()=>post('/api/audio-toggle'),'Switching audio services…','Audio services updated',true);await refreshStatic()}catch(error){note(error.message,true)}};
+document.querySelectorAll('[data-cmd]').forEach(button=>button.onclick=async()=>{try{await post('/api/player/command',{command:button.dataset.cmd});await pollLocal()}catch(error){console.error('Player command failed',error)}});
+$('#repeat').onclick=async()=>{try{const data=await api('/api/player');await post('/api/player/repeat',{mode:{off:'all',all:'one',one:'off'}[data.repeat]||'off'});await pollLocal()}catch(error){console.error(error)}};
+$('#shuffle').onclick=async()=>{try{await post('/api/player/shuffle')}catch(error){note(error.message,true)}};
+for(const [id,command] of [['system-previous','previous'],['system-toggle','toggle'],['system-next','next']])$('#'+id).onclick=async()=>{if(command!=='toggle'){const media=state.system;media.skipPending=true;media.skipFrom=media.trackKey;media.skipStarted=performance.now();media.skipWarned=false;resetSystemPosition()}else{state.system.skipPending=false}try{await post('/api/system-media',{command});await pollSystem(true)}catch(error){if(command!=='toggle')systemPositionError('System media skip failed: '+(error?.message||String(error)));else console.error('System media toggle failed',error)}};
+$('#audio-toggle').onclick=async()=>{try{await post('/api/audio-toggle');await refreshStatic()}catch(error){note(error.message,true)}};
 $('#restart-sonobus').onclick=()=>busy($('#restart-sonobus'),()=>post('/api/restart-sonobus'),'Restarting SonoBus…','SonoBus restarted',true).then(refreshVolatile).catch(error=>note(error.message,true));
 $('#restart-airplay').onclick=()=>busy($('#restart-airplay'),()=>post('/api/restart-airplay'),'Restarting AirPlay…','AirPlay restarted',true).then(refreshVolatile).catch(error=>note(error.message,true));
 $('#restart-vnc').onclick=()=>busy(
@@ -1929,7 +2067,7 @@ function renderFilterDirectory(directory){
   root.append(list)
 }
 async function selectFilterProfile(button,name){
-  try{await busy(button,()=>post('/api/select',{profile:name}),'Switching profile…','Profile activated',true);await refreshStatic();await openFilterDirectory(filterDirectoryPath)}catch(error){note(error.message,true)}
+  try{await post('/api/select',{profile:name});await refreshStatic();await openFilterDirectory(filterDirectoryPath)}catch(error){note(error.message,true)}
 }
 function renderProfileSnapshot(data){
   renderActiveProfile(data);
@@ -1942,7 +2080,7 @@ function playlistAction(playlist,shuffle){
   button.innerHTML=shuffle
   ? '<svg class="media-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h3c5 0 7 10 12 10h3m-4-4 4 4-4 4M3 17h3c2 0 3-1 4-3m3-4c1-2 2-3 5-3h3m-4-4 4 4-4 4"/></svg>'
   : '<svg class="media-icon" viewBox="0 0 24 24" aria-hidden="true"><path class="icon-fill" d="M8 5.5 19 12 8 18.5z"/></svg>';
-  button.onclick=()=>busy(button,()=>post('/api/play/playlist',{name:playlist.name,shuffle}),'…',null,false).then(refreshVolatile).catch(error=>note(error.message,true));
+  button.onclick=()=>post('/api/play/playlist',{name:playlist.name,shuffle}).then(refreshVolatile).catch(error=>console.error(error));
   return button
 }
 function renderPlaylistSnapshot(playlists){
@@ -1989,8 +2127,8 @@ async function refreshVolatile(){if(volatileRefreshRunning||document.hidden)retu
 let customSchema=null,customRowCount=0;
 function customSofaPointRow(){
   const row=document.createElement('div');row.className='custom-hrir-row';row.dataset.row=String(++customRowCount);
-  row.innerHTML='<div class="custom-fields"><label>Azimuth<input inputmode="text" data-field="azimuth" placeholder="20.5"></label><label>Elevation<input inputmode="text" data-field="elevation" placeholder="-15"></label><label>Audio at this point<select data-field="source"><option value="" selected disabled>Select audio source…</option><option value="average">Average left + right</option><option value="left">Left only</option><option value="right">Right only</option><option value="stereo">Stereo L→L, R→R</option><option value="swap">Stereo L→R, R→L</option></select></label><button class="action" type="button">Remove SOFA point</button></div>';
-  row.querySelector('button').onclick=()=>{if(document.querySelectorAll('.custom-hrir-row').length>1){row.remove();drawCustomSphere()}else note('At least one HRIR is required',true)};row.querySelectorAll('input,select').forEach(control=>control.addEventListener('input',drawCustomSphere));return row
+  row.innerHTML='<div class="custom-fields"><label>Azimuth<input inputmode="text" data-field="azimuth" placeholder="20.5"></label><label>Elevation<input inputmode="text" data-field="elevation" placeholder="-15"></label><label>Audio at this point<select data-field="source"><option value="" selected disabled>Select audio source…</option><option value="average">Average left + right</option><option value="left">Left only</option><option value="right">Right only</option><option value="stereo">Stereo L→L, R→R</option><option value="swap">Stereo L→R, R→L</option></select></label><button class="action" type="button" data-action="remove-sofa-point">Remove SOFA point</button></div>';
+  row.querySelector('[data-action="remove-sofa-point"]').onclick=()=>{if(document.querySelectorAll('.custom-hrir-row').length>1){row.remove();drawCustomSphere()}else note('At least one HRIR is required',true)};row.querySelectorAll('input,select').forEach(control=>control.addEventListener('input',drawCustomSphere));return row
 }
 async function openCustomFilterPage(){
   customSchema=await api('/api/custom-filter/schema');if(!customSchema.devices.length)throw new Error('No compatible device baselines found');

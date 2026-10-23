@@ -1,0 +1,30 @@
+{
+  "manifest_version": 2,
+  "name": "YouTube Music Bridge",
+  "version": "12.0",
+  "description": "Reports the current track and automatically refreshes Media Control's ytmusicapi browser cookie.",
+  "permissions": [
+    "tabs",
+    "webRequest",
+    "webRequestBlocking",
+    "https://music.youtube.com/*",
+    "http://127.0.0.1:8766/*",
+    "http://localhost:8766/*"
+  ],
+  "background": {
+    "scripts": [
+      "background.js"
+    ]
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://music.youtube.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
