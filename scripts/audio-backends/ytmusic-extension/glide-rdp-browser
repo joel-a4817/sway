@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# web-ext invokes this as if it were Firefox. Preserve only the RDP port;
+# deliberately discard its temporary -profile/-no-remote/-foreground flags.
+port=""
+while (($#)); do
+  case "$1" in
+    -start-debugger-server|--start-debugger-server)
+      shift
+      (($#)) || { echo "Missing debugger port" >&2; exit 64; }
+      port="$1"
+      ;;
+    -start-debugger-server=*) port="${1#*=}" ;;
+  esac
+  shift
+done
+
+[[ "$port" =~ ^[0-9]+$ ]] || {
+  echo "web-ext did not provide a valid debugger port" >&2
+  exit 64
+}
+
+# Use the normal Glide command and therefore Glide's normal profile/config.
+exec glide --start-debugger-server "$port"

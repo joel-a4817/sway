@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+exec /run/current-system/sw/bin/web-ext run \
+  --source-dir=/home/joel/.config/sway/scripts/audio-backends/ytmusic-extension \
+  --firefox=/home/joel/.config/sway/scripts/audio-backends/ytmusic-extension/glide-rdp-browser \
+  --no-reload \
+  --no-config-discovery

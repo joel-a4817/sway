@@ -127,7 +127,7 @@ bindsym --no-repeat $mod+shift+i fullscreen disable; exec systemctl suspend
 bindsym --no-repeat $mod+F2 fullscreen disable; exec $term -T "$popup-tuis" -e clipse
 bindsym --no-repeat $mod+F1 fullscreen disable; exec $term -T "$popup-tuis" -e yazi
 
-bindsym --no-repeat $mod+Mod1+g fullscreen disable; exec glide
+bindsym --no-repeat $mod+Mod1+g fullscreen disable; exec /home/joel/.config/sway/scripts/audio-backends/ytmusic-extension/glide-with-ytmusic-temp-extension
 bindsym --no-repeat $mod+Mod1+z fullscreen disable; exec solaar
 bindsym --no-repeat $mod+Mod1+x fullscreen disable; exec kamoso
 bindsym --no-repeat $mod+Mod1+w fullscreen disable; exec karere
