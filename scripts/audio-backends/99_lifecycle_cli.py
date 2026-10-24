@@ -331,12 +331,10 @@ def topology_cli():
             print(json.dumps(data,ensure_ascii=False));return
         if len(sys.argv)==3 and sys.argv[1]=='--restart-service':
             name=sys.argv[2]
-            paths={'1':'/api/restart-camilladsp','2':'/api/restart-sonobus',
-                   '3':'/api/restart-airplay','4':'/api/restart-vnc'}
-            if name not in paths:raise ValueError('Choose restart 1, 2, 3 or 4')
+            paths={'2':'/api/restart-sonobus','3':'/api/restart-airplay','4':'/api/restart-vnc'}
+            if name not in paths:raise ValueError('Choose restart 2, 3 or 4')
             if not alive(rpid(SERVERPID)):
-                if name=='1':result=restart_camilla()
-                elif name=='2':result=restart_sonobus_action()
+                if name=='2':result=restart_sonobus_action()
                 elif name=='3':result=restart_airplay()
                 else:result=restart_vnc()
                 print(json.dumps(result));return

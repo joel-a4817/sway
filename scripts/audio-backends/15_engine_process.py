@@ -417,20 +417,4 @@ def switch_profile(name):
         if MODES[audio_mode()][1]=='system':restore_dsp_desktop_sink()
         if MODES[audio_mode()][2]:restore_selected_local_output()
         return {'profile':profile_id(target),'pid':pid,'mode':mode_state()}
-@media_transaction
-def restart_camilla():
-    with LOCK:
-        if selected_filter()==NO_FILTER:
-            return {'profile':NO_FILTER,'pid':None,'restarted':False}
-        if STOPPED.exists():raise RuntimeError('Audio is stopped; start audio before restarting CamillaDSP')
-        name=active()
-        if not name:raise RuntimeError('No active profile')
-        target=profile(name)
-        stop_local_monitor()
-        stop_camilla(include_stale=True)
-        pid=start_camilla(target)
-        if MODES[audio_mode()][1]=='system':restore_dsp_desktop_sink()
-        if MODES[audio_mode()][2]:restore_selected_local_output()
-        return {'profile':name,'pid':pid,'restarted':True}
-
 # This is the single saved master shared by the server and Media Control.

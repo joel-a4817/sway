@@ -114,7 +114,6 @@ class H(BaseHTTPRequestHandler):
             elif p=='/api/custom-filter/create':r=create_custom_filter(d)
             elif p=='/api/audio-toggle':r=toggle_audio_services()
             elif p=='/api/ensure-audio-baseline':r=ensure_physical_audio_baseline()
-            elif p=='/api/restart-camilladsp':r=restart_camilla()
             elif p=='/api/restart-sonobus':r=restart_sonobus_action(d.get('password'))
             elif p=='/api/restart-airplay':r=restart_airplay()
             elif p=='/api/restart-vnc':r=restart_vnc()
