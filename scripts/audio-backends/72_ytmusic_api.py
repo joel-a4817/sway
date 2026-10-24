@@ -12,6 +12,38 @@ YTMUSIC_LOCK=threading.RLock()
 YTMUSIC_CURRENT={'videoId':'','title':'','url':'','reported':0.0,'quickPickToken':'','liked':False}
 YTMUSIC_QUICK_PICK_TOKEN=''
 YTMUSIC_LIKED_CACHE={'at':0.0,'ids':set()}
+YTMUSIC_GLIDE_LAUNCHER=HOME/'.config/sway/scripts/audio-backends/ytmusic-extension/glide-with-ytmusic-temp-extension'
+
+def _glide_running():
+    result=run([exe('pgrep'),'-x','glide'],False,5,media_env())
+    return result.returncode==0 and any(row.isdecimal() for row in result.stdout.split())
+
+def _open_ytmusic_url(url):
+    url=str(url or '')
+    parsed=urlparse(url)
+    if parsed.scheme!='https' or parsed.netloc!='music.youtube.com':
+        raise ValueError('Only YouTube Music URLs can be opened through the Glide bridge')
+    if _glide_running():
+        opener=shutil.which('xdg-open')
+        if not opener:raise RuntimeError('xdg-open is unavailable')
+        opened=subprocess.run([opener,url],text=True,capture_output=True,timeout=15,env=media_env())
+        if opened.returncode:raise RuntimeError(opened.stderr.strip() or 'Could not open YouTube Music')
+        return {'startedGlide':False}
+    if not YTMUSIC_GLIDE_LAUNCHER.is_file() or not os.access(YTMUSIC_GLIDE_LAUNCHER,os.X_OK):
+        raise RuntimeError('YouTube Music Glide launcher is missing or not executable')
+    with (STATE/'ytmusic-glide-launch.log').open('ab',buffering=0) as log:
+        process=subprocess.Popen([str(YTMUSIC_GLIDE_LAUNCHER),url],stdin=subprocess.DEVNULL,
+                                 stdout=log,stderr=subprocess.STDOUT,start_new_session=True,env=media_env())
+    deadline=time.monotonic()+2.0
+    while time.monotonic()<deadline:
+        code=process.poll()
+        if code is not None:
+            raise RuntimeError('Glide extension launcher exited with status '+str(code)+'; check '+str(STATE/'ytmusic-glide-launch.log'))
+        if _glide_running():return {'startedGlide':True}
+        time.sleep(.05)
+    if process.poll() is not None:
+        raise RuntimeError('Glide extension launcher exited before Glide started; check '+str(STATE/'ytmusic-glide-launch.log'))
+    return {'startedGlide':True,'pending':True}
 
 def _ytmusic():
     import sys
@@ -89,12 +121,10 @@ YTMUSIC_REFRESH={'pending':False,'started':0.0,'status':'idle','error':''}
 def ytmusic_begin_cookie_refresh():
     with YTMUSIC_LOCK:
         YTMUSIC_REFRESH.update(pending=True,started=time.time(),status='waiting',error='')
-    opener=shutil.which('xdg-open')
-    if not opener:raise RuntimeError('xdg-open is unavailable')
-    opened=subprocess.run([opener,'https://music.youtube.com/?media_control_refresh_cookie=1'],text=True,capture_output=True,timeout=15)
-    if opened.returncode:
-        with YTMUSIC_LOCK:YTMUSIC_REFRESH.update(pending=False,status='failed',error=opened.stderr.strip() or 'Could not open YouTube Music')
-        raise RuntimeError(YTMUSIC_REFRESH['error'])
+    try:_open_ytmusic_url('https://music.youtube.com/?media_control_refresh_cookie=1')
+    except Exception as error:
+        with YTMUSIC_LOCK:YTMUSIC_REFRESH.update(pending=False,status='failed',error=str(error))
+        raise
     return {'status':'waiting'}
 
 def ytmusic_refresh_cookie_status():
@@ -136,10 +166,7 @@ def _open_ytmusic_track(video_id,title='',playlist=''):
     if playlist:query.append('list='+str(playlist))
     query.extend(('mcquickpick='+YTMUSIC_QUICK_PICK_TOKEN,'mcautoplay=1'))
     url='https://music.youtube.com/watch?'+'&'.join(query)
-    opener=shutil.which('xdg-open')
-    if not opener:raise RuntimeError('xdg-open is unavailable')
-    opened=subprocess.run([opener,url],text=True,capture_output=True,timeout=15)
-    if opened.returncode:raise RuntimeError(opened.stderr.strip() or 'Could not open YouTube Music')
+    _open_ytmusic_url(url)
     return {'videoId':video_id,'title':str(title or video_id)[:300],'url':url}
 
 def ytmusic_play_item(video_id,title=''):

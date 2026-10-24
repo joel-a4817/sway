@@ -157,7 +157,7 @@ Custom Spatial Filter reads P0135 free-field-compensated minimum-phase-compensat
 
 ### YouTube Music authenticated server and Glide bridge
 
-`72_ytmusic_api.py` owns Quick Picks, authenticated ratings, Liked Music playback and multi-select removal, and in-place browser-cookie refresh through `/home/joel/ytmusicapi` and `~/.config/ytmusicapi/browser.json`. The Refresh cookie button opens YouTube Music in Glide. The bundled Glide bridge captures the next signed-in YouTube Music API request automatically, sends its request headers only to the local Media Control server, and atomically replaces the cookie-backed browser authentication file only after validation. It deliberately contains no MPRIS logic. The Glide temporary extension reports the current `videoId` and physically activates YouTube Music's Start playback control for URLs marked `mcautoplay=1`.
+`72_ytmusic_api.py` owns Quick Picks, authenticated ratings, Liked Music playback and multi-select removal, and in-place browser-cookie refresh through `/home/joel/ytmusicapi` and `~/.config/ytmusicapi/browser.json`. YouTube Music actions reuse an open Glide instance; when Glide is closed, the backend starts the bundled web-ext launcher so Glide opens with the temporary extension already loaded. The bundled Glide bridge captures the next signed-in YouTube Music API request automatically, sends its request headers only to the local Media Control server, and atomically replaces the cookie-backed browser authentication file only after validation. It deliberately contains no MPRIS logic. The Glide temporary extension reports the current `videoId` and physically activates YouTube Music's Start playback control for URLs marked `mcautoplay=1`.
 
 ## `ytmusic-extension/background.js`
 

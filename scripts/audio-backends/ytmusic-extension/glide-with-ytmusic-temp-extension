@@ -1,8 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-exec /run/current-system/sw/bin/web-ext run \
-  --source-dir=/home/joel/.config/sway/scripts/audio-backends/ytmusic-extension \
-  --firefox=/home/joel/.config/sway/scripts/audio-backends/ytmusic-extension/glide-rdp-browser \
-  --no-reload \
+DIR=/home/joel/.config/sway/scripts/audio-backends/ytmusic-extension
+args=(
+  run
+  "--source-dir=$DIR"
+  "--firefox=$DIR/glide-rdp-browser"
+  --no-reload
   --no-config-discovery
+)
+for url in "$@"; do
+  case "$url" in
+    https://music.youtube.com/*) args+=(--start-url "$url") ;;
+    *) echo "Refusing non-YouTube-Music start URL: $url" >&2; exit 64 ;;
+  esac
+done
+exec /run/current-system/sw/bin/web-ext "${args[@]}"
