@@ -10,8 +10,4 @@ args=(
   --no-config-discovery
 )
 
-if (($#)); then
-  args+=(--start-url "$1")
-fi
-
 exec /run/current-system/sw/bin/web-ext "${args[@]}"

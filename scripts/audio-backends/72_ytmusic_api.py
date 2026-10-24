@@ -11,33 +11,72 @@ from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 YTMUSICAPI_REPO=HOME/'ytmusicapi'
 YTMUSIC_AUTH=HOME/'.config/ytmusicapi/browser.json'
 YTMUSIC_LOCK=threading.RLock()
-YTMUSIC_CURRENT={'videoId':'','title':'','url':'','reported':0.0,'quickPickToken':'','liked':False}
+YTMUSIC_CURRENT={'videoId':'','title':'','url':'','reported':0.0,'quickPickToken':'','liked':False,'disliked':False,'ratingKnown':False}
 YTMUSIC_QUICK_PICK_TOKEN=''
 YTMUSIC_LIKED_CACHE={'at':0.0,'ids':set()}
-YTMUSIC_GLIDE_LAUNCHER=HOME/'.config/sway/scripts/audio-backends/ytmusic-extension/glide-with-ytmusic-temp-extension'
+YTMUSIC_GLIDE_COMMANDS=[]
+YTMUSIC_GLIDE_INFLIGHT={}
+YTMUSIC_GLIDE_LAUNCHER=SCRIPTS/'audio-backends/ytmusic-extension/glide-with-ytmusic-temp-extension'
+YTMUSIC_GLIDE_LAUNCHED_AT=0.0
+YTMUSIC_EXTENSION_READY_AT=0.0
+YTMUSIC_RATING_BY_VIDEO={}
 
 def _glide_running():
-    return subprocess.run(['pgrep','-x','glide'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0
+    # Glide's process name can be wrapped by Nix, so /proc cmdline is more
+    # reliable than pgrep -x glide. Match only this user's executable argv[0].
+    for entry in Path('/proc').iterdir():
+        if not entry.name.isdigit():continue
+        try:
+            if entry.stat().st_uid!=os.getuid():continue
+            argv0=(entry/'cmdline').read_bytes().split(b'\0',1)[0]
+            name=Path(os.fsdecode(argv0)).name.casefold()
+            if name=='glide' or name.startswith('glide-') or name.endswith('-glide'):
+                return True
+        except (OSError,ValueError):continue
+    return False
 
-def _server_launch_url(url):
+def _queue_glide_command(kind,**payload):
+    command={'id':secrets.token_urlsafe(18),'type':kind,**payload}
+    with YTMUSIC_LOCK:
+        YTMUSIC_GLIDE_COMMANDS.append(command)
+        del YTMUSIC_GLIDE_COMMANDS[:-32]
+    return command
+
+def ytmusic_extension_ready():
+    global YTMUSIC_EXTENSION_READY_AT
+    with YTMUSIC_LOCK:YTMUSIC_EXTENSION_READY_AT=time.monotonic()
+    return {'ready':True}
+
+def ytmusic_next_glide_command():
+    with YTMUSIC_LOCK:
+        if time.monotonic()-YTMUSIC_EXTENSION_READY_AT>5:return {'command':None}
+        if not YTMUSIC_GLIDE_COMMANDS:return {'command':None}
+        command=YTMUSIC_GLIDE_COMMANDS.pop(0)
+        YTMUSIC_GLIDE_INFLIGHT[command['id']]=command
+        if len(YTMUSIC_GLIDE_INFLIGHT)>32:
+            del YTMUSIC_GLIDE_INFLIGHT[next(iter(YTMUSIC_GLIDE_INFLIGHT))]
+        return {'command':command}
+
+def ytmusic_ack_glide_command(command_id):
+    command_id=str(command_id or '')
+    with YTMUSIC_LOCK:
+        if command_id not in YTMUSIC_GLIDE_INFLIGHT:raise ValueError('Unknown Glide command')
+        YTMUSIC_GLIDE_INFLIGHT.pop(command_id,None)
+    return {'acknowledged':True}
+
+def _open_required_music_url(url):
+    global YTMUSIC_GLIDE_LAUNCHED_AT
     parsed=urlparse(str(url or ''))
     if parsed.scheme!='https' or parsed.netloc!='music.youtube.com':
         raise ValueError('Only YouTube Music URLs can be opened through Glide')
-    query=dict(parse_qsl(parsed.query,keep_blank_values=True))
-    query['mcserverlaunch']='1'
-    return urlunparse(parsed._replace(query=urlencode(query)))
-
-def _open_required_music_url(url):
-    if _glide_running():
-        opener=shutil.which('xdg-open')
-        if not opener:raise RuntimeError('xdg-open is unavailable')
-        opened=subprocess.run([opener,url],text=True,capture_output=True,timeout=15)
-        if opened.returncode:raise RuntimeError(opened.stderr.strip() or 'Could not open YouTube Music')
-        return
-    if not YTMUSIC_GLIDE_LAUNCHER.is_file() or not os.access(YTMUSIC_GLIDE_LAUNCHER,os.X_OK):
-        raise RuntimeError('Glide YouTube Music launcher is missing or not executable')
-    subprocess.Popen([str(YTMUSIC_GLIDE_LAUNCHER),_server_launch_url(url)],start_new_session=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-
+    command=_queue_glide_command('open',url=url)
+    if _glide_running() or time.monotonic()-YTMUSIC_GLIDE_LAUNCHED_AT<10:return command
+    if not YTMUSIC_GLIDE_LAUNCHER.is_file():
+        with YTMUSIC_LOCK:YTMUSIC_GLIDE_COMMANDS.remove(command)
+        raise RuntimeError('Glide YouTube Music launcher is unavailable')
+    subprocess.Popen([str(YTMUSIC_GLIDE_LAUNCHER)],start_new_session=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    YTMUSIC_GLIDE_LAUNCHED_AT=time.monotonic()
+    return {'launched':True,'command':command}
 
 def _ytmusic():
     import sys
@@ -66,15 +105,24 @@ def ytmusic_report_current(data):
     title=str(data.get('title') or '')[:300]
     token=str(data.get('quickPickToken') or '')
     with YTMUSIC_LOCK:
-        liked=video_id in _cached_liked_ids()
-        YTMUSIC_CURRENT.update(videoId=video_id,title=title,url=url,reported=time.time(),quickPickToken=token,liked=liked)
-        return {'videoId':video_id,'title':title,'liked':liked,'reported':True}
-
-def _current_track():
-    row=dict(YTMUSIC_CURRENT)
-    if not row.get('videoId'):
-        raise RuntimeError('Glide has not reported the current YouTube Music track. Reload the YouTube Music tab and retry.')
-    return row
+        same=YTMUSIC_CURRENT.get('videoId')==video_id
+        cached=YTMUSIC_RATING_BY_VIDEO.get(video_id)
+        liked=cached=='LIKE' or (bool(YTMUSIC_CURRENT.get('liked')) if same else False)
+        disliked=cached=='DISLIKE' or (bool(YTMUSIC_CURRENT.get('disliked')) if same else False)
+        rating_known=cached in ('LIKE','DISLIKE','INDIFFERENT') or (bool(YTMUSIC_CURRENT.get('ratingKnown')) if same else False)
+        if not rating_known:
+            try:
+                song=_auth_call(_ytmusic().get_song,video_id)
+                rating=str((song or {}).get('likeStatus') or '').upper()
+                disliked=rating=='DISLIKE'
+                liked=rating=='LIKE' or video_id in _cached_liked_ids()
+                if liked:disliked=False
+                rating_known=rating in ('LIKE','DISLIKE') or liked
+                if rating_known:YTMUSIC_RATING_BY_VIDEO[video_id]='LIKE' if liked else 'DISLIKE'
+            except Exception:
+                pass
+        YTMUSIC_CURRENT.update(videoId=video_id,title=title,url=url,reported=time.time(),quickPickToken=token,liked=liked,disliked=disliked,ratingKnown=rating_known)
+        return {'videoId':video_id,'title':title,'liked':liked,'disliked':disliked,'reported':True}
 
 def _auth_call(call,*args,**kwargs):
     try:return call(*args,**kwargs)
@@ -152,19 +200,20 @@ def ytmusic_refresh_cookie(headers_raw):
             raise
         return {'status':'saved'}
 
-def _open_ytmusic_track(video_id,title='',playlist=''):
+def _open_ytmusic_track(video_id,title='',playlist='',replace_music_tabs=False):
     global YTMUSIC_QUICK_PICK_TOKEN
     video_id=_valid_video_id(video_id)
     YTMUSIC_QUICK_PICK_TOKEN=secrets.token_urlsafe(18)
     query=['v='+video_id]
     if playlist:query.append('list='+str(playlist))
-    query.extend(('mcquickpick='+YTMUSIC_QUICK_PICK_TOKEN,'mcautoplay=1'))
+    query.extend(('mcquickpick='+YTMUSIC_QUICK_PICK_TOKEN,'mcautoplay=1'));
+    if replace_music_tabs:query.append('mcreplacemusictabs=1')
     url='https://music.youtube.com/watch?'+'&'.join(query)
     _open_required_music_url(url)
     return {'videoId':video_id,'title':str(title or video_id)[:300],'url':url}
 
 def ytmusic_play_item(video_id,title=''):
-    with YTMUSIC_LOCK:return _open_ytmusic_track(video_id,title)
+    with YTMUSIC_LOCK:return _open_ytmusic_track(video_id,title,replace_music_tabs=True)
 
 def ytmusic_quick_picks():
     global YTMUSIC_QUICK_PICK_TOKEN
@@ -177,7 +226,7 @@ def ytmusic_quick_picks():
         seed=random.choice(choices)
         watch=yt.get_watch_playlist(videoId=seed['videoId'],limit=100,radio=True)
         playlist=watch.get('playlistId')
-        result=_open_ytmusic_track(seed['videoId'],seed.get('title') or '',playlist or '')
+        result=_open_ytmusic_track(seed['videoId'],seed.get('title') or '',playlist or '',replace_music_tabs=True)
         result['artist']=_artists(seed)
         return result
 
@@ -185,30 +234,77 @@ def ytmusic_current_status():
     with YTMUSIC_LOCK:
         current=dict(YTMUSIC_CURRENT)
         media=system_state()
-        fresh=bool(current.get('videoId')) and time.time()-float(current.get('reported') or 0)<6.0
+        fresh=bool(current.get('videoId')) and time.time()-float(current.get('reported') or 0)<30.0
         reported_title=_media_title(current.get('title'))
         media_title=_media_title(media.get('title'))
-        same_title=fresh and bool(reported_title and media_title) and (reported_title in media_title or media_title in reported_title)
-        available=bool(media.get('available') and same_title)
+        reported_words=set(reported_title.split());media_words=set(media_title.split())
+        overlap=len(reported_words & media_words)/max(1,min(len(reported_words),len(media_words)))
+        media_video_id=''
+        try:
+            media_url=urlparse(str(media.get('url') or ''))
+            if media_url.netloc=='music.youtube.com':media_video_id=dict(parse_qsl(media_url.query)).get('v','')
+        except (TypeError,ValueError):pass
+        exact_video=bool(media_video_id and media_video_id==current.get('videoId'))
+        same_title=bool(reported_title and media_title) and (reported_title in media_title or media_title in reported_title or overlap>=0.5)
+        active=media.get('status') in ('Playing','Paused')
+        available=bool(fresh and media.get('available') and active and (exact_video or same_title))
         if not available:
-            return {'available':False,'liked':False,'title':'','reason':'Like state unavailable for current system media'}
-        return {'available':True,'videoId':current['videoId'],'title':current.get('title') or current['videoId'],'liked':bool(current.get('liked'))}
+            return {'available':False,'liked':False,'disliked':False,'title':'','reason':'Rating state unavailable for current system media'}
+        cached=YTMUSIC_RATING_BY_VIDEO.get(current['videoId'])
+        if cached in ('LIKE','DISLIKE','INDIFFERENT'):
+            current['liked']=cached=='LIKE';current['disliked']=cached=='DISLIKE';current['ratingKnown']=True
+            YTMUSIC_CURRENT.update(liked=current['liked'],disliked=current['disliked'],ratingKnown=True)
+        elif not current.get('ratingKnown'):
+            try:
+                song=_auth_call(_ytmusic().get_song,current['videoId'])
+                rating=str((song or {}).get('likeStatus') or '').upper()
+                if rating in ('LIKE','DISLIKE'):
+                    YTMUSIC_RATING_BY_VIDEO[current['videoId']]=rating
+                    current['liked']=rating=='LIKE';current['disliked']=rating=='DISLIKE';current['ratingKnown']=True
+                    YTMUSIC_CURRENT.update(liked=current['liked'],disliked=current['disliked'],ratingKnown=True)
+                elif current['videoId'] in _cached_liked_ids():
+                    YTMUSIC_RATING_BY_VIDEO[current['videoId']]='LIKE'
+                    current['liked']=True;current['disliked']=False;current['ratingKnown']=True
+                    YTMUSIC_CURRENT.update(liked=True,disliked=False,ratingKnown=True)
+                # Empty likeStatus is eventually consistent and is not authoritative.
+            except Exception:
+                pass
+        return {'available':True,'videoId':current['videoId'],'title':current.get('title') or current['videoId'],'liked':bool(current.get('liked')),'disliked':bool(current.get('disliked'))}
+
+def _rating_response_text(response):
+    for action in (response or {}).get('actions',[]):
+        renderer=((action.get('addToToastAction') or {}).get('item') or {}).get('notificationActionRenderer') or {}
+        runs=(renderer.get('responseText') or {}).get('runs') or []
+        text=''.join(str(run.get('text') or '') for run in runs).strip()
+        if text:return text
+    return ''
 
 def ytmusic_rate_current(rating):
     rating=str(rating or '').upper()
     with YTMUSIC_LOCK:
         status=ytmusic_current_status()
         if not status.get('available'):raise RuntimeError(status.get('reason') or 'Like state unavailable')
-        current=_current_track();yt=_ytmusic();liked,_=_liked_ids(yt)
-        was_liked=current['videoId'] in liked
+        video_id=status['videoId'];was_liked=bool(status.get('liked'));was_disliked=bool(status.get('disliked'))
         if rating=='TOGGLE':rating='INDIFFERENT' if was_liked else 'LIKE'
-        if rating not in ('LIKE','INDIFFERENT'):raise ValueError('Current-track toggle accepts LIKE, INDIFFERENT, or TOGGLE')
-        previous='LIKE' if was_liked else 'INDIFFERENT'
-        result=_rate(current['videoId'],current.get('title') or current['videoId'],rating,previous=previous)
-        result['liked']=rating=='LIKE'
-        YTMUSIC_CURRENT['liked']=result['liked']
-        if result['liked']:YTMUSIC_LIKED_CACHE['ids'].add(current['videoId'])
-        else:YTMUSIC_LIKED_CACHE['ids'].discard(current['videoId'])
+        elif rating=='DISLIKE_TOGGLE':rating='INDIFFERENT' if was_disliked else 'DISLIKE'
+        if rating not in ('LIKE','DISLIKE','INDIFFERENT'):raise ValueError('Current-track rating accepts LIKE, DISLIKE, INDIFFERENT, TOGGLE, or DISLIKE_TOGGLE')
+        expected=rating=='LIKE';disliked=rating=='DISLIKE'
+        response=_auth_call(_ytmusic().rate_song,video_id,_like_status(rating))
+        response_text=_rating_response_text(response)
+        # The live API returns a responseContext/action immediately while library
+        # reads are eventually consistent. Accept only a real API response, then
+        # pin local state until the normal cache window expires.
+        if not isinstance(response,dict) or not response.get('responseContext'):
+            raise RuntimeError('YouTube Music did not acknowledge the rating request')
+        YTMUSIC_RATING_BY_VIDEO[video_id]=rating
+        YTMUSIC_CURRENT.update(liked=expected,disliked=disliked,ratingKnown=True,ratingChangedAt=time.time())
+        if expected:YTMUSIC_LIKED_CACHE['ids'].add(video_id)
+        else:YTMUSIC_LIKED_CACHE['ids'].discard(video_id)
+        YTMUSIC_LIKED_CACHE['at']=time.time()
+        result={'videoId':video_id,'title':status.get('title') or video_id,'rating':rating,'liked':expected,'disliked':disliked,'confirmed':True,'source':'ytmusicapi','message':response_text,'skipped':False}
+        if rating=='DISLIKE':
+            system_media('next')
+            result['skipped']=True
         return result
 
 def ytmusic_liked():
@@ -229,22 +325,10 @@ def ytmusic_remove_items(items):
         if video_id not in seen:seen.add(video_id);unique.append(video_id)
     with YTMUSIC_LOCK:
         yt=_ytmusic()
-        for video_id in unique:_auth_call(yt.rate_song,video_id,_like_status('INDIFFERENT'))
-        if YTMUSIC_CURRENT.get('videoId') in seen:YTMUSIC_CURRENT['liked']=False
+        for video_id in unique:
+            _auth_call(yt.rate_song,video_id,_like_status('INDIFFERENT'))
+            YTMUSIC_RATING_BY_VIDEO[video_id]='INDIFFERENT'
+            YTMUSIC_LIKED_CACHE['ids'].discard(video_id)
+        YTMUSIC_LIKED_CACHE['at']=time.time()
+        if YTMUSIC_CURRENT.get('videoId') in seen:YTMUSIC_CURRENT.update(liked=False,disliked=False,ratingKnown=True)
     return {'removed':len(unique)}
-
-# One-shot bridge from the temporary extension to Glide's privileged config.
-YTMUSIC_CLOSE_QUEUE=[]
-def ytmusic_enqueue_tab_close(tab_id):
-    try:tab_id=int(tab_id)
-    except (TypeError,ValueError):raise RuntimeError('Invalid YouTube Music tab ID')
-    with YTMUSIC_LOCK:
-        if tab_id not in YTMUSIC_CLOSE_QUEUE:
-            YTMUSIC_CLOSE_QUEUE.append(tab_id)
-            del YTMUSIC_CLOSE_QUEUE[:-32]
-    return {'ok':True,'queued':tab_id}
-
-def ytmusic_next_tab_close():
-    with YTMUSIC_LOCK:
-        tab_id=YTMUSIC_CLOSE_QUEUE.pop(0) if YTMUSIC_CLOSE_QUEUE else None
-    return {'ok':True,'tabId':tab_id}

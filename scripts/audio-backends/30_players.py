@@ -356,16 +356,16 @@ def system_cover_bytes(token):
 
 def system_state():
     # A player can disappear between discovery and the separate MPRIS reads.
-    base={'available':False,'player':'','status':'Stopped','playing':False,'title':'No system media','artist':'','position':None,'duration':0.0,'seekable':False,'trackId':'','volume':system_volume(),'cover':''}
+    base={'available':False,'player':'','status':'Stopped','playing':False,'title':'No system media','artist':'','position':None,'duration':0.0,'seekable':False,'trackId':'','url':'','volume':system_volume(),'cover':''}
     try:
         selected=active_mpris(with_status=True)
         if not selected:return base
         player,status=selected
         # Preserve empty fields: splitlines() would shift the artwork URL into
         # the duration field when the player has no length metadata.
-        metadata=pctl(player,'metadata','--format','{{xesam:title}}\x1f{{xesam:artist}}\x1f{{mpris:length}}\x1f{{mpris:artUrl}}\x1f{{mpris:trackid}}')
-        rows=(metadata.split('\x1f',4)+['','','','',''])[:5]
-        title,artist,length,art,track_id=(item.strip() for item in rows)
+        metadata=pctl(player,'metadata','--format','{{xesam:title}}\x1f{{xesam:artist}}\x1f{{mpris:length}}\x1f{{mpris:artUrl}}\x1f{{mpris:trackid}}\x1f{{xesam:url}}')
+        rows=(metadata.split('\x1f',5)+['','','','','',''])[:6]
+        title,artist,length,art,track_id,media_url=(item.strip() for item in rows)
         try:duration=float(length)/1_000_000 if length else 0.0
         except (ValueError,OverflowError):duration=0.0
         if not math.isfinite(duration) or duration<0:duration=0.0
@@ -377,7 +377,7 @@ def system_state():
         # Do not publish a half-populated player after it vanishes mid-poll.
         status=mpris_status(player)
         if status not in ('Playing','Paused','Stopped'):return base
-        base.update(available=True,player=player,status=status,playing=status=='Playing',title=title or player,artist=artist,position=position,duration=duration,seekable=duration>0,trackId=track_id,cover=system_art_url(art))
+        base.update(available=True,player=player,status=status,playing=status=='Playing',title=title or player,artist=artist,position=position,duration=duration,seekable=duration>0,trackId=track_id,url=media_url,cover=system_art_url(art))
     except (OSError,ValueError,TypeError,RuntimeError,AttributeError,subprocess.TimeoutExpired):
         return base
     return base

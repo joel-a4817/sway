@@ -230,6 +230,7 @@ button {
   margin-top:12px;
   margin-bottom:2px;
 }
+.yt-rating-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px}.yt-rating-button{position:relative;min-height:44px;padding:10px;display:grid;place-items:center}.yt-rating-button svg{width:22px;height:22px;fill:currentColor;pointer-events:none}.yt-rating-button.is-active::after{content:"";position:absolute;left:50%;top:50%;width:30px;height:2px;border-radius:999px;background:currentColor;transform:translate(-50%,-50%) rotate(-42deg);box-shadow:0 0 0 1px color-mix(in srgb,currentColor 25%,transparent);pointer-events:none}
 .liked-toolbar .action {
   width:auto;
   min-height:40px;
@@ -1137,7 +1138,7 @@ body {
 }
 
 .safe-volume-button{width:100%;margin:10px 0 18px}.safe-mark{background-image:linear-gradient(#ffca57,#ffca57);background-repeat:no-repeat;background-size:2px 25px;background-position:var(--safe-x,50%) center}.safe-hidden{display:none!important}.custom-hrir-row{padding:15px;margin:10px 0;border:1px solid #ffffff22;border-radius:18px;background:#ffffff0a}.custom-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.custom-fields label{color:#bcb7cb;font-size:12px;font-weight:700}.custom-fields input,.custom-fields select,#custom-device,#custom-name{width:100%;margin-top:5px;padding:12px;border:1px solid #ffffff25;border-radius:12px;background:#090b14;color:#fff}.custom-actions{margin-top:14px}.custom-create-launch{margin-top:28px!important}.spatial-visual{margin-top:18px;padding:14px;border:1px solid #ffffff22;border-radius:22px;background:radial-gradient(circle at 50% 42%,#32245f88,#090b14 68%);box-shadow:inset 0 1px #ffffff18}.spatial-visual canvas{display:block;width:100%;height:auto;aspect-ratio:1.45}.spatial-caption{text-align:center;color:#b9b4c5;font-size:12px;margin-top:8px}.custom-ranges{margin:14px 2px;color:#b9b4c5;font-size:13px}.mode-dialog{border:1px solid #ffffff33;border-radius:22px;background:#151221;color:#fff;padding:22px;width:min(420px,calc(100vw - 32px));box-shadow:0 24px 80px #000b}.mode-dialog::backdrop{background:#000a;backdrop-filter:blur(8px)}.mode-choice{display:block;padding:12px;margin:8px 0;border:1px solid #ffffff22;border-radius:13px}.mode-dialog-menu{display:flex;gap:10px;justify-content:flex-end;margin-top:18px}
-  
+
 .task-feedback-action{margin-left:10px;padding:7px 11px;border:1px solid rgba(255,255,255,.22);border-radius:10px;background:rgba(255,255,255,.12);color:inherit;font-weight:800}
 .yt-rating-icon{width:38px;min-width:38px;height:34px;padding:0;display:inline-grid;place-items:center;font-size:18px;line-height:1;border-radius:10px}
 .yt-rating-icon svg{width:18px;height:18px;fill:currentColor}
@@ -1232,7 +1233,7 @@ body {
     </div>
     <div class="grid two" id="youtube-music-card">
      <button class="action accent-violet" id="ytmusic-quickpicks">Quick Picks</button>
-     <button class="action accent-red" id="ytmusic-like">Like</button>
+     <div class="yt-rating-actions" role="group" aria-label="YouTube Music rating"><button class="action accent-red yt-rating-button" id="ytmusic-like" type="button" aria-label="Like" title="Like"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 21h4V9H2v12Zm20-11a2 2 0 0 0-2-2h-6.31l.95-4.57.03-.32a1.5 1.5 0 0 0-.44-1.06L13.17 1 6.59 7.59A2 2 0 0 0 6 9v10a2 2 0 0 0 2 2h9a2 2 0 0 0 1.84-1.21l3.02-7.05A2 2 0 0 0 22 12v-2Z"/></svg></button><button class="action accent-red yt-rating-button" id="ytmusic-dislike" type="button" aria-label="Dislike" title="Dislike"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M22 3h-4v12h4V3ZM2 14a2 2 0 0 0 2 2h6.31l-.95 4.57-.03.32c0 .41.17.79.44 1.06L10.83 23l6.58-6.59A2 2 0 0 0 18 15V5a2 2 0 0 0-2-2H7a2 2 0 0 0-1.84 1.21L2.14 10.26A2 2 0 0 0 2 11v3Z"/></svg></button></div>
      <button class="action accent-cyan" id="ytmusic-liked">Liked Music</button>
      <button class="action accent-mint" id="ytmusic-refresh-cookie">Refresh cookie</button>
     </div>
@@ -1566,7 +1567,7 @@ body {
   <section class="hidden" id="ytmusic-liked-page">
    <div class="page-head">
     <button class="back" id="ytmusic-liked-back" type="button">Back</button>
-    <div><h1>Liked Music</h1></div>
+    <div><h1>Liked Music</h1><div class="details" id="ytmusic-liked-total" aria-live="polite">0 songs</div></div>
    </div>
    <input class="search" id="ytmusic-liked-search" type="search" placeholder="Search liked songs or artists" autocomplete="off" aria-label="Search Liked Music">
    <div class="liked-toolbar"><button class="action accent-red" id="ytmusic-remove-selected" disabled>Remove selected</button><span class="details" id="ytmusic-selected-count">0 selected</span></div>
@@ -1624,7 +1625,9 @@ window.fetch=(...args)=>{
  return request
 };
 async function api(url,options={}){const response=await fetch(url,{cache:'no-store',...options});const data=await response.json().catch(()=>null);if(!data||typeof data!=='object'||Array.isArray(data))throw Error('Invalid server response');if(!response.ok||data.ok===false)throw Error(data.error||'Request failed');return data}
-const post=(url,data={})=>api(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+const ACTION_FEEDBACK=Object.freeze({
+'/api/audio-toggle':'state','/api/away-display':'state','/api/custom-filter/create':'explicit','/api/groups/save':'complete:Group saved','/api/mode':'state','/api/output-activate':'state','/api/output-device-stage':'background','/api/output-preview-begin':'background','/api/output-preview-cancel':'background','/api/output-preview-renew':'background','/api/output-profile-stage':'background','/api/output-route-stage':'background','/api/play/playlist':'audible','/api/play/song':'audible','/api/player/command':'audible','/api/player/mpv-gain':'state','/api/player/repeat':'state','/api/player/shuffle':'audible','/api/restart-airplay':'explicit','/api/restart-sonobus':'explicit','/api/restart-vnc':'explicit','/api/safe-volume':'explicit','/api/select':'state','/api/system-media':'audible','/api/ytmusic/play-item':'audible','/api/ytmusic/quickpicks':'audible','/api/ytmusic/rate-current':'explicit','/api/ytmusic/refresh-cookie-begin':'explicit','/api/ytmusic/remove-items':'state'});
+const post=async(url,data={})=>{const policy=ACTION_FEEDBACK[url];if(!policy)throw Error('Missing action feedback policy for '+url);const result=await api(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});if(policy.startsWith('complete:'))note(policy.slice(9));return result};
 function fill(element,value,maximum){const max=Number(maximum),v=Number(value);const percent=Number.isFinite(max)&&max>0&&Number.isFinite(v)?Math.max(0,Math.min(100,v/max*100)):0;element.style.setProperty('--fill',percent+'%')}
 function renderTimeline(media,position,duration){
   const total=Number.isFinite(Number(duration))?Math.max(0,Number(duration)):0;
@@ -1985,6 +1988,7 @@ async function removeYtLiked(items,button){
  renderYtLiked();await refreshYtLike();return result;
 }
 function renderYtLiked(){
+ $('#ytmusic-liked-total').textContent=ytLikedSongs.length+' '+(ytLikedSongs.length===1?'song':'songs');
  const box=$('#ytmusic-liked-list'),query=$('#ytmusic-liked-search').value.trim().toLocaleLowerCase();
  const songs=query?ytLikedSongs.filter(song=>(song.title+'\n'+song.artist).toLocaleLowerCase().includes(query)):ytLikedSongs;
  box.replaceChildren();updateYtLikedSelection();
@@ -2005,10 +2009,13 @@ async function loadYtLiked(){const data=await api('/api/ytmusic/liked');ytLikedS
 $('#ytmusic-liked-search').addEventListener('input',renderYtLiked);
 $('#ytmusic-remove-selected').onclick=async()=>{try{await removeYtLiked(ytLikedSongs.filter(song=>ytLikedSelected.has(song.videoId)),$('#ytmusic-remove-selected'))}catch(e){note(e.message,true)}};
 $('#ytmusic-quickpicks').onclick=async()=>{try{await post('/api/ytmusic/quickpicks',{})}catch(e){console.error(e)}};
-$('#ytmusic-refresh-cookie').onclick=async()=>{const button=$('#ytmusic-refresh-cookie');try{await post('/api/ytmusic/refresh-cookie-begin',{});button.disabled=true;button.classList.add('busy');note('YouTube Music opened; capturing signed-in request…');const until=Date.now()+125000;while(Date.now()<until){await new Promise(resolve=>setTimeout(resolve,1000));const result=await api('/api/ytmusic/refresh-cookie-status');if(result.status==='saved'){note('YouTube Music cookie refreshed');return}if(result.status==='failed')throw Error(result.error||'Cookie refresh failed')}throw Error('No YouTube Music request was captured')}catch(e){note(e.message,true)}finally{button.disabled=false;button.classList.remove('busy')}};
+$('#ytmusic-refresh-cookie').onclick=async()=>{const button=$('#ytmusic-refresh-cookie');try{await post('/api/ytmusic/refresh-cookie-begin',{});button.disabled=true;button.classList.add('busy');const until=Date.now()+125000;while(Date.now()<until){await new Promise(resolve=>setTimeout(resolve,1000));const result=await api('/api/ytmusic/refresh-cookie-status');if(result.status==='saved'){note('YouTube Music cookie refreshed');return}if(result.status==='failed')throw Error(result.error||'Cookie refresh failed')}throw Error('No YouTube Music request was captured')}catch(e){note(e.message,true)}finally{button.disabled=false;button.classList.remove('busy')}};
 
-async function refreshYtLike(){const button=$('#ytmusic-like');try{const status=await api('/api/ytmusic/current-status');button.disabled=!status.available;button.textContent=status.available?(status.liked?'Unlike':'Like'):'Like unavailable';button.dataset.liked=status.available&&status.liked?'1':'0';button.title=status.available?(status.title||'YouTube Music'):(status.reason||'Current system media is not a detected YouTube Music track');return status}catch(error){button.disabled=true;button.textContent='Like unavailable';button.dataset.liked='0';button.title=error.message||String(error);return null}}
-$('#ytmusic-like').onclick=async()=>{const button=$('#ytmusic-like');if(button.disabled)return;try{const result=await post('/api/ytmusic/rate-current',{rating:'TOGGLE'});button.textContent=result.liked?'Unlike':'Like';button.dataset.liked=result.liked?'1':'0';if(result.liked){if(!ytLikedSongs.some(song=>song.videoId===result.videoId))ytLikedSongs.unshift({videoId:result.videoId,title:result.title,artist:''})}else ytLikedSongs=ytLikedSongs.filter(song=>song.videoId!==result.videoId);renderYtLiked()}catch(e){note(e.message,true)}};
+let ytLikeBusy=false;
+async function refreshYtLike(){const like=$('#ytmusic-like'),dislike=$('#ytmusic-dislike');if(ytLikeBusy)return null;try{const status=await api('/api/ytmusic/current-status');for(const button of [like,dislike])button.disabled=!status.available;like.classList.toggle('is-active',!!(status.available&&status.liked));dislike.classList.toggle('is-active',!!(status.available&&status.disliked));like.setAttribute('aria-label',status.available?(status.liked?'Unlike':'Like'):'Like unavailable');like.title=status.available?(status.liked?'Unlike '+(status.title||'current song'):'Like '+(status.title||'current song')):(status.reason||'Current system media is not a detected YouTube Music track');dislike.setAttribute('aria-label',status.available?(status.disliked?'Remove dislike':'Dislike'):'Dislike unavailable');dislike.title=status.available?(status.disliked?'Remove dislike from ':'Dislike ')+(status.title||'current song'):(status.reason||'Current system media is not a detected YouTube Music track');return status}catch(error){for(const button of [like,dislike])button.disabled=true;like.classList.remove('is-active');dislike.classList.remove('is-active');like.title=dislike.title=error.message||String(error);return null}}
+async function runYtRating(button,rating){if(ytLikeBusy)return;ytLikeBusy=true;for(const item of [$('#ytmusic-like'),$('#ytmusic-dislike')])item.disabled=true;beginButtonRequest(button);try{const result=await post('/api/ytmusic/rate-current',{rating});if(result.confirmed!==true)throw Error('YouTube Music returned an unconfirmed rating result');if(rating==='DISLIKE_TOGGLE'){if(typeof result.disliked!=='boolean')throw Error('YouTube Music returned an invalid dislike result');note(result.disliked?(result.skipped?'Disliked song and skipped':'Disliked song'):'Removed dislike')}else{if(typeof result.liked!=='boolean')throw Error('YouTube Music returned an invalid like result');if(result.liked){if(!ytLikedSongs.some(song=>song.videoId===result.videoId))ytLikedSongs.unshift({videoId:result.videoId,title:result.title,artist:''})}else ytLikedSongs=ytLikedSongs.filter(song=>song.videoId!==result.videoId);renderYtLiked();note(result.liked?'Added to Liked Music':'Removed from Liked Music')}}catch(error){note(error?.message||String(error),true)}finally{ytLikeBusy=false;endButtonRequest(button);await refreshYtLike()}}
+$('#ytmusic-like').onclick=()=>runYtRating($('#ytmusic-like'),'TOGGLE');
+$('#ytmusic-dislike').onclick=()=>runYtRating($('#ytmusic-dislike'),'DISLIKE_TOGGLE');
 $('#ytmusic-liked').onclick=async()=>{show('ytmusic-liked-page');try{await loadYtLiked()}catch(e){show('profiles');note(e.message,true)}};
 $('#ytmusic-liked-back').onclick=()=>show('profiles');
 refreshYtLike();setInterval(refreshYtLike,2000);

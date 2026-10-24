@@ -4,9 +4,15 @@ const refreshTabs=new Set();
 const quickPickTabs=new Map();
 let closingMusicTabs=false;
 
+async function reportExtensionReady(){try{await localPost('/api/ytmusic/extension-ready',{})}catch(_){}}
+reportExtensionReady();setInterval(reportExtensionReady,2000);
+
 async function closeMusicTab(tabId){
-  const result=await localPost('/api/ytmusic/force-close',{tabId});
-  if(!result||result.ok!==true)throw new Error('Backend rejected YouTube Music force-close request');
+  try{await browser.tabs.sendMessage(tabId,{type:'close-without-prompt'})}catch(_){/* document may already be gone */}
+  await browser.tabs.remove(tabId);
+  try{await browser.tabs.get(tabId);throw new Error('YouTube Music tab remained open')}catch(error){
+    if(error.message==='YouTube Music tab remained open')throw error;
+  }
 }
 
 async function keepOnlyMusicTab(tabId){
@@ -37,7 +43,7 @@ browser.webRequest.onBeforeRequest.addListener(details=>{
   const url=new URL(details.url),token=url.searchParams.get('mcquickpick');
   if(url.searchParams.get('media_control_refresh_cookie')==='1')refreshTabs.add(details.tabId);
   if(token)quickPickTabs.set(details.tabId,token);
-  if(url.searchParams.get('mcserverlaunch')==='1')keepOnlyMusicTab(details.tabId).catch(()=>{});
+  if(url.searchParams.get('mcreplacemusictabs')==='1')keepOnlyMusicTab(details.tabId).catch(()=>{});
 },{urls:['https://music.youtube.com/*']});
 
 browser.tabs.onRemoved.addListener(tabId=>{quickPickTabs.delete(tabId);refreshTabs.delete(tabId)});
