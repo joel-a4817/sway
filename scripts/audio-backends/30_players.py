@@ -402,7 +402,7 @@ def system_seek(v):
 def pname(n):
     if not isinstance(n,str):raise ValueError('Invalid playlist')
     n=n.strip()
-    if not n or n in ('.','..') or '/' in n or '\\' in n or '\0' in n:raise ValueError('Invalid playlist')
+    if not n or n in ('.','..') or '/' in n or '\\' in n or any(ord(char)<32 for char in n):raise ValueError('Invalid playlist')
     return n
 def pdir(n):
     p=(MUSIC/pname(n)).resolve()
