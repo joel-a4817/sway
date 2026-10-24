@@ -36,7 +36,8 @@ browser.webRequest.onBeforeRequest.addListener(details=>{
   if(details.type!=='main_frame')return;
   const url=new URL(details.url),token=url.searchParams.get('mcquickpick');
   if(url.searchParams.get('media_control_refresh_cookie')==='1')refreshTabs.add(details.tabId);
-  if(token){quickPickTabs.set(details.tabId,token);keepOnlyMusicTab(details.tabId).catch(()=>{})}
+  if(token)quickPickTabs.set(details.tabId,token);
+  if(url.searchParams.get('mcserverlaunch')==='1')keepOnlyMusicTab(details.tabId).catch(()=>{});
 },{urls:['https://music.youtube.com/*']});
 
 browser.tabs.onRemoved.addListener(tabId=>{quickPickTabs.delete(tabId);refreshTabs.delete(tabId)});

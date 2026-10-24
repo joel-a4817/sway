@@ -1,10 +1,12 @@
 import random
+import os
 import re
 import shutil
 import subprocess
 import threading
 import time
 import secrets
+from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
 YTMUSICAPI_REPO=HOME/'ytmusicapi'
 YTMUSIC_AUTH=HOME/'.config/ytmusicapi/browser.json'
@@ -15,35 +17,27 @@ YTMUSIC_LIKED_CACHE={'at':0.0,'ids':set()}
 YTMUSIC_GLIDE_LAUNCHER=HOME/'.config/sway/scripts/audio-backends/ytmusic-extension/glide-with-ytmusic-temp-extension'
 
 def _glide_running():
-    result=run([exe('pgrep'),'-x','glide'],False,5,media_env())
-    return result.returncode==0 and any(row.isdecimal() for row in result.stdout.split())
+    return subprocess.run(['pgrep','-x','glide'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0
 
-def _open_ytmusic_url(url):
-    url=str(url or '')
-    parsed=urlparse(url)
+def _server_launch_url(url):
+    parsed=urlparse(str(url or ''))
     if parsed.scheme!='https' or parsed.netloc!='music.youtube.com':
-        raise ValueError('Only YouTube Music URLs can be opened through the Glide bridge')
+        raise ValueError('Only YouTube Music URLs can be opened through Glide')
+    query=dict(parse_qsl(parsed.query,keep_blank_values=True))
+    query['mcserverlaunch']='1'
+    return urlunparse(parsed._replace(query=urlencode(query)))
+
+def _open_required_music_url(url):
     if _glide_running():
         opener=shutil.which('xdg-open')
         if not opener:raise RuntimeError('xdg-open is unavailable')
-        opened=subprocess.run([opener,url],text=True,capture_output=True,timeout=15,env=media_env())
+        opened=subprocess.run([opener,url],text=True,capture_output=True,timeout=15)
         if opened.returncode:raise RuntimeError(opened.stderr.strip() or 'Could not open YouTube Music')
-        return {'startedGlide':False}
+        return
     if not YTMUSIC_GLIDE_LAUNCHER.is_file() or not os.access(YTMUSIC_GLIDE_LAUNCHER,os.X_OK):
-        raise RuntimeError('YouTube Music Glide launcher is missing or not executable')
-    with (STATE/'ytmusic-glide-launch.log').open('ab',buffering=0) as log:
-        process=subprocess.Popen([str(YTMUSIC_GLIDE_LAUNCHER),url],stdin=subprocess.DEVNULL,
-                                 stdout=log,stderr=subprocess.STDOUT,start_new_session=True,env=media_env())
-    deadline=time.monotonic()+2.0
-    while time.monotonic()<deadline:
-        code=process.poll()
-        if code is not None:
-            raise RuntimeError('Glide extension launcher exited with status '+str(code)+'; check '+str(STATE/'ytmusic-glide-launch.log'))
-        if _glide_running():return {'startedGlide':True}
-        time.sleep(.05)
-    if process.poll() is not None:
-        raise RuntimeError('Glide extension launcher exited before Glide started; check '+str(STATE/'ytmusic-glide-launch.log'))
-    return {'startedGlide':True,'pending':True}
+        raise RuntimeError('Glide YouTube Music launcher is missing or not executable')
+    subprocess.Popen([str(YTMUSIC_GLIDE_LAUNCHER),_server_launch_url(url)],start_new_session=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+
 
 def _ytmusic():
     import sys
@@ -121,7 +115,7 @@ YTMUSIC_REFRESH={'pending':False,'started':0.0,'status':'idle','error':''}
 def ytmusic_begin_cookie_refresh():
     with YTMUSIC_LOCK:
         YTMUSIC_REFRESH.update(pending=True,started=time.time(),status='waiting',error='')
-    try:_open_ytmusic_url('https://music.youtube.com/?media_control_refresh_cookie=1')
+    try:_open_required_music_url('https://music.youtube.com/?media_control_refresh_cookie=1')
     except Exception as error:
         with YTMUSIC_LOCK:YTMUSIC_REFRESH.update(pending=False,status='failed',error=str(error))
         raise
@@ -166,7 +160,7 @@ def _open_ytmusic_track(video_id,title='',playlist=''):
     if playlist:query.append('list='+str(playlist))
     query.extend(('mcquickpick='+YTMUSIC_QUICK_PICK_TOKEN,'mcautoplay=1'))
     url='https://music.youtube.com/watch?'+'&'.join(query)
-    _open_ytmusic_url(url)
+    _open_required_music_url(url)
     return {'videoId':video_id,'title':str(title or video_id)[:300],'url':url}
 
 def ytmusic_play_item(video_id,title=''):

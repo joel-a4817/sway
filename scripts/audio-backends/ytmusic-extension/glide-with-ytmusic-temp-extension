@@ -4,15 +4,14 @@ set -euo pipefail
 DIR=/home/joel/.config/sway/scripts/audio-backends/ytmusic-extension
 args=(
   run
-  "--source-dir=$DIR"
-  "--firefox=$DIR/glide-rdp-browser"
+  --source-dir="$DIR"
+  --firefox="$DIR/glide-rdp-browser"
   --no-reload
   --no-config-discovery
 )
-for url in "$@"; do
-  case "$url" in
-    https://music.youtube.com/*) args+=(--start-url "$url") ;;
-    *) echo "Refusing non-YouTube-Music start URL: $url" >&2; exit 64 ;;
-  esac
-done
+
+if (($#)); then
+  args+=(--start-url "$1")
+fi
+
 exec /run/current-system/sw/bin/web-ext "${args[@]}"
