@@ -29,6 +29,7 @@ HPCF_ANECHOIC=AUDIO_ROOT/'b&k 5128 hpcfs'
 COMPENSATION_WAV=AUDIO_ROOT/'other/Sennheiser HD650 - B&K 5128 to SONICOM P0135 Approximate Compensation.wav'
 SOFA_AVERAGE_WAV=AUDIO_ROOT/'other/P0135_96k_360_adaptive_finite_preview.wav'
 SOFA_RENDER_REPORT=AUDIO_ROOT/'other/P0135_96k_360_adaptive_report.json'
+BBC_SALFORD_BRIR_WAV=AUDIO_ROOT/'other/P0135_MinPhase_BBC_Salford_AllField_Room_96k.wav'
 MEASUREMENTS_DIR=AUDIO_ROOT/'measurements'
 COMBINED_FILTER_ROOT=HOME/'Downloads-S5/filters'
 HPCFS = (
@@ -71,7 +72,7 @@ def dense_response_nfft(*lengths):
     minimum=max(65536,max(int(length) for length in lengths)*2);return 1<<(minimum-1).bit_length()
 def read_fir(path,channels):
     data,rate=sf.read(path,always_2d=True,dtype='float64')
-    if rate!=SAMPLE_RATE or data.shape[1]!=channels or not len(data):raise RuntimeError(f'{path}: expected nonempty {channels}-channel {SAMPLE_RATE} Hz FIR')
+    if rate!=SAMPLE_RATE or data.shape[1]<channels or not len(data):raise RuntimeError(f'{path}: expected nonempty WAV with at least {channels} channel(s), {SAMPLE_RATE} Hz FIR')
     if not np.isfinite(data).all():raise RuntimeError(f'{path}: non-finite FIR samples')
     return data
 def read_csv_frequency_range(path):
@@ -92,7 +93,7 @@ def fir_frequency_range(path):
     path=Path(path).resolve();sidecar=range_sidecar(path)
     if sidecar.is_file():
         node=json.loads(sidecar.read_text(encoding='utf-8'));low=float(node['lowHz']);high=float(node['highHz'])
-    elif path in (SOFA_AVERAGE_WAV.resolve(),) or '.assets' in path.parts:
+    elif path in (SOFA_AVERAGE_WAV.resolve(),BBC_SALFORD_BRIR_WAV.resolve()) or '.assets' in path.parts:
         low,high=20.0,20000.0
     elif path.parent==HPCF_ANECHOIC.resolve():
         base=path.stem.removesuffix(' - HpCF - Raw')
@@ -417,14 +418,16 @@ def conv_text(name,path,channel):
       channel: {channel}
 '''
 PROFILE_LAYOUTS = {
-    'stereo': {'label':'Stereo', 'spatial':False, 'mono':False, 'swap_input':False},
-    'mono': {'label':'Mono', 'spatial':False, 'mono':True, 'swap_input':False},
-    'inverse': {'label':'Inverse Stereo', 'spatial':False, 'mono':False, 'swap_input':True},
-    '360-stereo': {'label':'360 Stereo', 'spatial':True, 'mono':False, 'swap_input':False},
-    '360-inverse': {'label':'360 Inverse Stereo', 'spatial':True, 'mono':False, 'swap_input':True},
-    '360-mono': {'label':'360 Mono', 'spatial':True, 'mono':True, 'swap_input':False},
+    'stereo': {'label':'Stereo', 'spatial':False, 'room':False, 'mono':False, 'swap_input':False},
+    'mono': {'label':'Mono', 'spatial':False, 'room':False, 'mono':True, 'swap_input':False},
+    'inverse': {'label':'Inverse Stereo', 'spatial':False, 'room':False, 'mono':False, 'swap_input':True},
+    '360-stereo': {'label':'360 Stereo', 'spatial':True, 'room':False, 'mono':False, 'swap_input':False},
+    '360-inverse': {'label':'360 Inverse Stereo', 'spatial':True, 'room':False, 'mono':False, 'swap_input':True},
+    '360-mono': {'label':'360 Mono', 'spatial':True, 'room':False, 'mono':True, 'swap_input':False},
+    'bbc-salford-stereo': {'label':'BBC Room Field Stereo', 'spatial':False, 'room':True, 'mono':False, 'swap_input':False},
+    'bbc-salford-mono': {'label':'BBC Room Field Mono', 'spatial':False, 'room':True, 'mono':True, 'swap_input':False},
+    'bbc-salford-inverse': {'label':'BBC Room Field Inverse Stereo', 'spatial':False, 'room':True, 'mono':False, 'swap_input':True},
 }
-
 def mono_mixer_definition():return '''  mono_input:
     channels:
       in: 2
@@ -457,6 +460,9 @@ def channel_swap_mixer_definition():return '''  swap_channels:
           - channel: 0
             gain: 0.0
 '''
+def room_matrix_text(path):
+    return '', '', ''
+
 def chain_gain_for_layout(chain_paths,layout):
     """Peak of the actual routed L/R FIR chain over 20-20000 Hz."""
     arrays=[(name,read_fir(path,2)) for name,path in chain_paths]
@@ -507,12 +513,18 @@ def make_profile(item,layout_key,hpcf_path,chain_paths,peak_gain_db,valid_low,va
     mixers=[]
     if layout['mono']:mixers.append(mono_mixer_definition())
     if layout['swap_input']:mixers.append(channel_swap_mixer_definition())
+    room_filters='';room_pipeline=''
+    if layout['room']:
+        room_mixers,room_filters,room_pipeline=room_matrix_text(BBC_SALFORD_BRIR_WAV)
+        if room_mixers:
+            mixers.append(room_mixers)
     if mixers:text+='mixers:\n'+''.join(mixers)
-    text+='filters:\n';names=[]
+    text+='filters:\n'+room_filters;names=[]
     for prefix,path in chain_paths:text+=conv_text(prefix+'_left',path,0)+conv_text(prefix+'_right',path,1);names.append(prefix)
     text+='pipeline:\n'
-    if layout['mono']:text+='  - type: Mixer\n    name: mono_input\n'
-    if layout['swap_input']:text+='  - type: Mixer\n    name: swap_channels\n'
+    if layout['mono']:text+='  - {type: Mixer, name: mono_input}\n'
+    if layout['swap_input']:text+='  - {type: Mixer, name: swap_channels}\n'
+    if layout['room']:text+=room_pipeline
     for prefix in names:text+=f'  - type: Filter\n    channels: [0]\n    names: [{prefix}_left]\n  - type: Filter\n    channels: [1]\n    names: [{prefix}_right]\n'
     return device_dir/(layout_key+'.yml'),text
 def configured_path(item):
@@ -533,6 +545,15 @@ def validate_current_spatial_fir():
         if report.get('filter_seconds') is not None and abs(float(report['filter_seconds'])-info.frames/info.samplerate)>2/info.samplerate:
             raise RuntimeError('Spatial WAV duration differs from renderer report; regenerate the spatial WAV.')
     print(f'Spatial FIR: {info.frames} samples ({info.frames/info.samplerate:.3f} s), stereo {info.samplerate} Hz',flush=True)
+    return path
+
+def validate_bbc_room_fir():
+    path=BBC_SALFORD_BRIR_WAV
+    if not path.is_file():raise RuntimeError(f'Missing BBC Salford BRIR WAV: {path}. Run build-p0135-bbc-salford-room-field-v1.py first.')
+    info=sf.info(path)
+    if info.samplerate!=SAMPLE_RATE or info.channels!=2 or info.frames<2:
+        raise RuntimeError(f'{path}: expected nonempty 2-channel {SAMPLE_RATE} Hz all-field room WAV')
+    print(f'BBC Salford BRIR: {info.frames} samples ({info.frames/info.samplerate:.3f} s), 2-channel {info.samplerate} Hz',flush=True)
     return path
 
 def measurement_devices():
@@ -573,7 +594,7 @@ def build_profile_candidates(all_measurements=False,spatial_wav=None):
             if not COMPENSATION_WAV.is_file():raise SystemExit(f'Missing over-ear compensation WAV: {COMPENSATION_WAV}')
             common.append(('fixture',COMPENSATION_WAV))
         for layout_key,layout in PROFILE_LAYOUTS.items():
-            chain=([('sofa',spatial_wav)] if layout['spatial'] else [])+common+[('hpcf',source)]
+            chain=([('sofa',spatial_wav)] if layout['spatial'] else [])+([('bbcroom',BBC_SALFORD_BRIR_WAV)] if layout['room'] else [])+common+[('hpcf',source)]
             estimated_gain_db,valid_low,valid_high=chain_gain_for_layout(chain,layout)
             # Safe volume must be based on the ACTUAL YAML 2x2 routing, not
             # a diagonal shortcut that could miss cross-channel summation.
@@ -743,6 +764,7 @@ def rebuild_all_filters(all_measurements=False):
     print(f'Writing profiles and safe-volume index to: {CAMILLA_ROOT}')
     # One spatial source, identical for CamillaDSP and JamesDSP exports.
     validate_current_spatial_fir()
+    validate_bbc_room_fir()
     print('CamillaDSP and S5 use the same v66 spatial WAV; no proxy or fallback.',flush=True)
     candidates,devices=build_profile_candidates(all_measurements,spatial_wav=SOFA_AVERAGE_WAV)
     if not Path('/etc/camilladsp-peak-limiter-v11').is_file():raise SystemExit('Generated profiles require the installed NixOS peak-limiter-v11 module.')
