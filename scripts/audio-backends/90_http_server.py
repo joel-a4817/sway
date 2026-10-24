@@ -7,10 +7,16 @@ def public_error(path,error):
     return text.splitlines()[0][:180] or 'Request failed'
 
 class H(BaseHTTPRequestHandler):
+    def is_loopback(self):
+        return self.client_address[0] in ('127.0.0.1','::1')
     def extension_origin(self):
         origin=self.headers.get('Origin','')
-        return origin if origin.startswith('moz-extension://') else ''
+        return origin if self.is_loopback() and origin.startswith('moz-extension://') else ''
     def cors_headers(self):
+        if urlparse(self.path).path=='/api/ytmusic/force-close-next':
+            self.send_header('Access-Control-Allow-Origin','*')
+            self.send_header('Vary','Origin')
+            return
         origin=self.extension_origin()
         if origin:
             self.send_header('Access-Control-Allow-Origin',origin)
@@ -18,7 +24,7 @@ class H(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         origin=self.extension_origin()
         requested=self.headers.get('Access-Control-Request-Method','').upper()
-        if self.path not in ('/api/ytmusic/current','/api/ytmusic/refresh-cookie') or not origin or requested!='POST':
+        if self.path not in ('/api/ytmusic/current','/api/ytmusic/refresh-cookie','/api/ytmusic/force-close') or not origin or requested!='POST':
             self.send_response(403);self.send_header('Content-Length','0');self.send_header('Cache-Control','no-store');self.end_headers();return
         self.send_response(204)
         self.send_header('Access-Control-Allow-Origin',origin)
@@ -45,6 +51,8 @@ class H(BaseHTTPRequestHandler):
         u=urlparse(self.path);p=u.path;q=parse_qs(u.query)
         try:
             if p=='/':self.data(200,'text/html; charset=utf-8',PAGE.encode());return
+            if p=='/api/ytmusic/force-close-next' and not self.is_loopback():
+                self.out(403,{'ok':False,'error':'Loopback access required'});return
             if p=='/api/system-cover':
                 image=system_cover_bytes(q.get('v',[''])[0])
                 if not image:self.data(404,'text/plain; charset=utf-8',b'No cover');return
@@ -67,6 +75,7 @@ class H(BaseHTTPRequestHandler):
             elif p=='/api/ytmusic/liked':r=ytmusic_liked()
             elif p=='/api/ytmusic/current-status':r=ytmusic_current_status()
             elif p=='/api/ytmusic/refresh-cookie-status':r=ytmusic_refresh_cookie_status()
+            elif p=='/api/ytmusic/force-close-next':r=ytmusic_next_tab_close()
             elif p=='/api/system-media':r=system_state()
             elif p=='/api/player':r=player_state()
             elif p=='/api/playlists':r={'playlists':lists()}
@@ -79,11 +88,14 @@ class H(BaseHTTPRequestHandler):
         p=urlparse(self.path).path
         try:
             d=self.body()
+            if p=='/api/ytmusic/force-close' and not self.is_loopback():
+                self.out(403,{'ok':False,'error':'Loopback access required'});return
             if p=='/api/ytmusic/refresh-cookie-begin':r=ytmusic_begin_cookie_refresh()
             elif p=='/api/ytmusic/refresh-cookie':r=ytmusic_refresh_cookie(d.get('headers'))
             elif p=='/api/ytmusic/quickpicks':r=ytmusic_quick_picks()
             elif p=='/api/ytmusic/play-item':r=ytmusic_play_item(d.get('videoId'),d.get('title',''))
             elif p=='/api/ytmusic/current':r=ytmusic_report_current(d)
+            elif p=='/api/ytmusic/force-close':r=ytmusic_enqueue_tab_close(d.get('tabId'))
             elif p=='/api/ytmusic/rate-current':r=ytmusic_rate_current(d.get('rating'))
             elif p=='/api/ytmusic/rate-item':r=ytmusic_rate_item(d.get('videoId'),d.get('title',''),d.get('rating'))
             elif p=='/api/ytmusic/remove-items':r=ytmusic_remove_items(d.get('items'))

@@ -3,15 +3,25 @@ let lastCookie='',lastSent=0;
 const refreshTabs=new Set();
 const quickPickTabs=new Map();
 let closingMusicTabs=false;
+
+async function closeMusicTab(tabId){
+  const result=await localPost('/api/ytmusic/force-close',{tabId});
+  if(!result||result.ok!==true)throw new Error('Backend rejected YouTube Music force-close request');
+}
+
 async function keepOnlyMusicTab(tabId){
   if(closingMusicTabs)return;
   closingMusicTabs=true;
   try{
     const tabs=await browser.tabs.query({url:'https://music.youtube.com/*'});
     const obsolete=tabs.filter(tab=>tab.id!==tabId).map(tab=>tab.id);
-    if(obsolete.length)await browser.tabs.remove(obsolete);
+    for(const obsoleteTabId of obsolete){
+      try{await closeMusicTab(obsoleteTabId)}
+      catch(error){console.error('Could not close obsolete YouTube Music tab',obsoleteTabId,error)}
+    }
   }finally{closingMusicTabs=false}
 }
+
 function rawHeaders(headers){
   const rows=[];
   for(const h of headers||[]){
@@ -21,19 +31,21 @@ function rawHeaders(headers){
   return rows.join('\n');
 }
 function localPost(path,data){return fetch(API+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}).then(r=>r.json())}
+
 browser.webRequest.onBeforeRequest.addListener(details=>{
   if(details.type!=='main_frame')return;
   const url=new URL(details.url),token=url.searchParams.get('mcquickpick');
   if(url.searchParams.get('media_control_refresh_cookie')==='1')refreshTabs.add(details.tabId);
   if(token){quickPickTabs.set(details.tabId,token);keepOnlyMusicTab(details.tabId).catch(()=>{})}
 },{urls:['https://music.youtube.com/*']});
+
 browser.tabs.onRemoved.addListener(tabId=>{quickPickTabs.delete(tabId);refreshTabs.delete(tabId)});
 browser.runtime.onMessage.addListener((message,sender)=>{
   if(!message||message.type!=='current-track'||!sender.tab)return;
-  const token=quickPickTabs.get(sender.tab.id);
-  if(!token)return Promise.resolve({ignored:true});
+  const token=quickPickTabs.get(sender.tab.id)||'';
   return localPost('/api/ytmusic/current',{videoId:message.videoId,title:message.title,url:message.url,quickPickToken:token});
 });
+
 browser.webRequest.onBeforeSendHeaders.addListener(details=>{
   if(details.method!=='POST'||!details.url.includes('/youtubei/v1/'))return;
   if(!refreshTabs.has(details.tabId))return;
@@ -47,7 +59,7 @@ browser.webRequest.onBeforeSendHeaders.addListener(details=>{
       lastCookie=cookie;lastSent=Date.now();
       const tabId=details.tabId;
       refreshTabs.delete(tabId);
-      try{await browser.tabs.remove(tabId)}catch(error){console.error('Could not close completed cookie-refresh tab',error)}
+      try{await closeMusicTab(tabId)}catch(error){console.error('Could not close completed cookie-refresh tab',error)}
     });
   }).catch(()=>{});
 },{urls:['https://music.youtube.com/youtubei/v1/*']},['requestHeaders']);

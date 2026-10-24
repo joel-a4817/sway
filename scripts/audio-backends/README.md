@@ -1,40 +1,17 @@
 # Audio backend files
 
-## `camilladsp-server.py`
+## Package scope
 
-**What it does:** Starts the webremote server or runs one of its command-line operations.
-
-**How it does it:** Reads `audio-backends/manifest.txt`, executes each listed Python file into one shared namespace, then calls `main()` for the server or `topology_cli()` when arguments are supplied.
-
-## `camilladsp-server-sonobus.py`
-
-**What it does:** Provides the package copy of the server launcher using the established compatibility filename.
-
-**How it does it:** Loads the same Python backend manifest and dispatches to the same server or CLI entry points as `camilladsp-server.py`.
-
-## `media-control.sh`
-
-**What it does:** Starts Media Control.
-
-**How it does it:** Sources `10_session.sh`, `20_menu_helpers.sh`, `30_camera.sh`, and `40_main_menu.sh` from `~/.config/sway/scripts/audio-backends`, in that order.
-
-## `install.sh`
-
-**What it does:** Installs the modular server, Media Control, and all backend files.
-
-**How it does it:** Copies the backend directory to `~/.config/sway/scripts/audio-backends`, installs the two launchers at their required paths, sets launchers to mode `0755`, and sets sourced or loaded backend files to mode `0644`.
+This directory contains the modular backends loaded by the separately installed
+server launcher, the shell fragments sourced by the separately installed Media
+Control launcher, and the temporary YouTube Music extension. It deliberately
+does not contain or install either external launcher.
 
 ## `manifest.txt`
 
 **What it does:** Defines the Python backend loading order.
 
 **How it does it:** Lists one Python filename per line. The server launcher executes those files from top to bottom into the same namespace.
-
-## `FILE-LIST.txt`
-
-**What it does:** Lists the files included in the modular package.
-
-**How it does it:** Stores a plain-text package inventory for inspection.
 
 ## `README.md`
 
@@ -181,3 +158,33 @@ Custom Spatial Filter reads P0135 free-field-compensated minimum-phase-compensat
 ### YouTube Music authenticated server and Glide bridge
 
 `72_ytmusic_api.py` owns Quick Picks, authenticated ratings, Liked Music playback and multi-select removal, and in-place browser-cookie refresh through `/home/joel/ytmusicapi` and `~/.config/ytmusicapi/browser.json`. The Refresh cookie button opens YouTube Music in Glide. The bundled Glide bridge captures the next signed-in YouTube Music API request automatically, sends its request headers only to the local Media Control server, and atomically replaces the cookie-backed browser authentication file only after validation. It deliberately contains no MPRIS logic. The Glide temporary extension reports the current `videoId` and physically activates YouTube Music's Start playback control for URLs marked `mcautoplay=1`.
+
+## `ytmusic-extension/background.js`
+
+**What it does:** Bridges YouTube Music tabs to the local Media Control API.
+
+**How it does it:** Reports Quick Picks tracks, captures a requested signed-in cookie refresh, queues only automated tab closes, and leaves manual tab closure to Glide.
+
+## `ytmusic-extension/content.js`
+
+**What it does:** Reports the current YouTube Music track and performs requested one-shot autoplay.
+
+**How it does it:** Reads the active video ID and title, reports changes to the extension background script, and activates playback only for URLs marked `mcautoplay=1`.
+
+## `ytmusic-extension/manifest.json`
+
+**What it does:** Declares the temporary WebExtension.
+
+**How it does it:** Grants only the tabs, request-observation, YouTube Music, and loopback API permissions used by the two extension scripts.
+
+## `ytmusic-extension/glide-rdp-browser`
+
+**What it does:** Lets `web-ext` launch the normal Glide profile.
+
+**How it does it:** Retains only the debugger port supplied by `web-ext`, discards temporary-profile flags, and starts Glide with that debugger port.
+
+## `ytmusic-extension/glide-with-ytmusic-temp-extension`
+
+**What it does:** Starts Glide with the unpacked temporary extension.
+
+**How it does it:** Runs `web-ext` against this extension directory through `glide-rdp-browser`, without extension auto-reload or config discovery.

@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "YouTube Music Bridge",
-  "version": "12.0",
+  "version": "20.0",
   "description": "Reports the current track and automatically refreshes Media Control's ytmusicapi browser cookie.",
   "permissions": [
     "tabs",
@@ -24,7 +24,7 @@
       "js": [
         "content.js"
       ],
-      "run_at": "document_idle"
+      "run_at": "document_start"
     }
   ]
 }

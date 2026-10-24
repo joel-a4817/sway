@@ -11,6 +11,7 @@ YTMUSIC_AUTH=HOME/'.config/ytmusicapi/browser.json'
 YTMUSIC_LOCK=threading.RLock()
 YTMUSIC_CURRENT={'videoId':'','title':'','url':'','reported':0.0,'quickPickToken':'','liked':False}
 YTMUSIC_QUICK_PICK_TOKEN=''
+YTMUSIC_LIKED_CACHE={'at':0.0,'ids':set()}
 
 def _ytmusic():
     import sys
@@ -39,11 +40,9 @@ def ytmusic_report_current(data):
     title=str(data.get('title') or '')[:300]
     token=str(data.get('quickPickToken') or '')
     with YTMUSIC_LOCK:
-        if not YTMUSIC_QUICK_PICK_TOKEN or token!=YTMUSIC_QUICK_PICK_TOKEN:
-            return {'ignored':True}
-        liked=video_id in _liked_ids(_ytmusic())[0]
+        liked=video_id in _cached_liked_ids()
         YTMUSIC_CURRENT.update(videoId=video_id,title=title,url=url,reported=time.time(),quickPickToken=token,liked=liked)
-        return {'videoId':video_id,'title':title,'liked':liked}
+        return {'videoId':video_id,'title':title,'liked':liked,'reported':True}
 
 def _current_track():
     row=dict(YTMUSIC_CURRENT)
@@ -64,6 +63,17 @@ def _liked_ids(yt,limit=5000):
     if not isinstance(data,dict) or not isinstance(data.get('tracks'),list):
         raise RuntimeError('YouTube Music did not return the authenticated Liked Music tracks collection')
     return {row.get('videoId') for row in data['tracks'] if row.get('videoId')},data['tracks']
+
+def _cached_liked_ids(max_age=15.0):
+    now=time.time()
+    if now-YTMUSIC_LIKED_CACHE['at']>=max_age:
+        ids,_=_liked_ids(_ytmusic())
+        YTMUSIC_LIKED_CACHE.update(at=now,ids=ids)
+    return YTMUSIC_LIKED_CACHE['ids']
+
+def _media_title(value):
+    value=re.sub(r'\s*-\s*YouTube Music\s*$','',str(value or ''),flags=re.I)
+    return re.sub(r'[^a-z0-9]+',' ',value.casefold()).strip()
 
 def _rate(video_id,title,rating,previous=None):
     yt=_ytmusic();video_id=_valid_video_id(video_id)
@@ -152,12 +162,22 @@ def ytmusic_quick_picks():
 
 def ytmusic_current_status():
     with YTMUSIC_LOCK:
-        current=_current_track()
-        return {'videoId':current['videoId'],'title':current.get('title') or current['videoId'],'liked':bool(current.get('liked'))}
+        current=dict(YTMUSIC_CURRENT)
+        media=system_state()
+        fresh=bool(current.get('videoId')) and time.time()-float(current.get('reported') or 0)<6.0
+        reported_title=_media_title(current.get('title'))
+        media_title=_media_title(media.get('title'))
+        same_title=fresh and bool(reported_title and media_title) and (reported_title in media_title or media_title in reported_title)
+        available=bool(media.get('available') and same_title)
+        if not available:
+            return {'available':False,'liked':False,'title':'','reason':'Like state unavailable for current system media'}
+        return {'available':True,'videoId':current['videoId'],'title':current.get('title') or current['videoId'],'liked':bool(current.get('liked'))}
 
 def ytmusic_rate_current(rating):
     rating=str(rating or '').upper()
     with YTMUSIC_LOCK:
+        status=ytmusic_current_status()
+        if not status.get('available'):raise RuntimeError(status.get('reason') or 'Like state unavailable')
         current=_current_track();yt=_ytmusic();liked,_=_liked_ids(yt)
         was_liked=current['videoId'] in liked
         if rating=='TOGGLE':rating='INDIFFERENT' if was_liked else 'LIKE'
@@ -166,6 +186,8 @@ def ytmusic_rate_current(rating):
         result=_rate(current['videoId'],current.get('title') or current['videoId'],rating,previous=previous)
         result['liked']=rating=='LIKE'
         YTMUSIC_CURRENT['liked']=result['liked']
+        if result['liked']:YTMUSIC_LIKED_CACHE['ids'].add(current['videoId'])
+        else:YTMUSIC_LIKED_CACHE['ids'].discard(current['videoId'])
         return result
 
 def ytmusic_liked():
@@ -189,3 +211,19 @@ def ytmusic_remove_items(items):
         for video_id in unique:_auth_call(yt.rate_song,video_id,_like_status('INDIFFERENT'))
         if YTMUSIC_CURRENT.get('videoId') in seen:YTMUSIC_CURRENT['liked']=False
     return {'removed':len(unique)}
+
+# One-shot bridge from the temporary extension to Glide's privileged config.
+YTMUSIC_CLOSE_QUEUE=[]
+def ytmusic_enqueue_tab_close(tab_id):
+    try:tab_id=int(tab_id)
+    except (TypeError,ValueError):raise RuntimeError('Invalid YouTube Music tab ID')
+    with YTMUSIC_LOCK:
+        if tab_id not in YTMUSIC_CLOSE_QUEUE:
+            YTMUSIC_CLOSE_QUEUE.append(tab_id)
+            del YTMUSIC_CLOSE_QUEUE[:-32]
+    return {'ok':True,'queued':tab_id}
+
+def ytmusic_next_tab_close():
+    with YTMUSIC_LOCK:
+        tab_id=YTMUSIC_CLOSE_QUEUE.pop(0) if YTMUSIC_CLOSE_QUEUE else None
+    return {'ok':True,'tabId':tab_id}
