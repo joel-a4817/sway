@@ -29,7 +29,7 @@ HPCF_ANECHOIC=AUDIO_ROOT/'b&k 5128 hpcfs'
 COMPENSATION_WAV=AUDIO_ROOT/'other/Sennheiser HD650 - B&K 5128 to SONICOM P0135 Approximate Compensation.wav'
 SOFA_AVERAGE_WAV=AUDIO_ROOT/'other/P0135_96k_360_adaptive_finite_preview.wav'
 SOFA_RENDER_REPORT=AUDIO_ROOT/'other/P0135_96k_360_adaptive_report.json'
-BBC_SALFORD_BRIR_WAV=AUDIO_ROOT/'other/P0135_MinPhase_BBC_Salford_AllField_Room_96k.wav'
+PRODUCTION_ROOM_MATRIX_WAV=AUDIO_ROOT/'other/P0135_96k_Ideal_Stereo_Production_Room_Matrix_4ch_LL_LR_RL_RR.wav'
 MEASUREMENTS_DIR=AUDIO_ROOT/'measurements'
 COMBINED_FILTER_ROOT=HOME/'Downloads-S5/filters'
 HPCFS = (
@@ -47,6 +47,11 @@ HPCFS = (
         'file': 'HyperX Cloud III - B&K 5128 - HpCF - Raw.wav',
         'label': 'HyperX Cloud III',
         'type': 'over-ear',
+    },
+    {
+        'file': 'Apple EarPods + AhaStyle - Approximate B&K 5128 - HpCF - Raw.wav',
+        'label': 'Apple Earpods + Silicone Covers',
+        'type': 'in-ear',
     },
 )
 SAMPLE_RATE=96000
@@ -93,7 +98,7 @@ def fir_frequency_range(path):
     path=Path(path).resolve();sidecar=range_sidecar(path)
     if sidecar.is_file():
         node=json.loads(sidecar.read_text(encoding='utf-8'));low=float(node['lowHz']);high=float(node['highHz'])
-    elif path in (SOFA_AVERAGE_WAV.resolve(),BBC_SALFORD_BRIR_WAV.resolve()) or '.assets' in path.parts:
+    elif path in (SOFA_AVERAGE_WAV.resolve(),PRODUCTION_ROOM_MATRIX_WAV.resolve()) or '.assets' in path.parts:
         low,high=20.0,20000.0
     elif path.parent==HPCF_ANECHOIC.resolve():
         base=path.stem.removesuffix(' - HpCF - Raw')
@@ -203,8 +208,11 @@ def profile_transfer_matrix(profile_text):
     # Remove only frames that are exactly zero across the entire 2x2 matrix.
     used=np.flatnonzero(np.any(transfer!=0.0,axis=(0,1)))
     return transfer[:,:,:used[-1]+1] if len(used) else transfer[:,:,:1]
-JAMESDSP_EXPORT_STEMS = frozenset(PROFILE_LAYOUTS if 'PROFILE_LAYOUTS' in globals() else (
-    "stereo", "mono", "inverse", "360-stereo", "360-inverse", "360-mono"))
+JAMESDSP_EXPORT_STEMS = frozenset((
+    "stereo", "mono", "inverse",
+    "360-stereo", "360-inverse", "360-mono",
+    "production-room-stereo", "production-room-mono", "production-room-inverse",
+))
 
 def _jamesdsp_export_kind(relative_yaml):
     """Every convolution profile is exported as exact LL, LR, RL, RR."""
@@ -424,9 +432,9 @@ PROFILE_LAYOUTS = {
     '360-stereo': {'label':'360 Stereo', 'spatial':True, 'room':False, 'mono':False, 'swap_input':False},
     '360-inverse': {'label':'360 Inverse Stereo', 'spatial':True, 'room':False, 'mono':False, 'swap_input':True},
     '360-mono': {'label':'360 Mono', 'spatial':True, 'room':False, 'mono':True, 'swap_input':False},
-    'bbc-salford-stereo': {'label':'BBC Room Field Stereo', 'spatial':False, 'room':True, 'mono':False, 'swap_input':False},
-    'bbc-salford-mono': {'label':'BBC Room Field Mono', 'spatial':False, 'room':True, 'mono':True, 'swap_input':False},
-    'bbc-salford-inverse': {'label':'BBC Room Field Inverse Stereo', 'spatial':False, 'room':True, 'mono':False, 'swap_input':True},
+    'production-room-stereo': {'label':'Production Room Stereo', 'spatial':False, 'room':True, 'mono':False, 'swap_input':False},
+    'production-room-mono': {'label':'Production Room Mono', 'spatial':False, 'room':True, 'mono':True, 'swap_input':False},
+    'production-room-inverse': {'label':'Production Room Inverse Stereo', 'spatial':False, 'room':True, 'mono':False, 'swap_input':True},
 }
 def mono_mixer_definition():return '''  mono_input:
     channels:
@@ -461,8 +469,30 @@ def channel_swap_mixer_definition():return '''  swap_channels:
             gain: 0.0
 '''
 def room_matrix_text(path):
-    return '', '', ''
-
+    """Render a four-channel LL,LR,RL,RR WAV as a true 2x2 stereo matrix."""
+    path=Path(path).resolve()
+    data=read_fir(path,4)
+    if data.shape[1]!=4:raise RuntimeError(f'{path}: expected exactly 4 channels ordered LL, LR, RL, RR')
+    mixers="""  production_room_spread:
+      channels: {in: 2, out: 4}
+      mapping:
+        - {dest: 0, sources: [{channel: 0, gain: 0.0}]}
+        - {dest: 1, sources: [{channel: 0, gain: 0.0}]}
+        - {dest: 2, sources: [{channel: 1, gain: 0.0}]}
+        - {dest: 3, sources: [{channel: 1, gain: 0.0}]}
+  production_room_merge:
+      channels: {in: 4, out: 2}
+      mapping:
+        - {dest: 0, sources: [{channel: 0, gain: 0.0}, {channel: 2, gain: 0.0}]}
+        - {dest: 1, sources: [{channel: 1, gain: 0.0}, {channel: 3, gain: 0.0}]}
+"""
+    filters=''
+    order=('LL','LR','RL','RR')
+    for channel,name in enumerate(order):filters+=conv_text('production_room_'+name,path,channel)
+    pipeline='  - {type: Mixer, name: production_room_spread}\n'
+    for channel,name in enumerate(order):pipeline+=f'  - type: Filter\n    channels: [{channel}]\n    names: [production_room_{name}]\n'
+    pipeline+='  - {type: Mixer, name: production_room_merge}\n'
+    return mixers,filters,pipeline
 def chain_gain_for_layout(chain_paths,layout):
     """Peak of the actual routed L/R FIR chain over 20-20000 Hz."""
     arrays=[(name,read_fir(path,2)) for name,path in chain_paths]
@@ -515,7 +545,7 @@ def make_profile(item,layout_key,hpcf_path,chain_paths,peak_gain_db,valid_low,va
     if layout['swap_input']:mixers.append(channel_swap_mixer_definition())
     room_filters='';room_pipeline=''
     if layout['room']:
-        room_mixers,room_filters,room_pipeline=room_matrix_text(BBC_SALFORD_BRIR_WAV)
+        room_mixers,room_filters,room_pipeline=room_matrix_text(PRODUCTION_ROOM_MATRIX_WAV)
         if room_mixers:
             mixers.append(room_mixers)
     if mixers:text+='mixers:\n'+''.join(mixers)
@@ -547,13 +577,14 @@ def validate_current_spatial_fir():
     print(f'Spatial FIR: {info.frames} samples ({info.frames/info.samplerate:.3f} s), stereo {info.samplerate} Hz',flush=True)
     return path
 
-def validate_bbc_room_fir():
-    path=BBC_SALFORD_BRIR_WAV
-    if not path.is_file():raise RuntimeError(f'Missing BBC Salford BRIR WAV: {path}. Run build-p0135-bbc-salford-room-field-v1.py first.')
+def validate_production_room_matrix():
+    path=PRODUCTION_ROOM_MATRIX_WAV
+    if not path.is_file():raise RuntimeError(f'Missing production-room matrix WAV: {path}. Run build-p0135-ideal-stereo-production-room-matrix.py first.')
     info=sf.info(path)
-    if info.samplerate!=SAMPLE_RATE or info.channels!=2 or info.frames<2:
-        raise RuntimeError(f'{path}: expected nonempty 2-channel {SAMPLE_RATE} Hz all-field room WAV')
-    print(f'BBC Salford BRIR: {info.frames} samples ({info.frames/info.samplerate:.3f} s), 2-channel {info.samplerate} Hz',flush=True)
+    if info.samplerate!=SAMPLE_RATE or info.channels!=4 or info.frames<2:raise RuntimeError(f'{path}: expected nonempty 4-channel {SAMPLE_RATE} Hz WAV ordered LL, LR, RL, RR')
+    data=read_fir(path,4)
+    if data.shape[1]!=4:raise RuntimeError(f'{path}: expected exactly four channels')
+    print(f'Production-room matrix: {info.frames} samples ({info.frames/info.samplerate:.3f} s), 4-channel LL,LR,RL,RR at {info.samplerate} Hz',flush=True)
     return path
 
 def measurement_devices():
@@ -594,7 +625,7 @@ def build_profile_candidates(all_measurements=False,spatial_wav=None):
             if not COMPENSATION_WAV.is_file():raise SystemExit(f'Missing over-ear compensation WAV: {COMPENSATION_WAV}')
             common.append(('fixture',COMPENSATION_WAV))
         for layout_key,layout in PROFILE_LAYOUTS.items():
-            chain=([('sofa',spatial_wav)] if layout['spatial'] else [])+([('bbcroom',BBC_SALFORD_BRIR_WAV)] if layout['room'] else [])+common+[('hpcf',source)]
+            chain=([('sofa',spatial_wav)] if layout['spatial'] else [])+common+[('hpcf',source)]
             estimated_gain_db,valid_low,valid_high=chain_gain_for_layout(chain,layout)
             # Safe volume must be based on the ACTUAL YAML 2x2 routing, not
             # a diagonal shortcut that could miss cross-channel summation.
@@ -764,7 +795,7 @@ def rebuild_all_filters(all_measurements=False):
     print(f'Writing profiles and safe-volume index to: {CAMILLA_ROOT}')
     # One spatial source, identical for CamillaDSP and JamesDSP exports.
     validate_current_spatial_fir()
-    validate_bbc_room_fir()
+    validate_production_room_matrix()
     print('CamillaDSP and S5 use the same v66 spatial WAV; no proxy or fallback.',flush=True)
     candidates,devices=build_profile_candidates(all_measurements,spatial_wav=SOFA_AVERAGE_WAV)
     if not Path('/etc/camilladsp-peak-limiter-v11').is_file():raise SystemExit('Generated profiles require the installed NixOS peak-limiter-v11 module.')
