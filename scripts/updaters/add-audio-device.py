@@ -227,33 +227,41 @@ def true_stereo_audible_peak(matrix,low=ANALYSIS_LOW_HZ,high=ANALYSIS_HIGH_HZ):
     return matrix_peak_in_range(matrix,low,high)
 
 def logarithmic_signed_db_area(matrix,low,high):
-    """Signed log-frequency area of the worst-case stereo output magnitude.
+    """Mean signed log-frequency dB area across every active matrix channel.
 
-    Uses the complete 2x2 complex transfer matrix. At each frequency the
-    largest absolute row sum bounds arbitrary input channel phases. The
-    shared dB correction makes positive and negative *signed areas* equal.
+    Each nonzero transfer path (LL, LR, RL, RR) is integrated independently
+    over log frequency, then those channel means are averaged with equal
+    weight. A shared gain therefore balances the combined channel-average
+    area about the requested target without using a worst-case response.
+    Worst-case matrix magnitude is reserved for safe-volume peak protection.
     """
     if not (0.0 < low < high <= SAMPLE_RATE/2):
         raise RuntimeError('Invalid integration band')
+    matrix=np.asarray(matrix,dtype=np.float64)
+    active=np.any(matrix!=0.0,axis=2)
+    if not np.any(active):
+        raise RuntimeError('Complete matrix has no active transfer channels')
     nfft=dense_response_nfft(matrix.shape[2])
     freq=np.fft.rfftfreq(nfft,1/SAMPLE_RATE)
     mask=(freq>low)&(freq<high)
     selected=np.concatenate(([low],freq[mask],[high]))
-    response=np.fft.rfft(matrix,n=nfft,axis=2)
-    magnitude=np.max(np.sum(np.abs(response[:,:,mask]),axis=1),axis=0)
+    response=np.fft.rfft(matrix,n=nfft,axis=2)[:,:,mask]
     edge=np.empty((2,2,2),dtype=np.complex128)
     for out_ch in range(2):
         for in_ch in range(2):
             edge[out_ch,in_ch]=endpoint_fir_response(matrix[out_ch,in_ch,:,None],[low,high])[:,0]
-    edge_magnitude=np.max(np.sum(np.abs(edge),axis=1),axis=0)
-    magnitude=np.concatenate(([edge_magnitude[0]],magnitude,[edge_magnitude[1]]))
+    magnitude=np.concatenate((np.abs(edge[:,:,0])[:,:,None],np.abs(response),np.abs(edge[:,:,1])[:,:,None]),axis=2)
+    magnitude=magnitude[active]
     if not np.isfinite(magnitude).all() or np.any(magnitude<=0):
-        raise RuntimeError('Complete matrix has zero or invalid response within integration band')
+        raise RuntimeError('Active matrix channel has zero or invalid response within integration band')
     x=np.log(selected)
     db=20*np.log10(magnitude)
-    mean_db=float(np.trapezoid(db,x)/(x[-1]-x[0])) if hasattr(np,'trapezoid') else float(np.trapz(db,x)/(x[-1]-x[0]))
+    integral=np.trapezoid(db,x,axis=1) if hasattr(np,'trapezoid') else np.trapz(db,x,axis=1)
+    channel_mean_db=integral/(x[-1]-x[0])
+    mean_db=float(np.mean(channel_mean_db))
+    if not math.isfinite(mean_db):
+        raise RuntimeError('Invalid balanced channel-average dB area')
     return mean_db
-
 
 def center_camilla_profile(path,text):
     """Apply one common gain after all routing; keep source WAVs unchanged."""
@@ -358,7 +366,7 @@ def commit_combined_wavs(exports):
         manifest={
             'version':4,
             'sampleRate':SAMPLE_RATE,
-            'normalization':'exact limiter-free YAML 2x2 transfer matrix; signed log-frequency dB area centered at -15 dB',
+            'normalization':'exact limiter-free YAML 2x2 transfer matrix; equal-weight active-channel mean signed log-frequency dB area centered at -15 dB',
             'files':{},
         }
         for relative,export in sorted(exports.items(),key=lambda item:item[0].as_posix()):
@@ -626,11 +634,23 @@ def build_profile_candidates(all_measurements=False,spatial_wav=None):
             common.append(('fixture',COMPENSATION_WAV))
         for layout_key,layout in PROFILE_LAYOUTS.items():
             chain=([('sofa',spatial_wav)] if layout['spatial'] else [])+common+[('hpcf',source)]
-            estimated_gain_db,valid_low,valid_high=chain_gain_for_layout(chain,layout)
-            # Safe volume must be based on the ACTUAL YAML 2x2 routing, not
-            # a diagonal shortcut that could miss cross-channel summation.
-            profile_path,provisional=make_profile(item,layout_key,source,chain,estimated_gain_db,valid_low,valid_high)
-            matrix=profile_transfer_matrix(provisional)
+            _legacy_gain_db,valid_low,valid_high=chain_gain_for_layout(chain,layout)
+            # Initial 0 dBFS centering MUST use the complete routed 2x2 matrix,
+            # including mono/swap, the four-channel production-room matrix,
+            # fixture compensation and HpCF. The signed log-frequency dB area
+            # is centered at 0 dB so area above and below the x axis balances.
+            profile_path,uncentered=make_profile(item,layout_key,source,chain,0.0,valid_low,valid_high)
+            uncentered_matrix=profile_transfer_matrix(uncentered)
+            initial_center_gain_db=-logarithmic_signed_db_area(uncentered_matrix,valid_low,valid_high)
+            if not math.isfinite(initial_center_gain_db):raise RuntimeError('Nonfinite complete-matrix integral centering gain')
+            centered_matrix=uncentered_matrix*(10.0**(initial_center_gain_db/20.0))
+            initial_residue=logarithmic_signed_db_area(centered_matrix,valid_low,valid_high)
+            if abs(initial_residue)>2e-7:raise RuntimeError(f'Initial complete-matrix centering residual {initial_residue} dB')
+            print(f"{layout['label']}: complete 2x2 initial integral gain {initial_center_gain_db:+.9f} dB; residual {initial_residue:+.12f} dB")
+            # Safe volume remains based on the actual uncentered YAML transfer;
+            # center_camilla_profile() later inserts this same complete-matrix
+            # integral gain and then recalculates safe volume after centering.
+            matrix=uncentered_matrix
             peak=true_stereo_audible_peak(matrix,valid_low,valid_high)
             exact_peak_db=20.0*math.log10(peak)
             if not math.isfinite(exact_peak_db):raise RuntimeError('Nonfinite complete-matrix peak')
@@ -815,7 +835,7 @@ def rebuild_all_filters(all_measurements=False):
         print(f'{"Replaced existing" if path in existed else "Created"}: {path}')
         match=re.search(r'(?m)^# safe-volume-percent: ([0-9]+(?:\.[0-9]+)?)$',text)
         if match:print(f"{path.name}: safe master {float(match.group(1)):.6f}% before limiter activity")
-    print(f'Exported {exports_count} exact-YAML S5 true-stereo FIR WAVs (log-frequency area centered at -15 dB) to {combined_root}')
+    print(f'Exported {exports_count} exact-YAML S5 true-stereo FIR WAVs (balanced active-channel log-frequency area centered at -15 dB) to {combined_root}')
     print(f'Using {len(devices)} anechoic HpCF devices; verified {len(candidates)} CamillaDSP YAML profiles in {CAMILLA_ROOT}; {len(changed)} created, {len(removed)} obsolete YAMLs removed, {len(removed_dirs)} unconfigured device directories removed')
 TERMINALS=(('foot','-T','Manage Audio Device'),('kitty','--title','Manage Audio Device'),('alacritty','--title','Manage Audio Device','-e'))
 def row(number,label):
