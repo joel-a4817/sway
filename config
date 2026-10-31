@@ -68,7 +68,9 @@ for_window [app_id="$term"] opacity 0.85, mark --add opacity-dimmed
 for_window [app_id="discord"] opacity 0.85, mark --add opacity-dimmed
 for_window [app_id="Antra"] opacity 0.85, mark --add opacity-dimmed
 
-bindsym --no-repeat $mod+F6 exec ~/.config/sway/scripts/windows/toggle-opacity.sh
+bindsym --no-repeat $mod+F6 exec ~/.config/sway/scripts/windows/toggle-opacity.sh 
+exec_always ~/.config/sway/scripts/windows/toggle-opacity.sh --watch 
+bindsym --no-repeat $mod+Print exec ~/.config/sway/scripts/windows/toggle-dark-mode.sh
 
 ### Input configuration
    input type:touchpad {
