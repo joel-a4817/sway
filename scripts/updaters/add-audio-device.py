@@ -29,7 +29,10 @@ HPCF_ANECHOIC=AUDIO_ROOT/'b&k 5128 hpcfs'
 COMPENSATION_WAV=AUDIO_ROOT/'other/Sennheiser HD650 - B&K 5128 to SONICOM P0135 Approximate Compensation.wav'
 SOFA_AVERAGE_WAV=AUDIO_ROOT/'other/P0135_96k_360_adaptive_finite_preview.wav'
 SOFA_RENDER_REPORT=AUDIO_ROOT/'other/P0135_96k_360_adaptive_report.json'
-PRODUCTION_ROOM_MATRIX_WAV=AUDIO_ROOT/'other/P0135_96k_Ideal_Stereo_Production_Room_Matrix_4ch_LL_LR_RL_RR.wav'
+PRODUCTION_ROOM_MATRICES={
+    'music':AUDIO_ROOT/'other/P0135_96k_Ideal_Stereo_Production_Room_Matrix_4ch_LL_LR_RL_RR.wav',
+    'film':AUDIO_ROOT/'other/P0135_96k_Ideal_Stereo_Production_Room_Matrix_Film_4ch_LL_LR_RL_RR.wav',
+}
 MEASUREMENTS_DIR=AUDIO_ROOT/'measurements'
 COMBINED_FILTER_ROOT=HOME/'Downloads-S5/filters'
 HPCFS = (
@@ -98,7 +101,7 @@ def fir_frequency_range(path):
     path=Path(path).resolve();sidecar=range_sidecar(path)
     if sidecar.is_file():
         node=json.loads(sidecar.read_text(encoding='utf-8'));low=float(node['lowHz']);high=float(node['highHz'])
-    elif path in (SOFA_AVERAGE_WAV.resolve(),PRODUCTION_ROOM_MATRIX_WAV.resolve()) or '.assets' in path.parts:
+    elif path in (SOFA_AVERAGE_WAV.resolve(),*(matrix.resolve() for matrix in PRODUCTION_ROOM_MATRICES.values())) or '.assets' in path.parts:
         low,high=20.0,20000.0
     elif path.parent==HPCF_ANECHOIC.resolve():
         base=path.stem.removesuffix(' - HpCF - Raw')
@@ -209,9 +212,7 @@ def profile_transfer_matrix(profile_text):
     used=np.flatnonzero(np.any(transfer!=0.0,axis=(0,1)))
     return transfer[:,:,:used[-1]+1] if len(used) else transfer[:,:,:1]
 JAMESDSP_EXPORT_STEMS = frozenset((
-    "stereo", "mono", "inverse",
-    "360-stereo", "360-inverse", "360-mono",
-    "production-room-stereo", "production-room-mono", "production-room-inverse",
+    "stereo", "360-stereo", "production-room-music", "production-room-film",
 ))
 
 def _jamesdsp_export_kind(relative_yaml):
@@ -434,48 +435,11 @@ def conv_text(name,path,channel):
       channel: {channel}
 '''
 PROFILE_LAYOUTS = {
-    'stereo': {'label':'Stereo', 'spatial':False, 'room':False, 'mono':False, 'swap_input':False},
-    'mono': {'label':'Mono', 'spatial':False, 'room':False, 'mono':True, 'swap_input':False},
-    'inverse': {'label':'Inverse Stereo', 'spatial':False, 'room':False, 'mono':False, 'swap_input':True},
-    '360-stereo': {'label':'360 Stereo', 'spatial':True, 'room':False, 'mono':False, 'swap_input':False},
-    '360-inverse': {'label':'360 Inverse Stereo', 'spatial':True, 'room':False, 'mono':False, 'swap_input':True},
-    '360-mono': {'label':'360 Mono', 'spatial':True, 'room':False, 'mono':True, 'swap_input':False},
-    'production-room-stereo': {'label':'Production Room Stereo', 'spatial':False, 'room':True, 'mono':False, 'swap_input':False},
-    'production-room-mono': {'label':'Production Room Mono', 'spatial':False, 'room':True, 'mono':True, 'swap_input':False},
-    'production-room-inverse': {'label':'Production Room Inverse Stereo', 'spatial':False, 'room':True, 'mono':False, 'swap_input':True},
+    'stereo': {'label':'Stereo', 'spatial':False, 'room':None},
+    '360-stereo': {'label':'360 Stereo', 'spatial':True, 'room':None},
+    'production-room-music': {'label':'Production Room Music', 'spatial':False, 'room':'music'},
+    'production-room-film': {'label':'Production Room Film', 'spatial':False, 'room':'film'},
 }
-def mono_mixer_definition():return '''  mono_input:
-    channels:
-      in: 2
-      out: 2
-    mapping:
-      - dest: 0
-        sources:
-          - channel: 0
-            gain: -6.020599913280
-          - channel: 1
-            gain: -6.020599913280
-      - dest: 1
-        sources:
-          - channel: 0
-            gain: -6.020599913280
-          - channel: 1
-            gain: -6.020599913280
-'''
-def channel_swap_mixer_definition():return '''  swap_channels:
-    channels:
-      in: 2
-      out: 2
-    mapping:
-      - dest: 0
-        sources:
-          - channel: 1
-            gain: 0.0
-      - dest: 1
-        sources:
-          - channel: 0
-            gain: 0.0
-'''
 def room_matrix_text(path):
     """Render a four-channel LL,LR,RL,RR WAV as a true 2x2 stereo matrix."""
     path=Path(path).resolve()
@@ -549,19 +513,15 @@ def make_profile(item,layout_key,hpcf_path,chain_paths,peak_gain_db,valid_low,va
     safe=safe_volume_percent(peak_gain_db)
     text='# safe-volume-percent: '+f'{safe:.6f}'+'\n# peak-db: '+f'{-peak_gain_db:.12f}'+'\n# valid-frequency-low-hz: '+f'{valid_low:.12f}'+'\n# valid-frequency-high-hz: '+f'{valid_high:.12f}'+'\n---\ntitle: '+yaml_string(layout['label'])+'\ndescription: '+yaml_string('B&K 5128 correction; '+layout['label']+'; external limiter safety net')+'\n'+devices_text(CAMILLA_LIMITED_PLAYBACK_DEVICE)
     mixers=[]
-    if layout['mono']:mixers.append(mono_mixer_definition())
-    if layout['swap_input']:mixers.append(channel_swap_mixer_definition())
     room_filters='';room_pipeline=''
     if layout['room']:
-        room_mixers,room_filters,room_pipeline=room_matrix_text(PRODUCTION_ROOM_MATRIX_WAV)
+        room_mixers,room_filters,room_pipeline=room_matrix_text(PRODUCTION_ROOM_MATRICES[layout['room']])
         if room_mixers:
             mixers.append(room_mixers)
     if mixers:text+='mixers:\n'+''.join(mixers)
     text+='filters:\n'+room_filters;names=[]
     for prefix,path in chain_paths:text+=conv_text(prefix+'_left',path,0)+conv_text(prefix+'_right',path,1);names.append(prefix)
     text+='pipeline:\n'
-    if layout['mono']:text+='  - {type: Mixer, name: mono_input}\n'
-    if layout['swap_input']:text+='  - {type: Mixer, name: swap_channels}\n'
     if layout['room']:text+=room_pipeline
     for prefix in names:text+=f'  - type: Filter\n    channels: [0]\n    names: [{prefix}_left]\n  - type: Filter\n    channels: [1]\n    names: [{prefix}_right]\n'
     return device_dir/(layout_key+'.yml'),text
@@ -586,14 +546,15 @@ def validate_current_spatial_fir():
     return path
 
 def validate_production_room_matrix():
-    path=PRODUCTION_ROOM_MATRIX_WAV
-    if not path.is_file():raise RuntimeError(f'Missing production-room matrix WAV: {path}. Run build-p0135-ideal-stereo-production-room-matrix.py first.')
-    info=sf.info(path)
-    if info.samplerate!=SAMPLE_RATE or info.channels!=4 or info.frames<2:raise RuntimeError(f'{path}: expected nonempty 4-channel {SAMPLE_RATE} Hz WAV ordered LL, LR, RL, RR')
-    data=read_fir(path,4)
-    if data.shape[1]!=4:raise RuntimeError(f'{path}: expected exactly four channels')
-    print(f'Production-room matrix: {info.frames} samples ({info.frames/info.samplerate:.3f} s), 4-channel LL,LR,RL,RR at {info.samplerate} Hz',flush=True)
-    return path
+    paths=[]
+    for name,path in PRODUCTION_ROOM_MATRICES.items():
+        if not path.is_file():raise RuntimeError(f'Missing production-room {name} matrix WAV: {path}. Run build-p0135-ideal-stereo-production-room-matrix.py first.')
+        info=sf.info(path)
+        if info.samplerate!=SAMPLE_RATE or info.channels!=4 or info.frames<2:raise RuntimeError(f'{path}: expected nonempty 4-channel {SAMPLE_RATE} Hz WAV ordered LL, LR, RL, RR')
+        read_fir(path,4)
+        print(f'Production-room {name} matrix: {info.frames} samples ({info.frames/info.samplerate:.3f} s), 4-channel LL,LR,RL,RR at {info.samplerate} Hz',flush=True)
+        paths.append(path)
+    return paths
 
 def measurement_devices():
     if not MEASUREMENTS_DIR.is_dir():raise SystemExit(f'Missing measurement folder: {MEASUREMENTS_DIR}')
@@ -636,7 +597,7 @@ def build_profile_candidates(all_measurements=False,spatial_wav=None):
             chain=([('sofa',spatial_wav)] if layout['spatial'] else [])+common+[('hpcf',source)]
             _legacy_gain_db,valid_low,valid_high=chain_gain_for_layout(chain,layout)
             # Initial 0 dBFS centering MUST use the complete routed 2x2 matrix,
-            # including mono/swap, the four-channel production-room matrix,
+            # including the four-channel production-room matrix,
             # fixture compensation and HpCF. The signed log-frequency dB area
             # is centered at 0 dB so area above and below the x axis balances.
             profile_path,uncentered=make_profile(item,layout_key,source,chain,0.0,valid_low,valid_high)
