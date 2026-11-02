@@ -21,6 +21,8 @@ set $termid foot
 set $menu wmenu-run
 seat * xcursor_theme Bibata-Modern-Amber 32
 
+exec dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP=sway
+
 exec solaar
 
 include /etc/sway/config.d/*
@@ -65,7 +67,7 @@ for_window [app_id="glide"] opacity 0.85, mark --add opacity-dimmed
 for_window [app_id="anki"] opacity 0.85, mark --add opacity-dimmed
 for_window [app_id="signal"] opacity 0.85, mark --add opacity-dimmed
 for_window [app_id="$term"] opacity 0.85, mark --add opacity-dimmed
-for_window [app_id="discord"] opacity 0.85, mark --add opacity-dimmed
+for_window [app_id="vesktop"] opacity 0.85, mark --add opacity-dimmed
 for_window [app_id="Antra"] opacity 0.85, mark --add opacity-dimmed
 
 bindsym --no-repeat $mod+F6 exec ~/.config/sway/scripts/windows/toggle-opacity.sh 
@@ -133,7 +135,7 @@ bindsym --no-repeat $mod+Mod1+g fullscreen disable; exec /home/joel/.config/sway
 bindsym --no-repeat $mod+Mod1+z fullscreen disable; exec solaar
 bindsym --no-repeat $mod+Mod1+x fullscreen disable; exec kamoso
 bindsym --no-repeat $mod+Mod1+w fullscreen disable; exec karere
-bindsym --no-repeat $mod+Mod1+d fullscreen disable; exec discord
+bindsym --no-repeat $mod+Mod1+d fullscreen disable; exec vesktop
 bindsym --no-repeat $mod+Mod1+s fullscreen disable; exec signal-desktop
 bindsym --no-repeat $mod+Mod1+m fullscreen disable; exec prismlauncher
 bindsym --no-repeat $mod+Mod1+b fullscreen disable; exec blender
