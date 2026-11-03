@@ -152,6 +152,43 @@ def _pick_input(label,rows,current=None):
                 print('That item cannot be selected.')
                 continue
         print('Select an available number.')
+def repair_preserved_output(route):
+    """Rebind local playback after an input change recreates shared-card nodes.
+
+    WirePlumber may destroy and recreate the playback sink and pacat stream while
+    applying a duplex card profile or capture route.  That is an expected graph
+    transition, not an input-selection failure.  Resolve the committed route by
+    stable names and restart the local monitor before performing strict checks.
+    """
+    if not route.get('card') or not route.get('sink') or STOPPED.exists():return
+    if not MODES[audio_mode()][2]:return
+    deadline=time.monotonic()+6
+    last_error=None
+    while time.monotonic()<deadline:
+        try:
+            card=_find_card(audio_topology(),route['card'])
+            if route.get('profile') and str(card['activeProfile'])!=str(route['profile']):
+                raise RuntimeError('Input profile is incompatible with the selected playback profile')
+            if route.get('port') and str(route['port']) not in {str(x) for x in card['activeRoutes']}:
+                raise RuntimeError('Input route displaced the selected playback route')
+            if not any(x['name']==route['sink'] for x in card['sinks']):
+                raise RuntimeError('Selected playback sink is still settling')
+            # Profile changes can leave the old launcher PID alive briefly while
+            # its PipeWire stream/link has already vanished. Recreate it from the
+            # committed stable route instead of treating that as rollback-worthy.
+            try:verify_preserved_output(route)
+            except RuntimeError as error:
+                if not any(text in str(error) for text in ('Local playback monitor stopped',
+                                                           'Local playback monitor is not linked')):
+                    raise
+                start_local_monitor(route,resolved=True,persist=False)
+            verify_preserved_output(route)
+            return
+        except RuntimeError as error:
+            last_error=error
+            time.sleep(.1)
+    raise RuntimeError('Playback did not recover after input selection: '+str(last_error))
+
 def verify_preserved_output(route):
     """Fail closed if an input profile/route disturbed the selected playback path."""
     if not route.get('card') or not route.get('sink') or STOPPED.exists():return
@@ -351,7 +388,7 @@ def select_input_interactive(finalize=None):
             if route and route['index'] not in _input_card(card)['activeRoutes']:
                 _input_set_route(card,route['index'])
             current=_input_card(card)
-            if saved_output.get('card')==card:verify_preserved_output(saved_output)
+            if saved_output.get('card')==card:repair_preserved_output(saved_output)
             candidates=[row for row in current['sources'] if _input_selectable_option(row)]
             if route and route['devices']:
                 candidates=[x for x in candidates if x['profileDevice'] is None or str(x['profileDevice']) in {str(v) for v in route['devices']}]
@@ -430,7 +467,7 @@ def select_input_interactive(finalize=None):
                     if targets=={str(node['id'])}:break
                     time.sleep(.1)
                 else:raise RuntimeError('Recording stream '+str(sid)+' link not confirmed')
-            if saved_output.get('card')==card:verify_preserved_output(saved_output)
+            if saved_output.get('card')==card:repair_preserved_output(saved_output)
             choices=_read_json(SWITCH_STATE/'input-last-choices.json',{})
             if not isinstance(choices,dict):choices={}
             choices[card]={'profile':profile['index'],'route':route['index'] if route else None,'source':chosen_source,'port':port['name'] if port else ''}
