@@ -114,8 +114,10 @@ trap 'exit 143' TERM
 trap 'exit 129' HUP
 trap 'exit 131' QUIT
 
-TOPOLOGY_SCRIPT="$HOME_DIR/.config/sway/scripts/network/camilladsp-server-sonobus.py"
-[[ -f "$TOPOLOGY_SCRIPT" ]] || { echo "Missing paired server: $TOPOLOGY_SCRIPT" >&2; exit 1; }
+# Media Control executes the shared backend locally. The web server loads the
+# same manifest independently, but it is not a dependency of this interface.
+TOPOLOGY_SCRIPT="$HOME_DIR/.config/sway/scripts/audio-backends/audio-backend-cli.py"
+[[ -f "$TOPOLOGY_SCRIPT" ]] || { echo "Missing local audio backend CLI: $TOPOLOGY_SCRIPT" >&2; exit 1; }
 # A deleted baseline is repaired through the same backend used by server startup.
 # The shared Python backend owns the complete expected-state list. Always ask it
 # to validate the baseline so one missing file cannot be overlooked here.

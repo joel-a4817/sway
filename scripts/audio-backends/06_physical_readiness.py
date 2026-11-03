@@ -1,6 +1,46 @@
 # Replace the basic PipeWire readiness check with physical-output readiness.
 # This function is resolved at runtime after the complete manifest is loaded.
 
+
+def reset_pipewire_stack():
+    """Bring up the local user audio stack without depending on saved state.
+
+    Start is intentionally non-destructive: the Stop action already owns
+    shutdown.  Start must never remove systemd-owned sockets or tear down a
+    partly recovered graph, because doing so can leave every unit inactive.
+    """
+    ordered = (
+        'pipewire.socket',
+        'pipewire.service',
+        'wireplumber.service',
+        'pipewire-pulse.socket',
+        'pipewire-pulse.service',
+    )
+    for unit in ordered:
+        try:
+            user_service('start', unit)
+        except Exception as error:
+            raise RuntimeError('Audio startup failed while starting '+unit+': '+str(error)) from error
+
+    deadline=time.monotonic()+20
+    last='audio services did not become active'
+    while time.monotonic()<deadline:
+        states={}
+        for unit in ordered:
+            result=run(['systemctl','--user','is-active',unit],False,5)
+            states[unit]=result.stdout.strip()
+        if all(states.get(unit)=='active' for unit in ordered):
+            pulse=run([exe('pactl'),'info'],False,5,media_env())
+            graph=run([exe('pw-dump')],False,5,media_env())
+            if pulse.returncode==0 and graph.returncode==0:
+                return
+            last=('pactl: '+(pulse.stderr.strip() or pulse.stdout.strip())+
+                  '; pw-dump: '+(graph.stderr.strip() or graph.stdout.strip()))
+        else:
+            last=', '.join(unit+'='+states.get(unit,'') for unit in ordered)
+        time.sleep(.1)
+    raise RuntimeError('Audio stack did not become ready: '+last)
+
 def ensure_pipewire_ready():
     for unit in PIPEWIRE_UNITS:
         user_service('start', unit)

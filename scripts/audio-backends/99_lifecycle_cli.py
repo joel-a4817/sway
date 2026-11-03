@@ -39,12 +39,23 @@ def restore_saved_output_for_startup(route):
     route.update(sink=chosen['name'],label=chosen['label'],sinkCard=card,sinkProfile=route['profile'])
     return route
 
-def start_runtime(force=False):
+def start_runtime(force=False,pipewire_ready=False):
     global MASTER_RESTORING
     MASTER_RESTORING=True
+    # Callers that already brought up and verified PipeWire pass
+    # pipewire_ready=True. This prevents a second reset inside the active
+    # start/gain transaction while preserving self-contained startup elsewhere.
+    state_missing=False
+    if not pipewire_ready:
+        state_missing=force
+        if not state_missing:
+            try:state_missing=bool(missing_audio_state_files())
+            except (OSError,RuntimeError,ValueError):state_missing=True
     ensure()
     (STATE/'output-preview').unlink(missing_ok=True)
-    ensure_pipewire_ready()
+    if not pipewire_ready:
+        if state_missing:reset_pipewire_stack()
+        else:ensure_pipewire_ready()
     if STOPPED.exists() and not force:
         if OUTPUT_PREVIEW.exists():_recover_stale_cli_preview()
         MODE.write_text('laptop_laptop\n')
@@ -159,8 +170,13 @@ def release_audio_for_output_switch():
 def toggle_audio_services():
     with LOCK:
         if STOPPED.exists():
+            # audio_start_change() reads and pauses the live playback graph.
+            # When Stop has shut PipeWire down, entering that transaction first
+            # fails in wpctl/pactl with ENETDOWN ("Host is down"). Bring up the
+            # local audio APIs before any gain/media transaction touches them.
+            reset_pipewire_stack()
             with audio_start_change():
-                start_runtime(force=True)
+                start_runtime(force=True,pipewire_ready=True)
                 STOPPED.unlink(missing_ok=True)
         else:
             stop_audio_services()
