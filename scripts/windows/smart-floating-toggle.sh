@@ -1,7 +1,7 @@
 # The new bind for toggling floating on and off
 #!/usr/bin/env bash
 
-STATE_DIR="/home/joel/.local/state/sway/windows"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/sway/windows"
 mkdir -p "$STATE_DIR"
 LOCKFILE="$STATE_DIR/.lock"
 

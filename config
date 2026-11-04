@@ -32,8 +32,8 @@ exec_always clipse -listen
 exec ~/.config/sway/scripts/battery-warn.sh
 exec autotiling
 default_orientation auto
-exec ~/.config/sway/scripts/windows/float-geometry-watcher.sh
-exec_always ~/.config/sway/scripts/windows/borders-follow-state.sh
+exec_always ~/.config/sway/scripts/windows/float-geometry-watcher.sh --replace
+exec_always ~/.config/sway/scripts/windows/borders-follow-state.sh --replace
 
 set $popup popup
 
