@@ -173,12 +173,14 @@ def create_custom_filter(request):
                 index_temp.write_text(json.dumps(index,indent=2,sort_keys=True)+'\n',encoding='utf-8')
                 temp.replace(target)
                 index_temp.replace(index_file)
+                updater['write_camilla_profile_graph'](target,rebuilt)
                 # CamillaDSP YAML is authoritative. Mirror all exportable YAMLs
                 # to S5 atomically, creating this counterpart and pruning orphans.
                 updater['sync_s5_with_camilla_profiles']()
             except BaseException:
                 temp.unlink(missing_ok=True);index_temp.unlink(missing_ok=True)
                 target.unlink(missing_ok=True)
+                target.with_suffix('.png').unlink(missing_ok=True)
                 if original_index is None:index_file.unlink(missing_ok=True)
                 else:index_file.write_bytes(original_index)
                 raise

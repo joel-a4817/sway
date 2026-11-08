@@ -53,6 +53,11 @@ HPCFS = (
         'label': 'Apple Earpods + Silicone Covers',
         'type': 'in-ear',
     },
+    {
+        'file': 'Whizzer BS1 - IEC60318-4 clone - HpCF - Raw.wav',
+        'label': 'Whizzer BS1',
+        'type': 'in-ear',
+    },
 )
 SAMPLE_RATE=96000
 ANALYSIS_LOW_HZ=20.0
@@ -260,6 +265,53 @@ def logarithmic_signed_db_area(matrix,low,high):
     if not math.isfinite(mean_db):
         raise RuntimeError('Invalid balanced channel-average dB area')
     return mean_db
+
+def camilla_profile_graph_bytes(profile_text,title):
+    """Render every combined WAV adjustment as centered per-ear L/R curves."""
+    import io
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import NullFormatter
+    low,high=profile_frequency_range(profile_text)
+    matrix=profile_transfer_matrix(profile_text)
+    active=np.any(matrix!=0.0,axis=2)
+    nfft=dense_response_nfft(matrix.shape[2])
+    frequency=np.fft.rfftfreq(nfft,1.0/SAMPLE_RATE)
+    inside=(frequency>low)&(frequency<high)
+    frequency=np.concatenate(([low],frequency[inside],[high]))
+    spectrum=np.fft.rfft(matrix,n=nfft,axis=2)[:,:,inside]
+    edges=np.empty((2,2,2),dtype=np.complex128)
+    for output in range(2):
+        for source in range(2):
+            edges[output,source]=endpoint_fir_response(matrix[output,source,:,None],[low,high])[:,0]
+    magnitude=np.concatenate((np.abs(edges[:,:,0])[:,:,None],np.abs(spectrum),np.abs(edges[:,:,1])[:,:,None]),axis=2)
+    curves=[]
+    for output in range(2):
+        paths=active[output]
+        if not np.any(paths):raise RuntimeError(f'Output channel {output} has no active transfer path')
+        selected=magnitude[output,paths]
+        if not np.isfinite(selected).all() or np.any(selected<=0):raise RuntimeError('Graph response has zero or invalid magnitude')
+        curves.append(np.mean(20.0*np.log10(selected),axis=0))
+    x=np.log(frequency)
+    areas=[float((np.trapezoid(curve,x) if hasattr(np,'trapezoid') else np.trapz(curve,x))/(x[-1]-x[0])) for curve in curves]
+    if abs(float(np.mean(areas)))>2e-7:raise RuntimeError(f'Graph area is not centered at 0 dB: L={areas[0]}, R={areas[1]}')
+    fig,ax=plt.subplots(figsize=(11,6))
+    ax.semilogx(frequency,curves[0],label='Left');ax.semilogx(frequency,curves[1],label='Right')
+    ax.axhline(0.0,color='black',linewidth=0.8,alpha=0.65)
+    ticks=[20.0,50.0,100.0,200.0,500.0,1000.0,2000.0,5000.0,10000.0,20000.0]
+    ax.set_xticks(ticks);ax.set_xticklabels([f'{v/1000:g}k' if v>=1000 else f'{v:g}' for v in ticks]);ax.xaxis.set_minor_formatter(NullFormatter())
+    ax.set_xlim(20.0,20000.0);ax.margins(x=0);ax.set_xlabel('Frequency (Hz)');ax.set_ylabel('Combined adjustment (dB)');ax.set_title(title);ax.legend();ax.grid(True,which='major',alpha=.25);fig.tight_layout()
+    output=io.BytesIO();fig.savefig(output,format='png',dpi=160);plt.close(fig);return output.getvalue()
+
+def write_camilla_profile_graph(path,profile_text):
+    """Write PROFILE.png beside CamillaDSP PROFILE.yml, never under Downloads-S5."""
+    path=Path(path);png=path.with_suffix('.png');data=camilla_profile_graph_bytes(profile_text,path.stem)
+    temporary=png.with_name('.'+png.name+'.new');temporary.write_bytes(data)
+    try:temporary.replace(png)
+    finally:temporary.unlink(missing_ok=True)
+    if not png.is_file() or png.stat().st_size<1024:raise RuntimeError(f'Profile graph verification failed: {png}')
+    return png
 
 def center_camilla_profile(path,text):
     """Apply one common gain after all routing; keep source WAVs unchanged."""
@@ -710,12 +762,14 @@ def commit_profiles(candidates):
         try:
             for path,text in expected.items():
                 path.parent.mkdir(parents=True,exist_ok=True);atomic_write(path,text)
+                write_camilla_profile_graph(path,text)
             # The filters directory is generated state. A device is configured
             # only when its slugged top-level directory is expected now.
             for directory in sorted(before_dirs-expected_device_dirs,key=lambda item:len(item.parts),reverse=True):
                 if directory.exists():shutil.rmtree(directory)
             for old in before_yaml-set(expected):
                 if old.exists():old.unlink()
+                old.with_suffix('.png').unlink(missing_ok=True)
             # Remove empty nested remnants but never remove an expected device dir.
             for directory in sorted((x for x in root.rglob('*') if x.is_dir()),key=lambda item:len(item.parts),reverse=True):
                 if directory not in expected_device_dirs:
@@ -733,6 +787,8 @@ def commit_profiles(candidates):
                 raise RuntimeError(f'Device directory verification mismatch; extra={extra}, missing={missing}')
             for path,text in expected.items():
                 if path.read_text(encoding='utf-8')!=text:raise RuntimeError(f'Profile verification failed: {path}')
+                graph=path.with_suffix('.png')
+                if not graph.is_file() or graph.stat().st_size<1024:raise RuntimeError(f'Profile graph verification failed: {graph}')
         except BaseException as error:
             restore_errors=[]
             try:
