@@ -29,10 +29,7 @@ HPCF_ANECHOIC=AUDIO_ROOT/'b&k 5128 hpcfs'
 COMPENSATION_WAV=AUDIO_ROOT/'other/Sennheiser HD650 - B&K 5128 to SONICOM P0135 Approximate Compensation.wav'
 SOFA_AVERAGE_WAV=AUDIO_ROOT/'other/P0135_96k_360_adaptive_finite_preview.wav'
 SOFA_RENDER_REPORT=AUDIO_ROOT/'other/P0135_96k_360_adaptive_report.json'
-PRODUCTION_ROOM_MATRICES={
-    'music':AUDIO_ROOT/'other/P0135_96k_Ideal_Stereo_Production_Room_Matrix_4ch_LL_LR_RL_RR.wav',
-    'film':AUDIO_ROOT/'other/P0135_96k_Ideal_Stereo_Production_Room_Matrix_Film_4ch_LL_LR_RL_RR.wav',
-}
+PRODUCTION_ROOM_MATRIX=AUDIO_ROOT/'other/P0135_96k_Ideal_Stereo_Production_Room_Matrix_Home_4ch_LL_LR_RL_RR.wav'
 MEASUREMENTS_DIR=AUDIO_ROOT/'measurements'
 COMBINED_FILTER_ROOT=HOME/'Downloads-S5/filters'
 HPCFS = (
@@ -101,7 +98,7 @@ def fir_frequency_range(path):
     path=Path(path).resolve();sidecar=range_sidecar(path)
     if sidecar.is_file():
         node=json.loads(sidecar.read_text(encoding='utf-8'));low=float(node['lowHz']);high=float(node['highHz'])
-    elif path in (SOFA_AVERAGE_WAV.resolve(),*(matrix.resolve() for matrix in PRODUCTION_ROOM_MATRICES.values())) or '.assets' in path.parts:
+    elif path in (SOFA_AVERAGE_WAV.resolve(),PRODUCTION_ROOM_MATRIX.resolve()) or '.assets' in path.parts:
         low,high=20.0,20000.0
     elif path.parent==HPCF_ANECHOIC.resolve():
         base=path.stem.removesuffix(' - HpCF - Raw')
@@ -212,7 +209,7 @@ def profile_transfer_matrix(profile_text):
     used=np.flatnonzero(np.any(transfer!=0.0,axis=(0,1)))
     return transfer[:,:,:used[-1]+1] if len(used) else transfer[:,:,:1]
 JAMESDSP_EXPORT_STEMS = frozenset((
-    "stereo", "360-stereo", "production-room-music", "production-room-film",
+    "stereo", "360-stereo", "production-room",
 ))
 
 def _jamesdsp_export_kind(relative_yaml):
@@ -437,8 +434,7 @@ def conv_text(name,path,channel):
 PROFILE_LAYOUTS = {
     'stereo': {'label':'Stereo', 'spatial':False, 'room':None},
     '360-stereo': {'label':'360 Stereo', 'spatial':True, 'room':None},
-    'production-room-music': {'label':'Production Room Music', 'spatial':False, 'room':'music'},
-    'production-room-film': {'label':'Production Room Film', 'spatial':False, 'room':'film'},
+    'production-room': {'label':'Production Room', 'spatial':False, 'room':True},
 }
 def room_matrix_text(path):
     """Render a four-channel LL,LR,RL,RR WAV as a true 2x2 stereo matrix."""
@@ -515,7 +511,7 @@ def make_profile(item,layout_key,hpcf_path,chain_paths,peak_gain_db,valid_low,va
     mixers=[]
     room_filters='';room_pipeline=''
     if layout['room']:
-        room_mixers,room_filters,room_pipeline=room_matrix_text(PRODUCTION_ROOM_MATRICES[layout['room']])
+        room_mixers,room_filters,room_pipeline=room_matrix_text(PRODUCTION_ROOM_MATRIX)
         if room_mixers:
             mixers.append(room_mixers)
     if mixers:text+='mixers:\n'+''.join(mixers)
@@ -546,15 +542,13 @@ def validate_current_spatial_fir():
     return path
 
 def validate_production_room_matrix():
-    paths=[]
-    for name,path in PRODUCTION_ROOM_MATRICES.items():
-        if not path.is_file():raise RuntimeError(f'Missing production-room {name} matrix WAV: {path}. Run build-p0135-ideal-stereo-production-room-matrix.py first.')
-        info=sf.info(path)
-        if info.samplerate!=SAMPLE_RATE or info.channels!=4 or info.frames<2:raise RuntimeError(f'{path}: expected nonempty 4-channel {SAMPLE_RATE} Hz WAV ordered LL, LR, RL, RR')
-        read_fir(path,4)
-        print(f'Production-room {name} matrix: {info.frames} samples ({info.frames/info.samplerate:.3f} s), 4-channel LL,LR,RL,RR at {info.samplerate} Hz',flush=True)
-        paths.append(path)
-    return paths
+    path=PRODUCTION_ROOM_MATRIX
+    if not path.is_file():raise RuntimeError(f'Missing production-room matrix WAV: {path}. Run build-p0135-ideal-stereo-production-room-matrix.py first.')
+    info=sf.info(path)
+    if info.samplerate!=SAMPLE_RATE or info.channels!=4 or info.frames<2:raise RuntimeError(f'{path}: expected nonempty 4-channel {SAMPLE_RATE} Hz WAV ordered LL, LR, RL, RR')
+    read_fir(path,4)
+    print(f'Production-room matrix: {info.frames} samples ({info.frames/info.samplerate:.3f} s), 4-channel LL,LR,RL,RR at {info.samplerate} Hz',flush=True)
+    return path
 
 def measurement_devices():
     if not MEASUREMENTS_DIR.is_dir():raise SystemExit(f'Missing measurement folder: {MEASUREMENTS_DIR}')
