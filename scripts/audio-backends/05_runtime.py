@@ -177,7 +177,6 @@ def wp_control(args,timeout=10):
 def ensure():
     STATE.mkdir(parents=True,exist_ok=True)
     SWITCH_STATE.mkdir(parents=True,exist_ok=True)
-    MUSIC.mkdir(parents=True,exist_ok=True)
     legacy=HOME/'.local/state/sway/audio'
     # One-time migration. Never resurrect a deliberately cleared stop marker.
     marker=STATE/'state-migrated'
@@ -197,7 +196,7 @@ def ensure():
             try:shutil.move(str(old),str(new))
             except OSError:pass
     marker.touch()
-    for directory in (old_server,legacy):
+    for directory in (legacy,):
         try:directory.rmdir()
         except OSError:pass
 
