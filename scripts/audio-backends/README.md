@@ -1,24 +1,16 @@
 # Audio backend
 
-`audio-backend-cli.py` loads the Python modules in `manifest.txt` in order. `media-control.sh` is the Sway UI entry point and is intentionally not part of the Python manifest.
+This directory contains the local Media Control backend only.
 
-## Media Control
-The compact top-level actions are Route, Filters, Web Remote, and Network. Route presents four user-facing modes:
+Retained responsibilities:
+- CamillaDSP filter discovery, validation, creation, startup and switching
+- PipeWire/ALSA readiness and physical device/profile/route/sink transactions
+- input and camera selection with commit/rollback
+- logical master-volume preservation during graph changes
+- SonoBus and AirPlay routing modes
+- laptop output selection, including saved-device restoration
+- away/display, VNC and iPad Web Remote launch controls
 
-- Listen: external source to this PC
-- Cast: PC source to the external device
-- Relay: receive and send external audio
-- Local: PC playback and PC output only
+The retired laptop HTTP server, embedded web UI, YouTube Music integration, MPV/local-music library, MPRIS/system-media controls, artwork extraction and playlist APIs are intentionally absent. The iPad Web Remote owns media playback and its server; this backend only starts/stops that remote server and retains device-audio output configuration used by Media Control.
 
-The `AirPlay Direct` NetworkManager profile is enabled automatically for Listen, Cast, and Relay and disabled for Local. `wifi-toggle.sh` also exposes an `AirPlay` network button.
-
-## CamillaDSP profiles
-Each canonical profile remains at `<device>/<profile>.yml` for custom-filter rebasing and one canonical S5 export. Runtime-only CamillaDSP copies are generated at:
-
-`<device>/<chunksize>-frames/<limiter-on|limiter-off>/<profile>.yml`
-
-Generated chunk sizes are 64, 128, 256, 512, 1024, 2048, 4096, and 8192 frames. Runtime variants are excluded from Downloads-S5 exports.
-
-
-## Audio output menu
-The existing Audio output action first selects the source/destination mode, then reuses the existing device, profile, route and PipeWire sink transaction for configurations that include PC output.
+`audio-backend-cli.py` loads the ordered Python modules in `manifest.txt`. `media-control.sh` is the Sway UI entry point and is intentionally outside the Python manifest.

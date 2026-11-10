@@ -188,7 +188,7 @@ def ensure():
             if not item.is_file() or item.is_symlink():continue
             if source==legacy and item.name not in ('master-volume','media-control.log','media-control.lock','audio-cards-last.txt','camilladsp-local.log'):continue
             target=destination/item.name
-            if not target.exists() and item.name!='mpv.sock':
+            if not target.exists():
                 try:shutil.move(str(item),str(target))
                 except OSError:pass
     for name in ('audio-stopped','audio-stop-complete','audio-stop-capable.pid'):
@@ -298,7 +298,6 @@ def apply_source_services(source,direct=False):
         # Keep the system-audio sink exposed. The NixOS service is neutral and
         # no longer changes defaults, so it is safe beside AirPlay.
         ensure_system_audio_exposed()
-        if MODES[audio_mode()][1]!='airplay' and alive(rpid(MPVPID),'mpv'):stop_mpv()
         health=airplay_health()
         for service,active in health['services'].items():
             if active:continue

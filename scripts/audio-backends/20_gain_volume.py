@@ -162,7 +162,6 @@ def master_volume():
                 return saved if saved is not None else value
             if saved is None or abs(saved-value)>=.5:
                 atomic(MASTER_VOLUME,f'{value:.2f}%\n')
-                sync_mpv_for_audio_path(value)
         return value
     except (OSError,FileNotFoundError,subprocess.TimeoutExpired,RuntimeError) as live_error:
         saved=_saved_master_volume()
@@ -215,16 +214,6 @@ def camilla_command(command):
     if item.get('result')!='Ok':raise RuntimeError(f'CamillaDSP {name} failed: {item}')
     return item.get('value')
 
-def sync_mpv_for_audio_path(value):
-    if not (alive(rpid(MPVPID),'mpv') and MPVSOCK.exists()):return
-    # MPV writes directly to camilladsp_input on shared/filtered paths, so its
-    # software gain must include the logical master there. Direct PipeWire MPV
-    # already receives the sink master and therefore uses only its local trim.
-    trim=mpv_gain()
-    wanted=(float(value)*trim/100.0) if _shared_system_path() else trim
-    try:mpv_direct(['set_property','volume',wanted])
-    except (OSError,RuntimeError,ValueError) as error:
-        raise RuntimeError(f'Could not sync MPV for active audio path: {error}') from error
 
 def watch_master_volume(stop):
     # Sway volume keys use pipewire directly, even when the web page is closed.
@@ -239,7 +228,7 @@ def watch_master_volume(stop):
         try:master_volume()
         except (OSError,RuntimeError,ValueError,subprocess.TimeoutExpired):pass
 
-def apply_master_volume(value,normalize_sinks=True,sync_player=True):
+def apply_master_volume(value,normalize_sinks=True):
     _ensure_no_filter_physical_default()
     # Normalize other sinks on route changes, not on each slider update.
     # CamillaDSP Main remains at unity.
@@ -248,9 +237,6 @@ def apply_master_volume(value,normalize_sinks=True,sync_player=True):
         name=pw_default()
     if not name:raise RuntimeError('No playback sink for master volume')
     # Keep the inactive path at unity, including slider updates. In filtered
-    # mode MPV bypasses the PipeWire sink, so its gain follows the saved master.
-    # In shared No filter, camilladsp ingress and direct-ALSA MPV carry
-    # the same logical master; downstream physical outputs remain at unity.
     inactive=saved_output_route().get('sink') if name=='camilladsp' else 'camilladsp'
     if inactive and inactive!=name:
         # Optional inactive stages must never be recovered. In direct No-filter
@@ -269,7 +255,7 @@ def apply_master_volume(value,normalize_sinks=True,sync_player=True):
             result=run(['__wp_control__','set-sink-volume',target,'100%'],False,8,media_env())
             if result.returncode:raise RuntimeError(f'Could not set {target} to 100%: {result.stderr.strip()}')
     # CamillaDSP Main is a normalization stage, so set it before restoring
-    # the logical master. The master sink and direct-ALSA MPV are restored last.
+    # Restore the logical master after all unity-gain stages.
     if alive(rpid(CAMPID),'camilladsp'):
         if selected_filter()!=NO_FILTER:wait_for_camilla_config(profile(selected_filter()))
         try:camilla_command({'SetVolume':0.0})
@@ -293,5 +279,4 @@ def apply_master_volume(value,normalize_sinks=True,sync_player=True):
         else:last_error=f'master readback was {match.group(1)}%'
         if attempt==0:time.sleep(.15)
     else:raise RuntimeError(f'Could not verify {name} at {value:.2f}%: {last_error}')
-    if sync_player:sync_mpv_for_audio_path(value)
 

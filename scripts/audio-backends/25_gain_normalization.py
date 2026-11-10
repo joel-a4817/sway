@@ -1,56 +1,14 @@
-def pause_for_normalization():
-    # Pause players currently playing; never resume them automatically.
-    if alive(rpid(MPVPID),'mpv') and MPVSOCK.exists():
-        try:
-            if mpv_direct(['get_property','pause']) is False:
-                mpv_direct(['set_property','pause',True])
-        except (OSError,ValueError,RuntimeError):pass
-    external=Path('/tmp/mpvsocket')
-    if external.is_socket() and external!=MPVSOCK:
-        try:
-            with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as client:
-                client.settimeout(1);client.connect(str(external))
-                client.sendall(b'{"command":["get_property","pause"]}\n')
-                reply=json.loads(client.makefile('rb').readline())
-            if reply.get('error')=='success' and reply.get('data') is False:
-                with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as client:
-                    client.settimeout(1);client.connect(str(external))
-                    client.sendall(b'{"command":["set_property","pause",true]}\n')
-                    json.loads(client.makefile('rb').readline())
-        except (OSError,ValueError,RuntimeError):pass
-    try:players=mpris_players()
-    except (OSError,RuntimeError,subprocess.TimeoutExpired):players=[]
-    for player in players:
-        try:
-            if mpris_status(player)!='Playing':continue
-            # MPRIS Pause is asynchronous; do not reject the route change.
-            run([exe('playerctl'),'--player',player,'pause'],False,5,media_env())
-        except (OSError,RuntimeError,subprocess.TimeoutExpired):
-            # An unsupported or vanished player must not abort a working route.
-            continue
-def save_master_after_pause():
-    # This is the only transaction snapshot point: media is paused and no
-    # route/filter/input/output mutation has run yet.
-    return capture_master_volume()
 
-def pause_for_audio_stop():
-    ensure()
-    # Preserve the queue before pausing; restoration must remain paused.
-    save_mpv_queue(force=True)
-    pause_for_normalization()
-    return save_master_after_pause()
 
 @contextmanager
 def audio_start_change():
-    saved_master=pause_for_audio_stop()
+    saved_master=capture_master_volume()
     MEDIA_TRANSACTION.starting=True
     try:
         yield
         if not STOPPED.exists():normalize_audio_volumes(saved_master)
     finally:
-        try:pause_for_normalization()
-        finally:MEDIA_TRANSACTION.starting=False
-    # Stop and start deliberately leave playback paused.
+        MEDIA_TRANSACTION.starting=False
 
 def normalize_with_media():
     with LOCK:

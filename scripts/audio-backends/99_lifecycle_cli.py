@@ -115,9 +115,6 @@ def start_runtime(force=False,pipewire_ready=False):
         if local:start_local_monitor()
         else:stop_local_monitor()
         stop_sonobus();MODE.write_text(mode+'\n')
-    if MODES[audio_mode()][1]=='system' and QUEUE_FILE.is_file():
-        try:ensure_mpv()
-        except (OSError,RuntimeError):pass
     if selected_filter()!=NO_FILTER:
         wait_for_camilla_config(profile(selected_filter()))
     try:
@@ -133,15 +130,13 @@ def stop_audio_services(mark_stopped=True,stop_pipewire=True):
     # Start audio recreates PipeWire first, reapplies routing, normalizes, then
     # restores the one saved logical master.
     with LOCK:
-        pause_for_audio_stop()
+        ensure()
         if not MASTER_RESTORING and not STOPPED.exists():master_volume()
         MASTER_RESTORING=True
         if mark_stopped:STOPPED.touch()
         STOP_ACK.unlink(missing_ok=True)
         try:
             stop_local_monitor()
-            stop_mpv()
-            stop_all_mpv()
             stop_sonobus()
             stop_bypass()
             stop_camilla(include_stale=True)
@@ -158,8 +153,6 @@ def release_audio_for_output_switch():
         STOP_ACK.unlink(missing_ok=True)
         try:
             stop_local_monitor()
-            stop_mpv()
-            run(['pkill', '-x', 'mpv'], False, 5)
             stop_sonobus()
             stop_bypass()
             stop_camilla(include_stale=True)
@@ -186,7 +179,7 @@ def cleanup():
     # available to Media Control after selecting the clean laptop mode.
     if STOPPED.exists():return
     with LOCK:
-        saved_master=pause_for_audio_stop()
+        saved_master=capture_master_volume()
         try:
             apply_mode('laptop_laptop')
             normalize_audio_volumes(saved_master)
