@@ -83,7 +83,7 @@ def mode_state():
             'sonobus':False,'localMonitor':False,'systemAudio':False,'engineRunning':False,'engineLabel':'Audio stopped',
             'airplay':False,'localOutput':saved_output_route(),
             'localOutputLabel':'','sonobusPolicy':{}}
-    name=audio_mode();label,source,local,sono=MODES[name];policy=MODE_POLICIES[name]
+    name=audio_mode();label,source,local,sono=MODES[name];policy=effective_mode_policy(name)
     local_pid=rpid(LOCALMONPID);filter_name=selected_filter()
     camilla_running=alive(rpid(CAMPID),'camilladsp');bypass_running=alive(rpid(BYPASSPID))
     route=_read_json(LOCALSINK,{})
@@ -99,7 +99,7 @@ def mode_state():
     }
 def apply_mode(name,password=None,restore_camilla=True,output=None,output_resolved=False):
     if name not in MODES:raise ValueError('Invalid audio mode')
-    label,source,local,sono=MODES[name];policy=MODE_POLICIES[name]
+    label,source,local,sono=MODES[name];policy=effective_mode_policy(name)
     mpv_was_running=alive(rpid(MPVPID),'mpv')
     if STOPPED.exists():ensure_pipewire_ready()
     direct=(selected_filter()==NO_FILTER and source=='system' and not sono and local)

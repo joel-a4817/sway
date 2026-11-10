@@ -33,7 +33,7 @@ def _sonobus_audio_setup(text):
 def configure_sonobus(policy=None):
     if not SONOSET.is_file():raise FileNotFoundError(SONOSET)
     import xml.etree.ElementTree as ET
-    policy=dict(policy or MODE_POLICIES[audio_mode()])
+    policy=dict(policy or effective_mode_policy(audio_mode()))
     text=SONOSET.read_text(encoding='utf-8')
     root,value,device=_sonobus_audio_setup(text)
     if value is None:
@@ -46,11 +46,12 @@ def configure_sonobus(policy=None):
         'audioInputDeviceName':policy['inputDevice'],
         'audioDeviceRate':'96000.0',
         'audioDeviceBufferSize':'512',
+        'audioInputChannels':str(policy.get('inputChannelsMask','11')),
     }
     for key,wanted in attributes.items():device.set(key,str(wanted))
     value.set('val',ET.tostring(device,encoding='unicode',short_empty_elements=True))
     parameters={
-        'sendchannels':'2.0','defsendqual':'5.0','mastinmute':'0.0',
+        'sendchannels':str(float(policy.get('sendChannels',2))),'defsendqual':'5.0','mastinmute':'0.0',
         'mastsendmute':'1.0' if policy.get('sendMute') else '0.0',
         'mastrecvmute':'1.0' if policy.get('receiveMute',True) else '0.0',
         'dry':'0.0','wet':'0.9999999403953552',
@@ -134,6 +135,7 @@ def restart_sonobus(password=None,policy=None,normalize=False):
                 raise RuntimeError('SonoBus failed to start: '+tail)
             if process.pid in sonopids():break
             time.sleep(.05)
+        move_sonobus_to_workspace1(timeout=20.0)
         if normalize and not STOPPED.exists():normalize_with_media()
         return {'pid':process.pid,'profile':state['active'],'group':item['group'],**applied}
 

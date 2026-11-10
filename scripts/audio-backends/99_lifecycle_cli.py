@@ -209,6 +209,45 @@ def sonobus_sway_windows(tree):
         if rect.get('width',0)>0 and rect.get('height',0)>0:
             yield node['id'],workspace
 
+def move_sonobus_to_workspace1(timeout=20.0):
+    """Wait for SonoBus, then move every visible SonoBus container to workspace 1."""
+    if not os.environ.get('SWAYSOCK'):
+        raise RuntimeError('SWAYSOCK is unavailable; cannot place SonoBus')
+    deadline=time.monotonic()+timeout
+    last_error='SonoBus window did not appear'
+    while time.monotonic()<deadline:
+        try:
+            result=run([exe('swaymsg'),'-r','-t','get_tree'],False,4)
+            if result.returncode:
+                raise RuntimeError(result.stderr.strip() or 'Sway tree unavailable')
+            tree=json.loads(result.stdout);stack=[tree];windows=[]
+            while stack:
+                node=stack.pop()
+                if not isinstance(node,dict):continue
+                stack.extend((node.get('nodes') or [])+(node.get('floating_nodes') or []))
+                props=node.get('window_properties') or {}
+                values=' '.join(str(x or '') for x in (
+                    node.get('name'),node.get('app_id'),props.get('class'),props.get('instance')
+                )).casefold()
+                rect=node.get('rect') or {}
+                if (node.get('type')=='con' and isinstance(node.get('id'),int)
+                        and rect.get('width',0)>0 and rect.get('height',0)>0
+                        and 'sonobus' in values):
+                    windows.append(node['id'])
+            if windows:
+                for wid in windows:
+                    moved=run([exe('swaymsg'),'-r',f'[con_id={wid}] move container to workspace number 1'],False,4)
+                    answers=json.loads(moved.stdout)
+                    if moved.returncode or not answers or not all(x.get('success') for x in answers):
+                        raise RuntimeError(moved.stderr.strip() or f'Sway move failed: {answers}')
+                print('Moved SonoBus to workspace 1',flush=True)
+                return windows
+        except (OSError,ValueError,TypeError,RuntimeError,subprocess.TimeoutExpired) as error:
+            last_error=str(error)
+        time.sleep(.20)
+    raise RuntimeError(f'Could not move SonoBus to workspace 1: {last_error}')
+
+
 def watch_sonobus_workspace(stop):
     if not os.environ.get('SWAYSOCK'):return
     seen={}
@@ -233,99 +272,15 @@ def watch_sonobus_workspace(stop):
             print(f'SonoBus workspace watcher: {error}',flush=True)
         stop.wait(.5)
 
-def main():
-    me=os.getpid()
-    SWITCH_STATE.mkdir(parents=True,exist_ok=True)
-    startup_lock=(SWITCH_STATE/'media-control.lock').open('a+')
-    fcntl.flock(startup_lock,fcntl.LOCK_EX)
-    # Server and Media Control share the same clean-state master bootstrap.
-    # With all state deleted, seed from a real physical sink before pausing or
-    # normalizing; do not depend on ambiguous PipeWire default metadata.
-    if _saved_master_volume() is None:
-        seed_master_from_physical_output()
-    saved_master=pause_for_audio_stop()
-    # The server launcher has already terminated and verified any previous
-    # launcher instance before this backend is loaded. Clear stale bookkeeping;
-    # backend startup must not perform a second process-replacement pass.
-    ensure()
-    SERVERPID.unlink(missing_ok=True)
-    if alive(rpid(BYPASSPID)):stop_bypass()
-    # First replacement of an older server may leave its tracked engine alive.
-    tracked=rpid(CAMPID)
-    if tracked and reusable_camilla(tracked):
-        stop_local_monitor();stop_camilla(include_stale=True)
-    # A surviving engine may be reused only if it is the tracked engine and
-    # reports the selected YAML. Every active startup still reapplies local mode.
-    running=other_camilla_processes()
-    if running:
-        if len(running)!=1:
-            raise RuntimeError('Multiple CamillaDSP engines found; refusing unsafe startup')
-        pid=running[0]
-        verified=reusable_camilla(pid)
-        clean_state=(selected_filter()==NO_FILTER and not ACTIVE.exists())
-        if clean_state:
-            # Deleting state removes the selected profile and tracked PID, but
-            # does not stop an already-running engine. Verify that the sole
-            # survivor is this user's exact CamillaDSP binary and websocket,
-            # adopt it only for shutdown, then rebuild the No-filter baseline.
-            if not owned_camilla_engine(pid):
-                raise RuntimeError('Foreign CamillaDSP engine is running; refusing unsafe startup')
-            CAMPID.write_text(str(pid)+'\n')
-            stop_local_monitor()
-            stop_camilla(include_stale=True)
-            running=[]
-        else:
-            if not verified or selected_filter()==NO_FILTER:
-                raise RuntimeError('Unverified CamillaDSP engine is running; refusing unsafe startup')
-            if rpid(CAMPID)!=pid:
-                CAMPID.write_text(str(pid)+'\n')
-            if selected_filter()!=profile_id(verified):
-                raise RuntimeError('Surviving CamillaDSP config differs from selected profile; refusing unsafe startup')
-    watcher_stop=threading.Event()
-    threading.Thread(target=watch_sonobus_workspace,args=(watcher_stop,),daemon=True).start()
-    try:
-        start_runtime()
-    except Exception as error:
-        # start_runtime performs its own recovery when a route fails.
-        # Do not recursively repeat an unsuccessful fallback.
-        print('Audio startup failed: '+str(error),flush=True)
-        raise
-    if not STOPPED.exists():normalize_audio_volumes(saved_master)
-    threading.Thread(target=watch_master_volume,args=(watcher_stop,),daemon=True).start()
-    threading.Thread(target=watch_output_preview,args=(watcher_stop,),daemon=True).start()
-    server=S(('0.0.0.0',PORT),H);SERVERPID.write_text(str(me)+'\n');STOP_CAP.write_text(str(me)+'\n')
-    fcntl.flock(startup_lock,fcntl.LOCK_UN)
-    startup_lock.close()
-    def shut(*_):threading.Thread(target=server.shutdown,daemon=True).start()
-    signal.signal(signal.SIGTERM,shut);signal.signal(signal.SIGHUP,shut)
-    signal.signal(signal.SIGUSR1,lambda *_:threading.Thread(target=release_audio_for_output_switch,daemon=True).start())
-    print(f'CamillaDSP web remote listening on 0.0.0.0:{PORT}',flush=True)
-    try:server.serve_forever()
-    except KeyboardInterrupt:pass
-    finally:
-        watcher_stop.set()
-        server.server_close();cleanup()
-        if rpid(SERVERPID)==me:SERVERPID.unlink(missing_ok=True)
-        if rpid(STOP_CAP)==me:STOP_CAP.unlink(missing_ok=True)
-def local_api_post(path,payload=None,timeout=90,error='Request failed'):
-    from urllib.request import Request,urlopen
-    from urllib.error import HTTPError,URLError
-    request=Request(f'http://127.0.0.1:{PORT}{path}',data=json.dumps(payload or {}).encode(),
-                    headers={'Content-Type':'application/json'},method='POST')
-    try:
-        with urlopen(request,timeout=timeout) as response:data=json.load(response)
-    except HTTPError as failure:
-        try:detail=json.load(failure).get('error')
-        except (ValueError,TypeError):detail=None
-        raise RuntimeError(detail or error) from failure
-    except URLError as failure:raise RuntimeError('Webremote is unavailable: '+str(failure)) from failure
-    if not data.get('ok'):raise RuntimeError(data.get('error') or error)
-    return data
-
 def topology_cli():
     import sys
     try:
         ensure()
+        if len(sys.argv)==4 and sys.argv[1]=='--set-both-matrix':
+            print(json.dumps(set_both_output_matrix(sys.argv[2],sys.argv[3]),ensure_ascii=False));return 0
+        if len(sys.argv) in (3,4) and sys.argv[1]=='--set-mode':
+            output=json.loads(sys.argv[3]) if len(sys.argv)==4 else None
+            print(json.dumps(set_mode(sys.argv[2],output=output),ensure_ascii=False));return 0
         if len(sys.argv)==2 and sys.argv[1]=='--audio-toggle':
             print(json.dumps(toggle_audio_services()))
             return
@@ -333,29 +288,17 @@ def topology_cli():
             print(json.dumps(vnc_state()))
             return
         if len(sys.argv)==2 and sys.argv[1]=='--vnc-toggle':
-            if alive(rpid(SERVERPID)) and rpid(SERVERPID)!=os.getpid():
-                result=local_api_post('/api/restart-vnc',timeout=40,
-                                      error='VNC toggle failed')
-            else:
-                result=restart_vnc()
-            print(json.dumps(result))
+            print(json.dumps(restart_vnc()))
             return
         if len(sys.argv)==2 and sys.argv[1]=='--ensure-audio-baseline':
-            if alive(rpid(SERVERPID)) and rpid(SERVERPID)!=os.getpid():
-                data=local_api_post('/api/ensure-audio-baseline',timeout=90,error='Audio baseline repair failed')
-            else:data=ensure_physical_audio_baseline()
-            print(json.dumps(data,ensure_ascii=False));return
+            print(json.dumps(ensure_physical_audio_baseline(),ensure_ascii=False));return
         if len(sys.argv)==3 and sys.argv[1]=='--restart-service':
             name=sys.argv[2]
-            paths={'2':'/api/restart-sonobus','3':'/api/restart-airplay','4':'/api/restart-vnc'}
-            if name not in paths:raise ValueError('Choose restart 2, 3 or 4')
-            if not alive(rpid(SERVERPID)):
-                if name=='2':result=restart_sonobus_action()
-                elif name=='3':result=restart_airplay()
-                else:result=restart_vnc()
-                print(json.dumps(result));return
-            data=local_api_post(paths[name],timeout=40,error='Restart failed')
-            print(json.dumps(data));return
+            if name=='2':result=restart_sonobus_action()
+            elif name=='3':result=restart_airplay()
+            elif name=='4':result=restart_vnc()
+            else:raise ValueError('Choose restart 2, 3 or 4')
+            print(json.dumps(result));return
         if len(sys.argv)==2 and sys.argv[1]=='--toggle-away-display':
             print(json.dumps(toggle_away_display()));return
         if len(sys.argv)==2 and sys.argv[1]=='--away-display-status':
@@ -419,35 +362,20 @@ def topology_cli():
             request=json.loads(sys.argv[2])
             if not isinstance(request,dict) or not request.get('card') or request.get('profile') is None:
                 raise ValueError('Choose a playback device and profile')
-            server=rpid(SERVERPID)
-            if not alive(server) or server==os.getpid():
-                if STOPPED.exists():raise RuntimeError('Audio is stopped; start audio before selecting an output')
-                print(json.dumps(activate_output(request,mode=audio_mode(),origin='cli',token=os.environ.get('MEDIA_CONTROL_PICKER_PID')),ensure_ascii=False))
-                return
-            data=local_api_post('/api/output-activate',{'output':request,'mode':audio_mode(),'origin':'cli','token':os.environ.get('MEDIA_CONTROL_PICKER_PID')},120,'Output switch failed')
-            print(json.dumps(data,ensure_ascii=False))
-            return
+            if STOPPED.exists():raise RuntimeError('Audio is stopped; start audio before selecting an output')
+            result=activate_output(request,mode=audio_mode(),origin='cli',token=os.environ.get('MEDIA_CONTROL_PICKER_PID'))
+            print(json.dumps(result,ensure_ascii=False));return
         if len(sys.argv)==4 and sys.argv[1]=='--output-route':
             raise ValueError('Choose profile and route together with --switch-output')
         if len(sys.argv)==3 and sys.argv[1]=='--apply-output-device':
-            card=sys.argv[2]
-            if not alive(rpid(SERVERPID)):
-                print(json.dumps(select_output_device_stage(card,origin='cli',token=os.environ.get('MEDIA_CONTROL_PICKER_PID')),ensure_ascii=False));return
-            data=local_api_post('/api/output-device-stage',{'card':card,'origin':'cli','token':os.environ.get('MEDIA_CONTROL_PICKER_PID')},90,'Playback device stage failed')
-            print(json.dumps(data,ensure_ascii=False));return
+            result=select_output_device_stage(sys.argv[2],origin='cli',token=os.environ.get('MEDIA_CONTROL_PICKER_PID'))
+            print(json.dumps(result,ensure_ascii=False));return
         if (len(sys.argv)==4 and sys.argv[1]=='--apply-output-profile') or (len(sys.argv)==5 and sys.argv[1]=='--apply-output-route'):
-            if not alive(rpid(SERVERPID)):
-                if STOPPED.exists():raise RuntimeError('Audio is stopped; start audio before selecting an output')
-                result=(apply_output_profile_stage(sys.argv[2],sys.argv[3],mode=audio_mode(),origin='cli',token=os.environ.get('MEDIA_CONTROL_PICKER_PID'))
-                        if sys.argv[1]=='--apply-output-profile' else
-                        apply_output_route_stage(sys.argv[2],sys.argv[3],sys.argv[4],mode=audio_mode(),origin='cli',token=os.environ.get('MEDIA_CONTROL_PICKER_PID')))
-                print(json.dumps(result,ensure_ascii=False));return
-            is_profile=sys.argv[1]=='--apply-output-profile'
-            endpoint='/api/output-profile-stage' if is_profile else '/api/output-route-stage'
-            payload={'card':sys.argv[2],'profile':sys.argv[3],'mode':audio_mode(),'origin':'cli','token':os.environ.get('MEDIA_CONTROL_PICKER_PID')}
-            if not is_profile:payload['route']=sys.argv[4]
-            data=local_api_post(endpoint,payload,90,'Output stage failed')
-            print(json.dumps(data,ensure_ascii=False));return
+            if STOPPED.exists():raise RuntimeError('Audio is stopped; start audio before selecting an output')
+            result=(apply_output_profile_stage(sys.argv[2],sys.argv[3],mode=audio_mode(),origin='cli',token=os.environ.get('MEDIA_CONTROL_PICKER_PID'))
+                    if sys.argv[1]=='--apply-output-profile' else
+                    apply_output_route_stage(sys.argv[2],sys.argv[3],sys.argv[4],mode=audio_mode(),origin='cli',token=os.environ.get('MEDIA_CONTROL_PICKER_PID')))
+            print(json.dumps(result,ensure_ascii=False));return
         if len(sys.argv)==2 and sys.argv[1]=='--begin-output-preview':
             print(json.dumps(begin_output_preview('cli',int(os.environ['MEDIA_CONTROL_PICKER_PID']),int(os.environ['MEDIA_CONTROL_PICKER_START'])),ensure_ascii=False));return
         if len(sys.argv)==2 and sys.argv[1]=='--cancel-output-preview':

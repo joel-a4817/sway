@@ -3,7 +3,7 @@ set -u
 
 HOME_DIR="${HOME:?HOME is required}"
 STATE_DIR="$HOME_DIR/.local/state/sway/media-control"
-REMOTE_STATE="$HOME_DIR/.local/state/sway/camilladsp-webremote"
+REMOTE_STATE="$HOME_DIR/.local/state/sway/audio-runtime"
 LEGACY_STATE="$HOME_DIR/.local/state/sway/audio"
 
 # Prevent overlapping selectors from changing the graph concurrently.
@@ -17,15 +17,15 @@ if [[ ! -e "$STATE_DIR/state-migrated" && -d "$LEGACY_STATE" ]]; then
         case "${old##*/}" in audio-stopped|audio-stop-complete|audio-stop-capable.pid) target="$REMOTE_STATE/${old##*/}" ;; *) target="$STATE_DIR/${old##*/}" ;; esac
         [[ -e "$target" ]] || mv -- "$old" "$target" 2>/dev/null || true
     done
-    if [[ -d "$LEGACY_STATE/camilladsp-webremote" ]]; then
-        for old in "$LEGACY_STATE/camilladsp-webremote"/*; do
+    if [[ -d "$LEGACY_STATE/audio-runtime" ]]; then
+        for old in "$LEGACY_STATE/audio-runtime"/*; do
             [[ -f "$old" && ! -L "$old" ]] || continue
             target="$REMOTE_STATE/${old##*/}"
             [[ -e "$target" ]] || mv -- "$old" "$target" 2>/dev/null || true
         done
     fi
     touch "$STATE_DIR/state-migrated"
-    rmdir "$LEGACY_STATE/camilladsp-webremote" "$LEGACY_STATE" 2>/dev/null || true
+    rmdir "$LEGACY_STATE/audio-runtime" "$LEGACY_STATE" 2>/dev/null || true
 fi
 # Serialize new launches separately from the lock shared with webremote startup.
 LAUNCH_LOCK="$STATE_DIR/media-control-launch.lock"
@@ -42,7 +42,7 @@ process_start() {
 }
 exec 9>"$LOCK_FILE"
 if ! flock -w 10 9; then
-    echo 'Previous media-control or webremote startup still holds the audio lock.' >&2
+    echo 'Previous Media Control action still holds the audio lock.' >&2
     exit 1
 fi
 printf '%s %s\n' "$$" "$(process_start "$$")" >"$OWNER_FILE"

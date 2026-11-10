@@ -1,158 +1,21 @@
 #!/usr/bin/env bash
-
 set -euo pipefail
-
-STATE_DIR="/home/joel/.local/state/sway"
-
-RESULT_FILE="$STATE_DIR/network-toggle-complete.$$"
-ACTION_LOG="$STATE_DIR/network-toggle-action.$$"
-
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/sway/network"
+RESULT_FILE="$STATE_DIR/result.$$"
+ACTION_LOG="$STATE_DIR/action.$$"
+HOTSPOT='AirPlay Direct'
 mkdir -p "$STATE_DIR"
 rm -f "$RESULT_FILE" "$ACTION_LOG"
-touch "$ACTION_LOG"
+finish(){ touch "$RESULT_FILE"; }
+export STATE_DIR RESULT_FILE ACTION_LOG HOTSPOT
 
-export RESULT_FILE ACTION_LOG
-
-swaynag \
-    -t warning \
-    -y overlay \
-    -m "Network Selector" \
-    -z "All Network Off" \
-'
-for iface in $(nmcli -t -f DEVICE device | sed "/^$/d"); do
-    nmcli dev disconnect "$iface" >>"$ACTION_LOG" 2>&1 || true
-done
-
-touch "$RESULT_FILE"
-' \
-    -z "Ethernet" \
-'
-builtin_wifi=""
-usb_wifi=()
-ethernet=()
-
-for iface in /sys/class/net/*; do
-    iface=$(basename "$iface")
-    type=$(nmcli -t -f DEVICE,TYPE device | awk -F: -v d="$iface" '"'"'$1==d{print $2}'"'"')
-
-    case "$type" in
-        wifi)
-            path=$(readlink -f "/sys/class/net/$iface")
-
-            if [[ "$path" == *"/usb"* ]]; then
-                usb_wifi+=("$iface")
-            else
-                builtin_wifi="$iface"
-            fi
-            ;;
-        ethernet)
-            ethernet+=("$iface")
-            ;;
-    esac
-done
-
-[[ -n "$builtin_wifi" ]] && \
-    nmcli dev disconnect "$builtin_wifi" >>"$ACTION_LOG" 2>&1 || true
-
-for i in "${usb_wifi[@]}"; do
-    nmcli dev disconnect "$i" >>"$ACTION_LOG" 2>&1 || true
-done
-
-for i in "${ethernet[@]}"; do
-    nmcli dev connect "$i" >>"$ACTION_LOG" 2>&1
-done
-
-touch "$RESULT_FILE"
-' \
-    -z "USB Wi‑Fi" \
-'
-builtin_wifi=""
-usb_wifi=()
-ethernet=()
-
-for iface in /sys/class/net/*; do
-    iface=$(basename "$iface")
-    type=$(nmcli -t -f DEVICE,TYPE device | awk -F: -v d="$iface" '"'"'$1==d{print $2}'"'"')
-
-    case "$type" in
-        wifi)
-            path=$(readlink -f "/sys/class/net/$iface")
-
-            if [[ "$path" == *"/usb"* ]]; then
-                usb_wifi+=("$iface")
-            else
-                builtin_wifi="$iface"
-            fi
-            ;;
-        ethernet)
-            ethernet+=("$iface")
-            ;;
-    esac
-done
-
-[[ -n "$builtin_wifi" ]] && \
-    nmcli dev disconnect "$builtin_wifi" >>"$ACTION_LOG" 2>&1 || true
-
-for i in "${usb_wifi[@]}"; do
-    nmcli dev connect "$i" >>"$ACTION_LOG" 2>&1
-done
-
-for i in "${ethernet[@]}"; do
-    nmcli dev disconnect "$i" >>"$ACTION_LOG" 2>&1 || true
-done
-
-touch "$RESULT_FILE"
-' \
-    -z "Built-in Wi‑Fi" \
-'
-builtin_wifi=""
-usb_wifi=()
-ethernet=()
-
-for iface in /sys/class/net/*; do
-    iface=$(basename "$iface")
-    type=$(nmcli -t -f DEVICE,TYPE device | awk -F: -v d="$iface" '"'"'$1==d{print $2}'"'"')
-
-    case "$type" in
-        wifi)
-            path=$(readlink -f "/sys/class/net/$iface")
-
-            if [[ "$path" == *"/usb"* ]]; then
-                usb_wifi+=("$iface")
-            else
-                builtin_wifi="$iface"
-            fi
-            ;;
-        ethernet)
-            ethernet+=("$iface")
-            ;;
-    esac
-done
-
-[[ -n "$builtin_wifi" ]] && \
-    nmcli dev connect "$builtin_wifi" >>"$ACTION_LOG" 2>&1
-
-for i in "${usb_wifi[@]}"; do
-    nmcli dev disconnect "$i" >>"$ACTION_LOG" 2>&1 || true
-done
-
-for i in "${ethernet[@]}"; do
-    nmcli dev disconnect "$i" >>"$ACTION_LOG" 2>&1 || true
-done
-
-touch "$RESULT_FILE"
-' &
-
-while [[ ! -f "$RESULT_FILE" ]]; do
-    sleep 0.1
-done
-
-
-if [[ -s "$ACTION_LOG" ]]; then
-    cat "$ACTION_LOG"
-fi
-
+swaynag -t warning -y overlay -m 'Network' \
+  -z 'Offline' 'for i in $(nmcli -t -f DEVICE device | sed "/^$/d"); do nmcli dev disconnect "$i" >>"$ACTION_LOG" 2>&1 || true; done; nmcli connection down "$HOTSPOT" >>"$ACTION_LOG" 2>&1 || true; touch "$RESULT_FILE"' \
+  -z 'Ethernet' 'for row in $(nmcli -t -f DEVICE,TYPE device); do i=${row%%:*}; t=${row#*:}; [[ $t == ethernet ]] && nmcli dev connect "$i" >>"$ACTION_LOG" 2>&1 || [[ $t != ethernet ]] && nmcli dev disconnect "$i" >>"$ACTION_LOG" 2>&1 || true; done; nmcli connection down "$HOTSPOT" >>"$ACTION_LOG" 2>&1 || true; touch "$RESULT_FILE"' \
+  -z 'USB Wi-Fi' 'for i in /sys/class/net/*; do n=${i##*/}; t=$(nmcli -t -f DEVICE,TYPE device | awk -F: -v d="$n" '\''$1==d{print $2}'\''); p=$(readlink -f "$i"); if [[ $t == wifi && $p == *"/usb"* ]]; then nmcli dev connect "$n" >>"$ACTION_LOG" 2>&1; else nmcli dev disconnect "$n" >>"$ACTION_LOG" 2>&1 || true; fi; done; nmcli connection down "$HOTSPOT" >>"$ACTION_LOG" 2>&1 || true; touch "$RESULT_FILE"' \
+  -z 'Wi-Fi' 'for i in /sys/class/net/*; do n=${i##*/}; t=$(nmcli -t -f DEVICE,TYPE device | awk -F: -v d="$n" '\''$1==d{print $2}'\''); p=$(readlink -f "$i"); if [[ $t == wifi && $p != *"/usb"* ]]; then nmcli dev connect "$n" >>"$ACTION_LOG" 2>&1; else nmcli dev disconnect "$n" >>"$ACTION_LOG" 2>&1 || true; fi; done; nmcli connection down "$HOTSPOT" >>"$ACTION_LOG" 2>&1 || true; touch "$RESULT_FILE"' \
+  -z 'AirPlay' 'nmcli -g connection.id connection show "$HOTSPOT" >/dev/null; if nmcli -t -f NAME connection show --active | grep -Fqx -- "$HOTSPOT"; then nmcli connection down "$HOTSPOT" >>"$ACTION_LOG" 2>&1; else nmcli connection up "$HOTSPOT" >>"$ACTION_LOG" 2>&1; fi; touch "$RESULT_FILE"' &
+while [[ ! -e "$RESULT_FILE" ]]; do sleep .1; done
+[[ ! -s "$ACTION_LOG" ]] || cat "$ACTION_LOG"
 rm -f "$RESULT_FILE" "$ACTION_LOG"
-
-echo
-read -n 1 -rsp "Press any key to close..."
+printf '\n'; read -n1 -rs -p 'Press any key to close...'

@@ -64,6 +64,8 @@ ANALYSIS_LOW_HZ=20.0
 ANALYSIS_HIGH_HZ=20000.0
 JAMESDSP_WAV_CHANNEL_ORDER = ('LL', 'RL', 'LR', 'RR')
 CAMILLA_LIMITED_PLAYBACK_DEVICE='camilladsp_peak_limited'
+CAMILLA_UNLIMITED_PLAYBACK_DEVICE='camilladsp_output_shared'
+CAMILLA_CHUNKSIZES=(64,128,256,512,1024,2048,4096,8192)
 CAMILLA_PLAYBACK_FORMAT='F32_LE'
 CAMILLA_ROOT=AUDIO_FILTERS
 
@@ -222,8 +224,8 @@ def _jamesdsp_export_kind(relative_yaml):
     relative_yaml=Path(relative_yaml)
     if len(relative_yaml.parts)==1:
         return None  # filterless has no FIR transfer to export
-    if "custom" in relative_yaml.parts or relative_yaml.stem in JAMESDSP_EXPORT_STEMS:
-        return "true-stereo"
+    if "custom" in relative_yaml.parts:return "true-stereo"
+    if len(relative_yaml.parts)==2 and relative_yaml.stem in JAMESDSP_EXPORT_STEMS:return "true-stereo"
     return None
 
 def true_stereo_audible_peak(matrix,low=ANALYSIS_LOW_HZ,high=ANALYSIS_HIGH_HZ):
@@ -457,7 +459,7 @@ def commit_combined_wavs(exports):
             raise
     return root
 
-def devices_text(playback_device):
+def devices_text(playback_device,chunksize=1024):
     return f'''devices:
   samplerate: {SAMPLE_RATE}
   chunksize: 1024
@@ -620,6 +622,22 @@ def measurement_devices():
         result.append({'file':wav_name,'label':name,'type':'in-ear'});configured.add(key(source))
     return result
 
+def runtime_profile_variants(path,text):
+    yield path,text
+    path=Path(path)
+    if path.name=='00-filterless.yml' or 'custom' in path.parts:return
+    relative=path.relative_to(CAMILLA_ROOT)
+    for chunksize in CAMILLA_CHUNKSIZES:
+        for limiter in (True,False):
+            playback=CAMILLA_LIMITED_PLAYBACK_DEVICE if limiter else CAMILLA_UNLIMITED_PLAYBACK_DEVICE
+            variant=CAMILLA_ROOT/relative.parts[0]/f'{chunksize}-frames'/('limiter-on' if limiter else 'limiter-off')/Path(*relative.parts[1:])
+            body=re.sub(r'(?m)^  chunksize: \d+$',f'  chunksize: {chunksize}',text)
+            body=re.sub(r'(?m)^    device: "(?:camilladsp_peak_limited|camilladsp_output_shared)"$',f'    device: "{playback}"',body)
+            yield variant,body
+
+def expand_runtime_profiles(candidates):
+    return [variant for path,text in candidates for variant in runtime_profile_variants(path,text)]
+
 def build_profile_candidates(all_measurements=False,spatial_wav=None):
     generated=[(CAMILLA_ROOT/'00-filterless.yml',filterless_text())]
     configured=list(measurement_devices() if all_measurements else HPCFS)
@@ -680,7 +698,7 @@ def build_profile_candidates(all_measurements=False,spatial_wav=None):
         if custom.is_dir():
             for path in sorted(custom.glob('*.y*ml')):
                 if path.is_file():rebuilt_custom.append((path,rebuild_custom_profile(path,path.read_text(encoding='utf-8'),standard_profiles)))
-    return [*generated,*rebuilt_custom],devices
+    return expand_runtime_profiles([*generated,*rebuilt_custom]),devices
 
 def rebuild_custom_profile(path,text,standard_profiles):
     """Rebase one generated custom HRIR profile onto its newly built baseline."""

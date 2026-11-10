@@ -179,11 +179,10 @@ def ensure():
     SWITCH_STATE.mkdir(parents=True,exist_ok=True)
     MUSIC.mkdir(parents=True,exist_ok=True)
     legacy=HOME/'.local/state/sway/audio'
-    old_server=legacy/'camilladsp-webremote'
     # One-time migration. Never resurrect a deliberately cleared stop marker.
     marker=STATE/'state-migrated'
     if marker.exists():return
-    for source,destination in ((old_server,STATE),(legacy,SWITCH_STATE)):
+    for source,destination in ((legacy/'audio-runtime',STATE),(legacy,SWITCH_STATE)):
         if not source.is_dir():continue
         for item in source.iterdir():
             if not item.is_file() or item.is_symlink():continue

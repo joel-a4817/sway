@@ -433,8 +433,17 @@ def start_local_monitor(route=None,resolved=False,persist=True):
         selected=choose_output_route(dict(saved,_remembered=True,_unavailable_sink=sink))
         sink=selected['sink'];pw_sink(sink)
     stop_local_monitor()
-    command='set -o pipefail; "$1" -q -D camilladsp_output_shared -r 96000 -f S32_LE -c 2 -t raw | "$2" --playback --device="$3" --rate=96000 --format=s32le --channels=2'
-    args=[exe('bash'),'-c',command,'monitor',exe('arecord'),exe('pacat'),sink]
+    matrix=both_output_matrix() if audio_mode() in ('ipad_both','laptop_both') else None
+    if matrix:
+        channel=matrix['left']!='pc'  # False=left, True=right
+        ffmpeg=shutil.which('ffmpeg')
+        if not ffmpeg:raise RuntimeError('ffmpeg is required for split-channel both-output routing')
+        pan='pan=stereo|c0=c1|c1=c1' if channel else 'pan=stereo|c0=c0|c1=c0'
+        command='set -o pipefail; "$1" -q -D camilladsp_output_shared -r 96000 -f S32_LE -c 2 -t raw | "$2" -hide_banner -loglevel error -f s32le -ar 96000 -ac 2 -i pipe:0 -af "$5" -f s32le -ar 96000 -ac 2 pipe:1 | "$3" --playback --device="$4" --rate=96000 --format=s32le --channels=2'
+        args=[exe('bash'),'-c',command,'monitor',exe('arecord'),ffmpeg,exe('pacat'),sink,pan]
+    else:
+        command='set -o pipefail; "$1" -q -D camilladsp_output_shared -r 96000 -f S32_LE -c 2 -t raw | "$2" --playback --device="$3" --rate=96000 --format=s32le --channels=2'
+        args=[exe('bash'),'-c',command,'monitor',exe('arecord'),exe('pacat'),sink]
     with (STATE/'local-monitor.log').open('ab',buffering=0) as log:
         process=subprocess.Popen(args,stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True,env=media_env())
     LOCALMONPID.write_text(str(process.pid)+'\n')

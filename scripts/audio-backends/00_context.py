@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse, unquote
 import base64, fcntl, hashlib, json, math, os, random, re, select, shutil, signal, socket, struct, subprocess, threading, time, uuid
@@ -12,10 +11,10 @@ HOME=Path.home(); PROFILES=HOME/'Documents/prefs/audio/filters'; MUSIC=HOME/'Dow
 SCRIPTS=HOME/'.config/sway/scripts'; UPDATERS=SCRIPTS/'updaters'
 ADD_AUDIO_DEVICE=UPDATERS/'add-audio-device.py'
 DEVICE_LOCK=SCRIPTS/'device-lock.py'
-STATE=HOME/'.local/state/sway/camilladsp-webremote'; SWITCH_STATE=HOME/'.local/state/sway/media-control'; PORT=8766
+STATE=HOME/'.local/state/sway/audio-runtime'; SWITCH_STATE=HOME/'.local/state/sway/media-control'
 CAMILLA=Path('/run/current-system/sw/bin/camilladsp'); SONOBUS=Path('/run/current-system/sw/bin/sonobus')
 SONOSET=HOME/'.config/sonobus/SonoBus.settings'; EXTS={'.m4a','.aac','.mp3','.flac','.wav','.ogg','.opus'}
-CAMPID=STATE/'camilladsp.pid'; ACTIVE=STATE/'active-profile'; SERVERPID=STATE/'web-server.pid'
+CAMPID=STATE/'camilladsp.pid'; ACTIVE=STATE/'active-profile'
 NO_FILTER='__no_filter__'; BYPASSPID=STATE/'no-filter-bridge.pid'
 MPVPID=STATE/'mpv.pid'; MPVSOCK=STATE/'mpv.sock'; MPVLOG=STATE/'mpv.log'; MODE=STATE/'mode'
 MASTER_VOLUME=SWITCH_STATE/'master-volume'; MPV_GAIN=SWITCH_STATE/'mpv-gain'; SAFE_VOLUME_INDEX=PROFILES/'safe-volume.json'; CAM_WS_PORT=8767

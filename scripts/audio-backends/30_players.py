@@ -554,7 +554,7 @@ def song(v):
     return p
 
 
-GROUPS=STATE/'sonobus-groups.json'; LOCALMONPID=STATE/'local-monitor.pid'; LOCALSINK=STATE/'local-output-route.json'
+GROUPS=STATE/'sonobus-groups.json'; LOCALMONPID=STATE/'local-monitor.pid'; LOCALSINK=STATE/'local-output-route.json'; OUTPUT_MATRIX=STATE/'both-output-matrix'
 MODES={
 'ipad_external':('iPad → external','airplay',False,True),
 'laptop_external':('Laptop → external','system',False,True),
@@ -607,6 +607,38 @@ MODE_POLICIES={
     'description':'Laptop audio through CamillaDSP to iPad and the highest-priority physical laptop output',
 },
 }
+
+
+def both_output_matrix():
+    default={'left':'external','right':'pc'}
+    try:data=json.loads(OUTPUT_MATRIX.read_text())
+    except (OSError,ValueError,TypeError):return default
+    if not isinstance(data,dict):return default
+    left=data.get('left');right=data.get('right')
+    if {left,right}!={'external','pc'}:return default
+    return {'left':left,'right':right}
+
+def set_both_output_matrix(left,right):
+    if {left,right}!={'external','pc'}:
+        raise ValueError('One channel must use external output and the other PC output')
+    value={'left':left,'right':right}
+    _write_json(OUTPUT_MATRIX,value)
+    return value
+
+def effective_mode_policy(name):
+    policy=dict(MODE_POLICIES[name])
+    if name not in ('ipad_both','laptop_both'):
+        policy['sendChannels']=2
+        policy['inputChannelsMask']='11'
+        return policy
+    matrix=both_output_matrix()
+    external_channel='left' if matrix['left']=='external' else 'right'
+    policy['sendChannels']=1
+    policy['inputChannelsMask']='1' if external_channel=='left' else '10'
+    policy['externalChannel']=external_channel
+    policy['pcChannel']='right' if external_channel=='left' else 'left'
+    policy['description']=policy['description']+'; '+external_channel+' channel to SonoBus, '+policy['pcChannel']+' channel to PC output'
+    return policy
 
 def _read_json(path,default):
     try:return json.loads(path.read_text())

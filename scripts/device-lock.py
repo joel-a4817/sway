@@ -3,7 +3,7 @@ from pathlib import Path
 import fcntl, json, os, select, signal, subprocess, sys, time
 
 HOME=Path.home()
-STATE=HOME/'.local/state/sway/camilladsp-webremote'
+STATE=HOME/'.local/state/sway/audio-runtime'
 DISPLAY_FILE=STATE/'display-output.json'
 AWAY_FILE=STATE/'away-state.json'
 COMBINED_FILE=STATE/'away-display.lock'

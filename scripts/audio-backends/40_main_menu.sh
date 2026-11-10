@@ -1,4 +1,4 @@
-AUDIO_STOPPED_FILE="$HOME_DIR/.local/state/sway/camilladsp-webremote/audio-stopped"
+AUDIO_STOPPED_FILE="$HOME_DIR/.local/state/sway/audio-runtime/audio-stopped"
 if [[ -e "$AUDIO_STOPPED_FILE" ]]; then
     AUDIO_TOGGLE_LABEL='Start audio'
 else
@@ -14,6 +14,13 @@ fi
 ARGS=(-t warning -y overlay -m 'Media control')
 ARGS+=( -z "$AUDIO_TOGGLE_LABEL" "printf '%s\n' audio-toggle > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
 ARGS+=( -z "$VNC_TOGGLE_LABEL" "printf '%s\n' vnc-toggle > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
+WEBREMOTE_SCRIPT="$HOME/.config/sway/scripts/audio-backends/start-ipad-webremote.sh"
+if "$WEBREMOTE_SCRIPT" --status >/dev/null 2>&1; then
+    WEBREMOTE_TOGGLE_LABEL='Stop iPad Web Remote'
+else
+    WEBREMOTE_TOGGLE_LABEL='Start iPad Web Remote'
+fi
+ARGS+=( -z "$WEBREMOTE_TOGGLE_LABEL" "printf '%s\n' web-remote > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
 SAFE_JSON="$(python3 "$TOPOLOGY_SCRIPT" --safe-volume-status 2>>"$ACTION_LOG" || true)"
 if [[ "$(jq -r '.available // false' <<<"$SAFE_JSON" 2>/dev/null)" == true ]]; then
   SAFE_PERCENT="$(jq -r '.percent' <<<"$SAFE_JSON")"
@@ -39,9 +46,40 @@ kill "$SWAYNAG_PID" 2>/dev/null || true
 wait "$SWAYNAG_PID" 2>/dev/null || true
 selected="$(cat "$CARD_SELECTION_FILE")"
 case "$selected" in
+   web-remote)
+    flock -u 9
+    "$WEBREMOTE_SCRIPT" toggle
+    exit $?
+    ;;
  safe-volume) flock -u 9; python3 "$TOPOLOGY_SCRIPT" --safe-volume-apply || exit $?; wrap_line "Safe max applied: ${SAFE_PERCENT}%"; exit 0 ;;
  safe-volume-na) wrap_line 'Safe max unavailable.'; exit 0 ;;
  select-output)
+    choose_index 'Audio output' \
+      'Keep current configuration' \
+      'Play external audio on external output' \
+      'Play external audio on PC output' \
+      'Play external audio on both outputs' \
+      'Play PC audio on external output' \
+      'Play PC audio on PC output' \
+      'Play PC audio on both outputs' || exit 0
+    modes=('' ipad_ipad ipad_laptop ipad_both laptop_ipad laptop_laptop laptop_both)
+    selected_mode="${modes[number]}"
+    case "$selected_mode" in
+      ipad_ipad|laptop_ipad)
+        python3 "$TOPOLOGY_SCRIPT" --set-mode "$selected_mode" >>"$ACTION_LOG" 2>&1 || exit 1
+        exit 0 ;;
+      ipad_both|laptop_both)
+        choose_index 'Channel destination' \
+          'Left channel -> external output; Right channel -> PC output' \
+          'Left channel -> PC output; Right channel -> external output' || exit 0
+        if ((number==0)); then
+          matrix_left=external; matrix_right=pc
+        else
+          matrix_left=pc; matrix_right=external
+        fi
+        python3 "$TOPOLOGY_SCRIPT" --set-both-matrix "$matrix_left" "$matrix_right" >>"$ACTION_LOG" 2>&1 || exit 1
+        ;;
+    esac
     # Topology discovery is read-only. Do not create a preview or change modes
     # until the user chooses an actual playback device.
     TOPOLOGY_JSON="$(output_topology)" || { wrap_line 'Output topology unavailable.' >&2; exit 1; }
@@ -262,7 +300,11 @@ done
 request="$(jq -nc --arg card "$card" --arg profile "$profile" --arg port "$route" --arg sink "$sink" '{card:$card,profile:$profile,port:$port,sink:$sink}')"
 # The paired controller serializes pause -> output -> normalize; playback stays paused.
 flock -u 9
-run_quiet_action python3 "$TOPOLOGY_SCRIPT" --switch-output "$request" || exit $?
+if [[ -n "${selected_mode:-}" ]]; then
+    run_quiet_action python3 "$TOPOLOGY_SCRIPT" --set-mode "$selected_mode" "$request" || exit $?
+else
+    run_quiet_action python3 "$TOPOLOGY_SCRIPT" --switch-output "$request" || exit $?
+fi
 OUTPUT_PREVIEW_ACTIVE=0
 result_line="Playback output applied: $card_label"
 [[ -n "${last_sink_label:-}" && "$sink" == "${last_sink:-}" ]] && result_line+=" / $last_sink_label"

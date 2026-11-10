@@ -119,19 +119,15 @@ bindsym --no-repeat $mod+shift+v fullscreen disable; exec $term -T "$popup-updat
 bindsym --no-repeat $mod+shift+t fullscreen disable; exec $term -T "$popup-settime" -e bash -c '~/.config/sway/scripts/settime.sh; echo; read -n 1 -rsp "Press any key to close..."'
 bindsym --no-repeat $mod+shift+y fullscreen disable; exec $term -T "$popup-update-playlists" -e bash -c '~/.config/sway/scripts/updaters/update-playlists.sh'
 bindsym --no-repeat $mod+shift+r fullscreen disable; exec bash -c '~/.config/sway/scripts/play-music.sh/py'
-bindsym --no-repeat $mod+shift+a fullscreen disable; exec $term -T "$popup-server-ipad" -e bash -c 'trap "" INT; (trap - INT; /home/joel/.config/sway/scripts/network/start-ipad-webremote.sh); echo; read -n 1 -rsp "Press any key to close..."'
-bindsym --no-repeat $mod+shift+b fullscreen disable; exec $term -T "$popup-server-linux" -e bash -c 'trap "" INT; (trap - INT; python3 /home/joel/.config/sway/scripts/network/camilladsp-server-sonobus.py); read -n 1 -rsp "Press any key to close..."'
-bindsym --locked --no-repeat $mod+shift+d fullscreen disable; exec python3 "/home/joel/.config/sway/scripts/network/camilladsp-server-sonobus.py" --toggle-away-display
-bindsym --no-repeat $mod+shift+e fullscreen disable; exec $term -T "$popup-update-a_profiles" -e bash -c '/home/joel/.config/sway/scripts/network/airplay-hotspot-toggle.sh; echo; read -n 1 -rsp "Press any key to close..."'
-bindsym --no-repeat $mod+shift+f fullscreen disable; exec $term -T "$popup-update-add_audio_device" -e bash -c 'python3 ~/.config/sway/scripts/updaters/add-audio-device.py'
-bindsym --locked --no-repeat $mod+Shift+g fullscreen disable; exec bash -c "python3 /home/joel/.config/sway/scripts/device-lock.py"
+bindsym --no-repeat $mod+shift+a fullscreen disable; exec $term -T "$popup-update-add_audio_device" -e bash -c 'python3 ~/.config/sway/scripts/updaters/add-audio-device.py'
+bindsym --locked --no-repeat $mod+Shift+d fullscreen disable; exec bash -c "python3 /home/joel/.config/sway/scripts/device-lock.py"
 bindsym --no-repeat $mod+shift+i fullscreen disable; exec systemctl suspend
 
 #keybinds app
 bindsym --no-repeat $mod+F2 fullscreen disable; exec $term -T "$popup-tuis" -e clipse
 bindsym --no-repeat $mod+F1 fullscreen disable; exec $term -T "$popup-tuis" -e yazi
 
-bindsym --no-repeat $mod+Mod1+g fullscreen disable; exec /home/joel/.config/sway/scripts/audio-backends/ytmusic-extension/glide-with-ytmusic-temp-extension
+bindsym --no-repeat $mod+Mod1+g fullscreen disable; exec glide
 bindsym --no-repeat $mod+Mod1+z fullscreen disable; exec solaar
 bindsym --no-repeat $mod+Mod1+x fullscreen disable; exec kamoso
 bindsym --no-repeat $mod+Mod1+w fullscreen disable; exec karere
@@ -165,7 +161,7 @@ bindsym --no-repeat $mod+control+a fullscreen disable; exec $term -T "$popup-f-a
 bindsym --no-repeat $mod+F5 exec bash -c '~/.config/sway/scripts/screen-capture.sh'
 
 #audio device output switch
-bindsym --no-repeat $mod+F7 fullscreen disable; exec $term -T "$popup-media-control" -e bash -c "~/.config/sway/scripts/media-control.sh"
+bindsym --no-repeat $mod+F7 fullscreen disable; exec $term -T "$popup-media-control" -e bash -c "/home/joel/.config/sway/scripts/audio-backends/media-control.sh"
 
 #mount dev
 bindsym --no-repeat $mod+F8 fullscreen disable; exec $term -T "$popup-mount" -e bash -c '/home/joel/.config/sway/scripts/mount/mount-swaynag.sh'
