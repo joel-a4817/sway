@@ -143,16 +143,41 @@ def backup(name,runtime):
     folder=BACKUPS/name;folder.mkdir(parents=True,exist_ok=True); path=folder/dt.datetime.now().strftime(f"{name}-%Y%m%d-%H%M%S.tar.gz")
     with tarfile.open(path,"w:gz") as t:t.add(runtime,arcname=name)
     for old in sorted(folder.glob(f"{name}-*.tar.gz"),key=lambda p:p.stat().st_mtime,reverse=True)[10:]:old.unlink()
+def unit_workdir(name):
+    result=run(["systemctl","show",unit(name),"-p","WorkingDirectory","--value"],check=False,capture=True)
+    value=result.stdout.strip()
+    return Path(value) if value.startswith("/") else RUNTIME_ROOT/name
+
 def port_for(name):
-    prop=RUNTIME_ROOT/name/"server.properties"
-    if prop.exists():
+    # nix-minecraft writes server.properties in the unit WorkingDirectory.
+    # Query systemd instead of assuming the runtime layout, then fall back to
+    # the configured ports used by this installation while the first start is
+    # still creating the file.
+    candidates=[unit_workdir(name)/"server.properties",RUNTIME_ROOT/name/"server.properties"]
+    for prop in candidates:
+        if not prop.exists():continue
         for line in prop.read_text(errors="replace").splitlines():
             if line.startswith("server-port="):
-                try:return int(line.split("=",1)[1])
+                try:return int(line.split("=",1)[1].strip())
                 except ValueError:pass
-    return 25565
+    known={"modded-server":25565,"latest-server":25566}
+    if name in known:return known[name]
+    raise RuntimeError(f"Cannot determine TCP port for {name}; server.properties has not been generated")
+
 def port_busy(port):
-    with socket.socket() as s:s.settimeout(.3);return s.connect_ex(("127.0.0.1",port))==0
+    with socket.socket() as s:
+        s.settimeout(.3)
+        return s.connect_ex(("127.0.0.1",port))==0
+
+def unit_failure(name):
+    state=run(["systemctl","show",unit(name),"-p","ActiveState","-p","SubState","-p","Result","--value"],check=False,capture=True).stdout.splitlines()
+    active_state=state[0].strip() if len(state)>0 else "unknown"
+    sub_state=state[1].strip() if len(state)>1 else "unknown"
+    result=state[2].strip() if len(state)>2 else "unknown"
+    if active_state=="failed" or result not in ("","success"):
+        log=run(["journalctl","-u",unit(name),"-n","120","--no-pager"],check=False,capture=True).stdout.strip()
+        return f"{unit(name)} failed ({active_state}/{sub_state}, result={result})\n{log}".strip()
+    return None
 
 def start(name=None,force=False):
     global CRITICAL
@@ -173,10 +198,21 @@ def start(name=None,force=False):
         if result.returncode:
             log=run(["journalctl","-u",unit(name),"-n","80","--no-pager"],check=False,capture=True).stdout.strip()
             raise RuntimeError((result.stdout.strip()+"\n"+log).strip())
-        for _ in range(180):
-            if active(name) and port_busy(port_for(name)):CRITICAL=False;print(f"Minecraft server '{name}' started on port {port_for(name)}");return
+        port=port_for(name)
+        print(f"Waiting for '{name}' to listen on TCP {port}...")
+        for elapsed in range(180):
+            failure=unit_failure(name)
+            if failure:raise RuntimeError(failure)
+            if active(name) and port_busy(port):
+                CRITICAL=False
+                print(f"Minecraft server '{name}' started on port {port}")
+                return
+            if elapsed and elapsed%15==0:
+                print(f"Still starting '{name}' ({elapsed}s); follow with: journalctl -u {unit(name)} -f")
             time.sleep(1)
-        run(["sudo","systemctl","stop",unit(name)],check=False);raise RuntimeError(f"{name} did not become ready")
+        log=run(["journalctl","-u",unit(name),"-n","120","--no-pager"],check=False,capture=True).stdout.strip()
+        run(["sudo","systemctl","stop",unit(name)],check=False)
+        raise RuntimeError(f"{name} did not listen on TCP {port} within 180 seconds\n{log}".strip())
     except Exception:
         try:owner.unlink()
         except FileNotFoundError:pass
