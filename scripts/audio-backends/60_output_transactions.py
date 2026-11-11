@@ -440,6 +440,44 @@ def output_state():
     topology['remembered']=choices if isinstance(choices,dict) else {}
     topology['rememberedProfiles']=_read_json(CARD_CHOICES,{})
     return topology
+
+def stop_external_delay():
+    pid=rpid(EXTERNALDELAYPID)
+    if alive(pid):
+        try:os.killpg(pid,signal.SIGTERM)
+        except OSError:
+            try:os.kill(pid,signal.SIGTERM)
+            except OSError:pass
+        deadline=time.monotonic()+1.0
+        while alive(pid) and time.monotonic()<deadline:time.sleep(.02)
+        if alive(pid):
+            try:os.killpg(pid,signal.SIGKILL)
+            except OSError:pass
+    EXTERNALDELAYPID.unlink(missing_ok=True)
+
+def start_external_delay():
+    stop_external_delay()
+    offset=both_output_local_delay_ms()
+    if offset>=0:return
+    matrix=both_output_matrix()
+    external_left=matrix['left']=='external'
+    samples=int(round(abs(offset)*96.0))
+    # Preserve the selected external channel position because SonoBus uses the
+    # corresponding one-channel input mask.  Only the external branch is
+    # buffered; the PC branch remains at minimum latency.
+    pan=('pan=stereo|c0=c0|c1=0*c0' if external_left else 'pan=stereo|c0=0*c1|c1=c1')
+    pan+=f',adelay={samples}S|{samples}S'
+    ffmpeg=shutil.which('ffmpeg')
+    if not ffmpeg:raise RuntimeError('ffmpeg is required for signed both-output synchronization')
+    command='set -o pipefail; "$1" -q -D camilladsp_output_shared -r 96000 -f S32_LE -c 2 -t raw | "$2" -hide_banner -loglevel error -f s32le -ar 96000 -ac 2 -i pipe:0 -af "$4" -f s32le -ar 96000 -ac 2 pipe:1 | "$3" -q -D hw:Loopback,0,2 -r 96000 -f S32_LE -c 2 -t raw'
+    args=[exe('bash'),'-c',command,'external-delay',exe('arecord'),ffmpeg,exe('aplay'),pan]
+    with (STATE/'external-delay.log').open('ab',buffering=0) as log:
+        process=subprocess.Popen(args,stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True,env=media_env())
+    time.sleep(.15)
+    if process.poll() is not None:
+        raise RuntimeError('External-delay feeder exited: '+log_tail(STATE/'external-delay.log')[-1500:])
+    EXTERNALDELAYPID.write_text(str(process.pid)+'\n')
+
 def start_local_monitor(route=None,resolved=False,persist=True):
     selected=route if resolved else choose_output_route(route)
     sink=selected['sink']

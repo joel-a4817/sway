@@ -38,15 +38,15 @@ case "$selected" in
  safe-volume-na) wrap_line 'Safe max unavailable.'; exit 0 ;;
  both-delay)
     echo
-    wrap_line 'Both-output PC delay'
+    wrap_line 'Both-output sync offset'
     echo
     printf '[B] Back\n'
-    wrap_line "Current PC-output delay: ${BOTH_DELAY_MS} ms"
+    wrap_line "Current sync offset: ${BOTH_DELAY_MS} ms"
     while :; do
-        read -r -p 'Delay in ms (0-500, B=Back): ' delay_value || exit 0
+        read -r -p 'Offset in ms (-500 to 500, B=Back): ' delay_value || exit 0
         [[ "$delay_value" =~ ^[Bb]$ ]] && exit 0
-        if [[ "$delay_value" =~ ^([0-9]{1,3})(\.[0-9]{1,3})?$ ]] &&
-           awk -v value="$delay_value" 'BEGIN { exit !(value >= 0 && value <= 500) }'; then
+        if [[ "$delay_value" =~ ^-?([0-9]{1,3})(\.[0-9]{1,3})?$ ]] &&
+           awk -v value="$delay_value" 'BEGIN { exit !(value >= -500 && value <= 500) }'; then
             flock -u 9
             delay_result="$(python3 "$TOPOLOGY_SCRIPT" --both-delay-set "$delay_value" 2>&1)" || {
                 status=$?
@@ -55,10 +55,10 @@ case "$selected" in
             }
             printf '%s\n' "$delay_result" >>"$ACTION_LOG"
             applied_delay="$(jq -r '.milliseconds' <<<"$delay_result")"
-            wrap_line "Both-output PC delay applied: ${applied_delay} ms"
+            wrap_line "Both-output sync offset applied: ${applied_delay} ms"
             exit 0
         fi
-        wrap_line 'Enter B for Back, or a delay from 0 through 500 ms.'
+        wrap_line 'Enter B for Back, or an offset from -500 through 500 ms. Positive delays PC; negative delays external/iPad.'
     done
     ;;
  select-output)

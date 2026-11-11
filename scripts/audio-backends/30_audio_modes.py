@@ -35,7 +35,7 @@ def atomic(path,text):
     temporary.write_text(text)
     os.replace(temporary,path)
 
-GROUPS=STATE/'sonobus-groups.json'; LOCALMONPID=STATE/'local-monitor.pid'; LOCALSINK=STATE/'local-output-route.json'; OUTPUT_MATRIX=STATE/'both-output-matrix'; BOTH_OUTPUT_DELAY=STATE/'both-output-local-delay-ms'
+GROUPS=STATE/'sonobus-groups.json'; LOCALMONPID=STATE/'local-monitor.pid'; EXTERNALDELAYPID=STATE/'external-delay.pid'; LOCALSINK=STATE/'local-output-route.json'; OUTPUT_MATRIX=STATE/'both-output-matrix'; BOTH_OUTPUT_DELAY=STATE/'both-output-sync-offset-ms'; LEGACY_BOTH_OUTPUT_DELAY=STATE/'both-output-local-delay-ms'
 MODES={
 'ipad_external':('iPad → external','airplay',False,True),
 'laptop_external':('Laptop → external','system',False,True),
@@ -91,12 +91,12 @@ MODE_POLICIES={
 
 
 def both_output_local_delay_ms():
-    try:value=float(BOTH_OUTPUT_DELAY.read_text().strip())
+    try:value=float((BOTH_OUTPUT_DELAY if BOTH_OUTPUT_DELAY.exists() else LEGACY_BOTH_OUTPUT_DELAY).read_text().strip())
     except (OSError,ValueError):value=0.0
-    return max(0.0,min(500.0,value))
+    return max(-500.0,min(500.0,value))
 def set_both_output_local_delay_ms(value):
     value=float(value)
-    if not 0.0<=value<=500.0:raise ValueError('Both-output delay must be between 0 and 500 ms')
+    if not -500.0<=value<=500.0:raise ValueError('Both-output sync offset must be between -500 and 500 ms')
     atomic(BOTH_OUTPUT_DELAY,('{:.3f}'.format(value).rstrip('0').rstrip('.') or '0')+'\n')
     return {'milliseconds':value}
 def both_output_matrix():
@@ -124,6 +124,8 @@ def effective_mode_policy(name):
     matrix=both_output_matrix()
     external_channel='left' if matrix['left']=='external' else 'right'
     policy['sendChannels']=1
+    if both_output_local_delay_ms()<0:
+        policy['inputDevice']='CamillaDSP SonoBus Delayed'
     policy['inputChannelsMask']='1' if external_channel=='left' else '10'
     policy['externalChannel']=external_channel
     policy['pcChannel']='right' if external_channel=='left' else 'left'

@@ -137,6 +137,7 @@ def stop_audio_services(mark_stopped=True,stop_pipewire=True):
         STOP_ACK.unlink(missing_ok=True)
         try:
             stop_local_monitor()
+            stop_external_delay()
             stop_sonobus()
             stop_bypass()
             stop_camilla(include_stale=True)
@@ -153,6 +154,7 @@ def release_audio_for_output_switch():
         STOP_ACK.unlink(missing_ok=True)
         try:
             stop_local_monitor()
+            stop_external_delay()
             stop_sonobus()
             stop_bypass()
             stop_camilla(include_stale=True)
@@ -278,8 +280,10 @@ def topology_cli():
             print(json.dumps({'milliseconds':both_output_local_delay_ms()}));return
         if len(sys.argv)==3 and sys.argv[1]=='--both-delay-set':
             result=set_both_output_local_delay_ms(sys.argv[2])
-            if audio_mode() in ('ipad_both','laptop_both') and alive(rpid(LOCALMONPID)):
-                restore_selected_local_output()
+            if audio_mode() in ('ipad_both','laptop_both'):
+                # Reapply the complete mode because crossing zero changes both
+                # the active feeder and the SonoBus ALSA input device.
+                set_mode(audio_mode())
             print(json.dumps(result));return
         if len(sys.argv)==2 and sys.argv[1]=='--audio-toggle':
             print(json.dumps(toggle_audio_services()))

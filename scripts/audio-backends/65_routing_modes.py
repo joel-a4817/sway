@@ -145,6 +145,10 @@ def apply_mode(name,password=None,restore_camilla=True,output=None,output_resolv
             start_bypass()
         if local:start_local_monitor(selected,resolved=True)
         elif alive(rpid(LOCALMONPID)):stop_local_monitor()
+    if name in ('ipad_both','laptop_both') and both_output_local_delay_ms()<0:
+        start_external_delay()
+    else:
+        stop_external_delay()
     if sono:
         if not sonobus_matches(policy):restart_sonobus(password,policy,normalize=False)
     elif sonopids():stop_sonobus()
