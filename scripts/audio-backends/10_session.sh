@@ -118,6 +118,39 @@ trap 'exit 131' QUIT
 # same manifest independently, but it is not a dependency of this interface.
 TOPOLOGY_SCRIPT="$HOME_DIR/.config/sway/scripts/audio-backends/audio-backend-cli.py"
 [[ -f "$TOPOLOGY_SCRIPT" ]] || { echo "Missing local audio backend CLI: $TOPOLOGY_SCRIPT" >&2; exit 1; }
+if ! declare -F pause_all_playback >/dev/null 2>&1; then
+    pause_all_playback() {
+        command -v playerctl >/dev/null 2>&1 && playerctl --all-players pause >/dev/null 2>&1 || true
+        command -v python3 >/dev/null 2>&1 || return 0
+        python3 - <<'PYPAUSE' >/dev/null 2>&1 || true
+import glob,json,os,socket
+paths={'/tmp/mpv-socket','/tmp/mpvsocket','/tmp/mpv.sock'}
+runtime=os.environ.get('XDG_RUNTIME_DIR',f'/run/user/{os.getuid()}')
+paths.update(glob.glob(runtime+'/mpv*'))
+try:
+    for line in open('/proc/net/unix',encoding='utf-8',errors='ignore'):
+        fields=line.split()
+        if len(fields)>=8 and 'mpv' in fields[-1].lower() and fields[-1].startswith('/'):
+            paths.add(fields[-1])
+except OSError: pass
+payload=(json.dumps({'command':['set_property','pause',True]})+'\\n').encode()
+for path in paths:
+    try:
+        client=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);client.settimeout(.25)
+        client.connect(path);client.sendall(payload);client.close()
+    except OSError: pass
+PYPAUSE
+    }
+fi
+normalize_menu_step() {
+    # This file executes before 20_menu_helpers.sh is sourced, so the shared
+    # pause/normalize boundary must be defined here rather than in that later file.
+    pause_all_playback
+    python3 "$TOPOLOGY_SCRIPT" --normalize-menu-open >>"$ACTION_LOG" 2>&1 || {
+        printf '%s\n' 'Volume normalization failed; the selection was not applied.' >&2
+        return 1
+    }
+}
 # A deleted baseline is repaired through the same backend used by server startup.
 # The shared Python backend owns the complete expected-state list. Always ask it
 # to validate the baseline so one missing file cannot be overlooked here.
@@ -127,7 +160,7 @@ python3 "$TOPOLOGY_SCRIPT" --ensure-audio-baseline >>"$ACTION_LOG" 2>&1 || {
 }
 # Opening Media Control verifies gains through the standard transaction:
 # pause, save master, no-op function boundary, normalize, restore master last.
-python3 "$TOPOLOGY_SCRIPT" --normalize-menu-open >>"$ACTION_LOG" 2>&1 || {
+normalize_menu_step || {
     cat "$ACTION_LOG" >&2
     exit 1
 }

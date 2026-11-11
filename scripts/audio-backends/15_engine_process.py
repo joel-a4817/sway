@@ -327,22 +327,35 @@ def restart_airplay():
     return {'restarted':True}
 
 def reconcile_sonobus_after_engine_transition(password=None):
-    """Reopen SonoBus after CamillaDSP and bypass exchange the producer."""
+    """Rebuild the active SonoBus route after any filter-engine transition."""
     mode=audio_mode()
-    if mode not in MODES:return
-    policy=MODE_POLICIES[mode]
-    if not MODES[mode][3]:
+    if mode not in MODES:return {'restarted':False,'reason':'unknown-mode'}
+    wants_sonobus=MODES[mode][3]
+    if not wants_sonobus:
+        stop_external_delay()
         if sonopids():stop_sonobus()
-        return
+        return {'restarted':False,'reason':'mode-does-not-use-sonobus'}
+    # This must be effective_mode_policy, not the static MODE_POLICIES entry:
+    # both-output channel masks and the negative-offset delayed ALSA endpoint
+    # are computed dynamically from the saved matrix and signed sync offset.
+    policy=effective_mode_policy(mode)
+    if mode in ('ipad_both','laptop_both') and both_output_local_delay_ms()<0:
+        start_external_delay()
+    else:
+        stop_external_delay()
     state=groups_state();group=state['profiles'][state['active']]
     if group.get('passwordRequired') and not password:
-        # The current authenticated process can keep its group connection. Its
-        # ALSA capture endpoint is stable across the producer transition.
+        # Never kill an authenticated connection when it cannot be recreated.
+        # Persist the correct settings, but report that an authenticated restart
+        # needs its password rather than silently leaving the wrong live device.
+        configure_sonobus(policy)
         if not sonopids():
             raise RuntimeError('SonoBus group requires its password after the filter transition')
-        configure_sonobus(policy)
-        return
-    restart_sonobus(password,policy,normalize=False)
+        raise RuntimeError('SonoBus must restart with the selected group password to apply the new filter route')
+    result=restart_sonobus(password,policy,normalize=False)
+    if not sonobus_matches(policy):
+        raise RuntimeError('SonoBus restarted but did not verify the effective mode settings')
+    return {'restarted':True,'policy':policy,'result':result}
 
 @media_transaction
 def switch_profile(name):
@@ -413,5 +426,6 @@ def switch_profile(name):
         invalidate_cache('profiles')
         if MODES[audio_mode()][1]=='system':restore_dsp_desktop_sink()
         if MODES[audio_mode()][2]:restore_selected_local_output()
+        reconcile_sonobus_after_engine_transition()
         return {'profile':profile_id(target),'pid':pid,'mode':mode_state()}
 # This is the single saved master shared by the server and Media Control.

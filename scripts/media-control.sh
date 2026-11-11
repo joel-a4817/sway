@@ -5,12 +5,36 @@ SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
 SELF_PID=$$
 
 pause_all_playback() {
-    # Pause every MPRIS-capable player, including mpv instances exposing MPRIS.
-    # An individual player disappearing between enumeration and pause is benign.
-    command -v playerctl >/dev/null 2>&1 || return 0
-    playerctl --all-players pause >/dev/null 2>&1 || true
+    local socket
+    # First pause all MPRIS players. mpv is included when mpv-mpris is active.
+    if command -v playerctl >/dev/null 2>&1; then
+        playerctl --all-players pause >/dev/null 2>&1 || true
+    fi
+    # Also pause plain mpv instances that expose their native IPC socket but
+    # are not registered over MPRIS. Never signal-stop mpv: that would freeze
+    # IPC and make clean recovery impossible.
+    command -v python3 >/dev/null 2>&1 || return 0
+    python3 - <<'PYPAUSE' >/dev/null 2>&1 || true
+import glob,json,os,socket
+paths={'/tmp/mpv-socket','/tmp/mpvsocket','/tmp/mpv.sock'}
+runtime=os.environ.get('XDG_RUNTIME_DIR',f'/run/user/{os.getuid()}')
+paths.update(glob.glob(runtime+'/mpv*'))
+try:
+    for line in open('/proc/net/unix',encoding='utf-8',errors='ignore'):
+        fields=line.split()
+        if len(fields)>=8 and 'mpv' in fields[-1].lower() and fields[-1].startswith('/'):
+            paths.add(fields[-1])
+except OSError:
+    pass
+payload=(json.dumps({'command':['set_property','pause',True]})+'\\n').encode()
+for path in paths:
+    try:
+        client=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);client.settimeout(.25)
+        client.connect(path);client.sendall(payload);client.close()
+    except OSError:
+        pass
+PYPAUSE
 }
-
 # Media Control is a paused configuration surface from the moment it opens.
 pause_all_playback
 

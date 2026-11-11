@@ -33,6 +33,7 @@ done
 kill "$SWAYNAG_PID" 2>/dev/null || true
 wait "$SWAYNAG_PID" 2>/dev/null || true
 selected="$(cat "$CARD_SELECTION_FILE")"
+normalize_menu_step || exit 1
 case "$selected" in
  safe-volume) flock -u 9; python3 "$TOPOLOGY_SCRIPT" --safe-volume-apply || exit $?; wrap_line "Safe max applied: ${SAFE_PERCENT}%"; exit 0 ;;
  safe-volume-na) wrap_line 'Safe max unavailable.'; exit 0 ;;
@@ -42,18 +43,33 @@ case "$selected" in
     echo
     printf '[B] Back\n'
     wrap_line "Current sync offset: ${BOTH_DELAY_MS} ms"
+    normalize_menu_step || exit 1
     while :; do
         read -r -p 'Offset in ms (-500 to 500, B=Back): ' delay_value || exit 0
         [[ "$delay_value" =~ ^[Bb]$ ]] && exit 0
         if [[ "$delay_value" =~ ^-?([0-9]{1,3})(\.[0-9]{1,3})?$ ]] &&
            awk -v value="$delay_value" 'BEGIN { exit !(value >= -500 && value <= 500) }'; then
+            normalize_menu_step || exit 1
+            delay_stdout="$(mktemp "$STATE_DIR/.both-delay.stdout.XXXXXX")"
+            delay_stderr="$(mktemp "$STATE_DIR/.both-delay.stderr.XXXXXX")"
             flock -u 9
-            delay_result="$(python3 "$TOPOLOGY_SCRIPT" --both-delay-set "$delay_value" 2>&1)" || {
+            if python3 "$TOPOLOGY_SCRIPT" --both-delay-set "$delay_value" >"$delay_stdout" 2>"$delay_stderr"; then
+                status=0
+            else
                 status=$?
-                printf '%s\n' "$delay_result" >&2
+            fi
+            cat "$delay_stdout" "$delay_stderr" >>"$ACTION_LOG"
+            if ((status != 0)); then
+                cat "$delay_stdout" "$delay_stderr" >&2
+                rm -f "$delay_stdout" "$delay_stderr"
                 exit "$status"
-            }
-            printf '%s\n' "$delay_result" >>"$ACTION_LOG"
+            fi
+            delay_result="$(grep -E '^\{.*\}$' "$delay_stdout" | while IFS= read -r line; do jq -ce 'select(type=="object" and (.milliseconds|type)=="number")' <<<"$line" 2>/dev/null || true; done | tail -n 1)"
+            rm -f "$delay_stdout" "$delay_stderr"
+            if [[ -z "$delay_result" ]]; then
+                wrap_line 'The sync offset action returned no valid result. Check the Media Control action log.' >&2
+                exit 1
+            fi
             applied_delay="$(jq -r '.milliseconds' <<<"$delay_result")"
             wrap_line "Both-output sync offset applied: ${applied_delay} ms"
             exit 0
@@ -165,7 +181,8 @@ case "$selected" in
         echo; wrap_line "Listening profiles${filter_path:+ / $filter_path}"; echo
         printf '[0] Back\n'
         [[ -z "$filter_path" ]] && print_menu_item 1 'No filter (bypass CamillaDSP)'
-        for i in "${!labels[@]}"; do print_menu_item "$((i + ([[ -z "$filter_path" ]] && echo 2 || echo 1)))" "${labels[i]}"; done
+        if [[ -z "$filter_path" ]]; then filter_menu_offset=2; else filter_menu_offset=1; fi
+        for i in "${!labels[@]}"; do print_menu_item "$((i + filter_menu_offset))" "${labels[i]}"; done
         [[ -z "$filter_path" ]] && print_menu_item "$((${#labels[@]}+2))" 'Create custom spatial filter'
         ((${#labels[@]})) || { [[ -n "$filter_path" ]] || { wrap_line 'No filter folders or YAML files found.' >&2; exit 1; }; }
         while :; do
@@ -173,14 +190,17 @@ case "$selected" in
             [[ "$answer" =~ ^[0-9]+$ ]] || { wrap_line 'Enter a listed number.'; continue; }
             number=$((10#$answer))
             if ((number==0)) && [[ -z "$filter_path" ]]; then exit 0; fi
-            if ((number==1)) && [[ -z "$filter_path" ]]; then selected_filter='__no_filter__'; selected_label='No filter (bypass CamillaDSP)'; break 2; fi
+            if ((number==1)) && [[ -z "$filter_path" ]]; then normalize_menu_step || exit 1; selected_filter='__no_filter__'; selected_label='No filter (bypass CamillaDSP)'; break 2; fi
             if ((number==0)) && [[ -n "$filter_path" ]]; then
                 filter_path="$(jq -r '.parent // empty' <<<"$directory")"; continue 2
             fi
-            if [[ -z "$filter_path" ]] && ((number==${#labels[@]}+2)); then flock -u 9; python3 "$TOPOLOGY_SCRIPT" --create-custom-filter; exit $?; fi
-            ((number>=[[ -z "$filter_path" ]] && echo 2 || echo 1 && number<=${#labels[@]}+([[ -z "$filter_path" ]] && echo 1 || echo 0))) || { wrap_line 'Enter a listed number.'; continue; }
-            index=$((number-([[ -z "$filter_path" ]] && echo 2 || echo 1))); break
+            if [[ -z "$filter_path" ]] && ((number==${#labels[@]}+2)); then normalize_menu_step || exit 1; flock -u 9; python3 "$TOPOLOGY_SCRIPT" --create-custom-filter; exit $?; fi
+            minimum=$filter_menu_offset
+            maximum=$((${#labels[@]} + filter_menu_offset - 1))
+            ((number>=minimum && number<=maximum)) || { wrap_line 'Enter a listed number.'; continue; }
+            index=$((number-filter_menu_offset)); break
         done
+        normalize_menu_step || exit 1
         if [[ "${types[index]}" == directory ]]; then filter_path="${ids[index]}"; continue; fi
         selected_filter="${ids[index]}"; selected_label="${labels[index]}"; break
     done

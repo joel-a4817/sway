@@ -461,21 +461,26 @@ def start_external_delay():
     if offset>=0:return
     matrix=both_output_matrix()
     external_left=matrix['left']=='external'
-    samples=int(round(abs(offset)*96.0))
-    # Preserve the selected external channel position because SonoBus uses the
-    # corresponding one-channel input mask.  Only the external branch is
-    # buffered; the PC branch remains at minimum latency.
+    delay_ms=abs(offset)
+    # Use an exact raw-PCM delay relay rather than ffmpeg adelay.  The relay
+    # inserts a calculated number of 96-kHz S32_LE stereo frames, so negative
+    # offsets measurably delay the SonoBus/iPad branch without timestamps,
+    # resampling or filter-graph latency ambiguity.
+    relay=Path(HOME)/'.config/sway/scripts/audio-delay-pcm.py'
+    if not relay.is_file():raise RuntimeError(f'Missing external delay relay: {relay}')
     pan=('pan=stereo|c0=c0|c1=0*c0' if external_left else 'pan=stereo|c0=0*c1|c1=c1')
-    pan+=f',adelay={samples}S|{samples}S'
     ffmpeg=shutil.which('ffmpeg')
-    if not ffmpeg:raise RuntimeError('ffmpeg is required for signed both-output synchronization')
-    command='set -o pipefail; "$1" -q -D camilladsp_output_shared -r 96000 -f S32_LE -c 2 -t raw | "$2" -hide_banner -loglevel error -f s32le -ar 96000 -ac 2 -i pipe:0 -af "$4" -f s32le -ar 96000 -ac 2 pipe:1 | "$3" -q -D hw:Loopback,0,2 -r 96000 -f S32_LE -c 2 -t raw'
-    args=[exe('bash'),'-c',command,'external-delay',exe('arecord'),ffmpeg,exe('aplay'),pan]
-    with (STATE/'external-delay.log').open('ab',buffering=0) as log:
+    if not ffmpeg:raise RuntimeError('ffmpeg is required to isolate the external both-output channel')
+    command='set -o pipefail; "$1" -q -D camilladsp_output_shared -r 96000 -f S32_LE -c 2 -t raw | "$2" -hide_banner -loglevel error -f s32le -ar 96000 -ac 2 -i pipe:0 -af "$6" -f s32le -ar 96000 -ac 2 pipe:1 | "$3" "$4" --milliseconds "$5" --rate 96000 --channels 2 --bytes-per-sample 4 | "$7" -q -D hw:Loopback,0,2 -r 96000 -f S32_LE -c 2 -t raw'
+    args=[exe('bash'),'-c',command,'external-delay',exe('arecord'),ffmpeg,exe('python3'),str(relay),str(delay_ms),pan,exe('aplay')]
+    log_path=STATE/'external-delay.log'
+    with log_path.open('wb',buffering=0) as log:
         process=subprocess.Popen(args,stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True,env=media_env())
-    time.sleep(.15)
-    if process.poll() is not None:
-        raise RuntimeError('External-delay feeder exited: '+log_tail(STATE/'external-delay.log')[-1500:])
+    deadline=time.monotonic()+1.0
+    while time.monotonic()<deadline:
+        if process.poll() is not None:
+            raise RuntimeError('External PCM-delay relay exited: '+log_tail(log_path)[-2000:])
+        time.sleep(.05)
     EXTERNALDELAYPID.write_text(str(process.pid)+'\n')
 
 def start_local_monitor(route=None,resolved=False,persist=True):

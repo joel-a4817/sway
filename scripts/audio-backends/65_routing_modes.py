@@ -150,7 +150,13 @@ def apply_mode(name,password=None,restore_camilla=True,output=None,output_resolv
     else:
         stop_external_delay()
     if sono:
-        if not sonobus_matches(policy):restart_sonobus(password,policy,normalize=False)
+        # Negative sync uses a different ALSA capture endpoint. Always restart
+        # SonoBus after rebuilding that relay; persisted XML alone does not
+        # prove the live JUCE audio device reopened it.
+        if both_output_local_delay_ms()<0 and name in ('ipad_both','laptop_both'):
+            restart_sonobus(password,policy,normalize=False)
+        elif not sonobus_matches(policy):
+            restart_sonobus(password,policy,normalize=False)
     elif sonopids():stop_sonobus()
     MODE.write_text(name+'\n')
     STOPPED.unlink(missing_ok=True)
