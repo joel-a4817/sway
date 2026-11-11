@@ -161,7 +161,7 @@ bindsym --no-repeat $mod+control+a fullscreen disable; exec $term -T "$popup-f-a
 bindsym --no-repeat $mod+F5 exec bash -c '~/.config/sway/scripts/screen-capture.sh'
 
 #audio device output switch
-bindsym --no-repeat $mod+F7 fullscreen disable; exec $term -T "$popup-media-control" -e bash -c "/home/joel/.config/sway/scripts/audio-backends/media-control.sh"
+bindsym --no-repeat $mod+F7 fullscreen disable; exec $term -T "$popup-media-control" -e bash -c "/home/joel/.config/sway/scripts/media-control.sh"
 
 #mount dev
 bindsym --no-repeat $mod+F8 fullscreen disable; exec $term -T "$popup-mount" -e bash -c '/home/joel/.config/sway/scripts/mount/mount-swaynag.sh'

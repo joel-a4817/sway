@@ -14,7 +14,7 @@ fi
 ARGS=(-t warning -y overlay -m 'Media control')
 ARGS+=( -z "$AUDIO_TOGGLE_LABEL" "printf '%s\n' audio-toggle > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
 ARGS+=( -z "$VNC_TOGGLE_LABEL" "printf '%s\n' vnc-toggle > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
-WEBREMOTE_SCRIPT="$HOME/.config/sway/scripts/audio-backends/start-ipad-webremote.sh"
+WEBREMOTE_SCRIPT="$HOME/.config/sway/scripts/network/start-ipad-webremote.sh"
 if "$WEBREMOTE_SCRIPT" --status >/dev/null 2>&1; then
     WEBREMOTE_TOGGLE_LABEL='Stop iPad Web Remote'
 else
