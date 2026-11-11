@@ -5,7 +5,7 @@ import argparse, datetime as dt, fcntl, json, os, re, shutil, signal, socket, su
 from pathlib import Path
 from urllib import request, parse
 
-HOME=Path.home(); ROOT=HOME/"minecraft-server"; RUNTIME_ROOT=Path("/srv/minecraft")
+HOME=Path.home(); ROOT=HOME/"minecraft-server"; RUNTIME_ROOT=HOME/".local/state/minecraft-server/runtime"
 BACKUPS=ROOT/"backups"; COORD=ROOT/"coordination"; LOCK=COORD/"local.lock"
 PEERS=HOME/".config/minecraft-server/peers"; NETWORK_STATE=Path("/run/user")/str(os.getuid())/"minecraft-server-network.json"
 CRITICAL=False
@@ -132,15 +132,16 @@ def network_restore():
     try:NETWORK_STATE.unlink()
     except FileNotFoundError:pass
 def atomic_mirror(src,dst):
-    dst.parent.mkdir(parents=True,exist_ok=True); temp=dst.with_name(dst.name+".incoming"); old=dst.with_name(dst.name+".old")
-    shutil.rmtree(temp,ignore_errors=True);temp.mkdir(mode=0o770)
+    dst.parent.mkdir(parents=True,exist_ok=True)
+    if not os.access(dst.parent,os.W_OK|os.X_OK):
+        raise RuntimeError(f"Runtime parent is not writable by {os.geteuid()}: {dst.parent}")
+    temp=dst.with_name(dst.name+".incoming"); old=dst.with_name(dst.name+".old")
+    shutil.rmtree(temp,ignore_errors=True);temp.mkdir()
     if src.exists():run(["rsync","-a","--delete",f"{src}/",f"{temp}/"])
-    run(["chgrp","-R","minecraft",str(temp)])
-    run(["chmod","-R","g+rwX",str(temp)])
     shutil.rmtree(old,ignore_errors=True)
     if dst.exists():dst.rename(old)
     temp.rename(dst);shutil.rmtree(old,ignore_errors=True)
-def server_paths(name):return RUNTIME_ROOT/name,ROOT/"servers"/name/"snapshot",BACKUPS/name,COORD/f"{name}.owner.json"
+def server_paths(name):return unit_workdir(name),ROOT/"servers"/name/"snapshot",BACKUPS/name,COORD/f"{name}.owner.json"
 def backup(name,runtime):
     folder=BACKUPS/name;folder.mkdir(parents=True,exist_ok=True); path=folder/dt.datetime.now().strftime(f"{name}-%Y%m%d-%H%M%S.tar.gz")
     with tarfile.open(path,"w:gz") as t:t.add(runtime,arcname=name)
