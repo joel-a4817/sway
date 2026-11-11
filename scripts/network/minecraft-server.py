@@ -134,10 +134,9 @@ def network_restore():
 def atomic_mirror(src: Path, dst: Path):
     dst.parent.mkdir(parents=True, exist_ok=True)
 
-    # A nix-minecraft WorkingDirectory must keep its minecraft:minecraft root.
-    # Replacing that directory with a user-created .incoming directory breaks
-    # systemd CHDIR before Java can launch. Restore its contents in place while
-    # retaining the root directory's service ownership and setgid mode.
+    # Keep the nix-minecraft WorkingDirectory root in place. The service and
+    # lifecycle manager both run as joel:users, so all world data remains
+    # directly readable for backup and Syncthing publication.
     if str(dst).startswith("/srv/minecraft/"):
         if not dst.exists():
             dst.mkdir(mode=0o2770)
