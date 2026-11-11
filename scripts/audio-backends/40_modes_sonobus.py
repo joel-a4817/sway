@@ -30,6 +30,27 @@ def _sonobus_audio_setup(text):
         except ET.ParseError:pass
     return root,value,device
 
+
+def _osc_packet(address, value=1):
+    import struct
+    def pad(raw):
+        raw=raw+b"\0"
+        return raw+b"\0"*((4-len(raw)%4)%4)
+    return pad(address.encode())+pad(b",i")+struct.pack(">i",int(value))
+
+def configure_both_sync_osc():
+    """Synchronize peer receive buffers and enable linked monitor delay for Both."""
+    if audio_mode() not in ("ipad_both","laptop_both"):
+        return
+    import socket
+    sock=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
+    for address,value in (
+        ("/RecvSyncButton",1),
+        ("/InputGroup1MonDelayEnable",1),
+        ("/InputGroup1MonDelayLink",1),
+    ):
+        sock.sendto(_osc_packet(address,value),("127.0.0.1",9001))
+    sock.close()
 def configure_sonobus(policy=None):
     if not SONOSET.is_file():raise FileNotFoundError(SONOSET)
     import xml.etree.ElementTree as ET
@@ -136,6 +157,11 @@ def restart_sonobus(password=None,policy=None,normalize=False):
             if process.pid in sonopids():break
             time.sleep(.05)
         move_sonobus_to_workspace1(timeout=20.0)
+        if audio_mode() in ("ipad_both","laptop_both"):
+            # Allow the peer to join, then ask SonoBus to synchronize all peer
+            # receive buffers and enable linked monitor delay automatically.
+            time.sleep(1.5)
+            configure_both_sync_osc()
         if normalize and not STOPPED.exists():normalize_with_media()
         return {'pid':process.pid,'profile':state['active'],'group':item['group'],**applied}
 

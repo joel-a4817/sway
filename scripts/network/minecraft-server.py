@@ -5,7 +5,7 @@ import argparse, datetime as dt, fcntl, json, os, re, shutil, signal, socket, su
 from pathlib import Path
 from urllib import request, parse
 
-HOME=Path.home(); ROOT=HOME/"minecraft-server"; RUNTIME_ROOT=HOME/".local/state/minecraft-server/runtime"
+HOME=Path.home(); ROOT=HOME/"minecraft-server"; RUNTIME_ROOT=Path("/srv/minecraft")
 BACKUPS=ROOT/"backups"; COORD=ROOT/"coordination"; LOCK=COORD/"local.lock"
 PEERS=HOME/".config/minecraft-server/peers"; NETWORK_STATE=Path("/run/user")/str(os.getuid())/"minecraft-server-network.json"
 CRITICAL=False
@@ -133,8 +133,10 @@ def network_restore():
     except FileNotFoundError:pass
 def atomic_mirror(src,dst):
     dst.parent.mkdir(parents=True,exist_ok=True); temp=dst.with_name(dst.name+".incoming"); old=dst.with_name(dst.name+".old")
-    shutil.rmtree(temp,ignore_errors=True);temp.mkdir()
+    shutil.rmtree(temp,ignore_errors=True);temp.mkdir(mode=0o770)
     if src.exists():run(["rsync","-a","--delete",f"{src}/",f"{temp}/"])
+    run(["chgrp","-R","minecraft",str(temp)])
+    run(["chmod","-R","g+rwX",str(temp)])
     shutil.rmtree(old,ignore_errors=True)
     if dst.exists():dst.rename(old)
     temp.rename(dst);shutil.rmtree(old,ignore_errors=True)
