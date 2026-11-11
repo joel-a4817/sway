@@ -70,7 +70,7 @@ def query_group(name, addresses, args):
 
 def syncthing_config():
     import xml.etree.ElementTree as ET
-    cfg = HOME / ".config/syncthing/config.xml"
+    cfg = HOME / ".local/state/syncthing/config.xml"
     if not cfg.exists(): return None
     root = ET.parse(cfg).getroot()
     key = root.findtext("gui/apikey")
