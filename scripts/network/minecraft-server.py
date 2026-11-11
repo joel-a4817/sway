@@ -90,11 +90,17 @@ def syncthing_wait(timeout=300):
     request.urlopen(request.Request("http://127.0.0.1:8384/rest/db/scan?" + parse.urlencode({"folder":folder}), method="POST", headers=headers), timeout=10).read()
     end = time.time() + timeout
     while time.time() < end:
-        data = json.load(request.urlopen(request.Request("http://127.0.0.1:8384/rest/db/completion?" + parse.urlencode({"folder":folder}), headers=headers), timeout=10))
-        if float(data.get("completion", 0)) >= 100 and int(data.get("needBytes",0)) == 0 and int(data.get("needItems",0)) == 0:
+        data = json.load(request.urlopen(request.Request(
+            "http://127.0.0.1:8384/rest/db/status?" + parse.urlencode({"folder": folder}),
+            headers=headers,
+        ), timeout=10))
+        if (data.get("state") == "idle"
+                and int(data.get("needTotalItems", 0)) == 0
+                and int(data.get("needBytes", 0)) == 0
+                and int(data.get("pullErrors", 0)) == 0):
             return
         time.sleep(2)
-    raise RuntimeError("Syncthing did not reach 100% completion within 5 minutes")
+    raise RuntimeError("Syncthing folder did not become idle and fully local within 5 minutes")
 
 def atomic_mirror(src: Path, dst: Path):
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -124,6 +130,8 @@ def write_owner():
     os.replace(temp, OWNER)
 
 def ensure_dependencies():
+    if run(["systemctl", "cat", SERVICE], check=False, capture=True).returncode != 0:
+        raise RuntimeError(f"{SERVICE} is not installed; rebuild the NixOS configuration first")
     # NetworkManager must be active. Tailscale is intentionally neither started nor stopped here.
     if run(["systemctl", "is-active", "--quiet", "NetworkManager.service"], check=False).returncode != 0:
         raise RuntimeError("NetworkManager.service is not active")
@@ -210,11 +218,22 @@ def start(force=False):
     CRITICAL=True
     atomic_mirror(SNAPSHOT,RUNTIME)
     write_owner()
-    run(["sudo","systemctl","start",SERVICE])
-    for _ in range(120):
-        if active() and port_busy(): CRITICAL=False; print(f"Minecraft server started on {socket.gethostname()}:{PORT}"); return
-        time.sleep(1)
-    raise RuntimeError("Minecraft service did not become ready")
+    try:
+        run(["sudo","systemctl","start",SERVICE])
+        for _ in range(120):
+            if active() and port_busy():
+                CRITICAL=False
+                print(f"Minecraft server started on {socket.gethostname()}:{PORT}")
+                return
+            time.sleep(1)
+        run(["sudo", "systemctl", "stop", SERVICE], check=False)
+        raise RuntimeError("Minecraft service did not become ready")
+    except Exception:
+        try: OWNER.unlink()
+        except FileNotFoundError: pass
+        network_restore()
+        CRITICAL=False
+        raise
 
 def stop(remote=False):
     global CRITICAL
@@ -257,7 +276,7 @@ def main():
     for d in (ROOT,RUNTIME,SNAPSHOT,BACKUPS,COORD): d.mkdir(parents=True,exist_ok=True)
     p=argparse.ArgumentParser(); p.add_argument("action",nargs="?",default="toggle",choices=["toggle","start","stop","status","logs","takeover"]); p.add_argument("--machine",action="store_true"); p.add_argument("--remote",action="store_true")
     a=p.parse_args()
-    signal.signal(signal.SIGINT,on_signal); signal.signal(signal.SIGTERM,on_signal)
+    signal.signal(signal.SIGINT,on_signal); signal.signal(signal.SIGTERM,on_signal); signal.signal(signal.SIGHUP,on_signal)
     with LOCK.open("w") as lock:
         try: fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         except BlockingIOError: raise RuntimeError("Another Minecraft transition is already in progress")
