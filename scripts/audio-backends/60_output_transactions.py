@@ -10,9 +10,22 @@ def _recover_stale_cli_preview():
     snapshot=_read_json(OUTPUT_PREVIEW,None)
     if not isinstance(snapshot,dict):return
     if snapshot.get('owner')=='cli' and not _preview_owner_alive(snapshot):
-        cancel_output_preview('cli',recover=True)
+        try:
+            cancel_output_preview('cli',recover=True)
+        except RuntimeError as error:
+            # A remembered device can disappear between sessions. A stale
+            # preview must not permanently block selecting a currently
+            # available output merely because that old device cannot return.
+            if 'Output selection rollback incomplete:' not in str(error):
+                raise
+            OUTPUT_PREVIEW.unlink(missing_ok=True)
     elif snapshot.get('owner')=='web' and time.time()-float(snapshot.get('renewed',0))>WEB_PREVIEW_LEASE:
-        cancel_output_preview('web',recover=True)
+        try:
+            cancel_output_preview('web',recover=True)
+        except RuntimeError as error:
+            if 'Output selection rollback incomplete:' not in str(error):
+                raise
+            OUTPUT_PREVIEW.unlink(missing_ok=True)
 
 def watch_output_preview(stop):
     while not stop.wait(5):
@@ -49,8 +62,6 @@ def _require_output_preview(origin,token=None):
 
 def begin_output_preview(origin='web',owner_pid=None,owner_start=None):
     with LOCK:
-        if audio_mode() not in MODES or not MODES[audio_mode()][2]:
-            raise RuntimeError('Laptop output can only be configured while the current audio output includes Laptop')
         _recover_stale_cli_preview()
         current=_read_json(OUTPUT_PREVIEW,None)
         if isinstance(current,dict):
@@ -291,8 +302,15 @@ def activate_output(request,mode=None,password=None,origin='web',token=None):
             ensure_pipewire_ready()
         before=audio_topology();original=_find_card(before,card)
         old_profile=original['activeProfile'];old_routes=list(original['activeRoutes'])
-        previous_output=saved_output_route();previous_mode=audio_mode()
+        previous_output=saved_output_route();previous_mode=audio_mode();previous_matrix=both_output_matrix()
         try:
+            requested_matrix=request.get('bothMatrix')
+            if requested_matrix is not None:
+                if mode not in ('ipad_both','laptop_both'):
+                    raise ValueError('A Both-output matrix is valid only for a Both output mode')
+                if not isinstance(requested_matrix,dict):
+                    raise ValueError('Invalid Both-output matrix')
+                set_both_output_matrix(requested_matrix.get('left'),requested_matrix.get('right'))
             (STATE/'output-preview').touch()
             set_output_profile(card,profile,topology=before)
             if route not in (None,''):
@@ -381,6 +399,7 @@ def activate_output(request,mode=None,password=None,origin='web',token=None):
             (STATE/'output-preview').unlink(missing_ok=True)
             rollback=[]
             try:
+                set_both_output_matrix(previous_matrix.get('left'),previous_matrix.get('right'))
                 current=_find_card(audio_topology(),card)
                 if old_profile is not None and current['activeProfile']!=old_profile:
                     set_output_profile(card,old_profile)

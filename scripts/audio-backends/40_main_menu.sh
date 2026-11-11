@@ -36,6 +36,31 @@ selected="$(cat "$CARD_SELECTION_FILE")"
 case "$selected" in
  safe-volume) flock -u 9; python3 "$TOPOLOGY_SCRIPT" --safe-volume-apply || exit $?; wrap_line "Safe max applied: ${SAFE_PERCENT}%"; exit 0 ;;
  safe-volume-na) wrap_line 'Safe max unavailable.'; exit 0 ;;
+ both-delay)
+    echo
+    wrap_line 'Both-output PC delay'
+    echo
+    printf '[0] Back\n'
+    wrap_line "Current PC-output delay: ${BOTH_DELAY_MS} ms"
+    while :; do
+        read -r -p 'Delay in ms (0-500): ' delay_value || exit 0
+        [[ "$delay_value" == 0 ]] && exit 0
+        if [[ "$delay_value" =~ ^([0-9]{1,3})(\.[0-9]{1,3})?$ ]] &&
+           awk -v value="$delay_value" 'BEGIN { exit !(value > 0 && value <= 500) }'; then
+            flock -u 9
+            delay_result="$(python3 "$TOPOLOGY_SCRIPT" --both-delay-set "$delay_value" 2>&1)" || {
+                status=$?
+                printf '%s\n' "$delay_result" >&2
+                exit "$status"
+            }
+            printf '%s\n' "$delay_result" >>"$ACTION_LOG"
+            applied_delay="$(jq -r '.milliseconds' <<<"$delay_result")"
+            wrap_line "Both-output PC delay applied: ${applied_delay} ms"
+            exit 0
+        fi
+        wrap_line 'Enter 0 for Back, or a delay greater than 0 and no more than 500 ms.'
+    done
+    ;;
  select-output)
     choose_index 'Audio output' \
       'Play external audio on external output' \
@@ -59,7 +84,7 @@ case "$selected" in
         else
           matrix_left=pc; matrix_right=external
         fi
-        python3 "$TOPOLOGY_SCRIPT" --set-both-matrix "$matrix_left" "$matrix_right" >>"$ACTION_LOG" 2>&1 || exit 1
+        # Defer the matrix mutation until commit so Back never changes live routing.
         ;;
     esac
     # Topology discovery is read-only. Do not create a preview or change modes
@@ -171,7 +196,7 @@ card_label="${CARDS[selected]#*$'\t'}"
 # recovery can restore the original mode, routes and streams.
 if ! preview_error="$(MEDIA_CONTROL_PICKER_PID=$$ MEDIA_CONTROL_PICKER_START="$(process_start "$$")" python3 "$TOPOLOGY_SCRIPT" --begin-output-preview 2>&1 >/dev/null)"; then
     printf '%s\n' "$preview_error" >>"$ACTION_LOG"
-    wrap_line 'Could not begin output selection.' >&2
+    wrap_line "Could not begin output selection: $preview_error" >&2
     exit 1
 fi
 OUTPUT_PREVIEW_ACTIVE=1
@@ -261,7 +286,9 @@ while :; do
     wrap_line 'That sink cannot be selected. Select again.'
 done
 
-request="$(jq -nc --arg card "$card" --arg profile "$profile" --arg port "$route" --arg sink "$sink" '{card:$card,profile:$profile,port:$port,sink:$sink}')"
+request="$(jq -nc --arg card "$card" --arg profile "$profile" --arg port "$route" --arg sink "$sink" \
+  --arg matrixLeft "${matrix_left:-}" --arg matrixRight "${matrix_right:-}" \
+  '{card:$card,profile:$profile,port:$port,sink:$sink} + (if ($matrixLeft != "" and $matrixRight != "") then {bothMatrix:{left:$matrixLeft,right:$matrixRight}} else {} end)')"
 # The paired controller serializes pause -> output -> normalize; playback stays paused.
 flock -u 9
 if [[ -n "${selected_mode:-}" ]]; then
