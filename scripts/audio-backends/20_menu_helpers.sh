@@ -51,11 +51,15 @@ print_menu_item() {
     wrap_prefixed_line "${tag}[$1] " "$text"
 }
 choose_index() {
+    local zero_label=Back
+    if [[ "${1:-}" == --exit ]]; then zero_label=Exit; shift
+    elif [[ "${1:-}" == --back ]]; then shift
+    fi
     local title="$1" answer i=1 choice; shift
     ((${#@})) || { echo "No choices for $title" >&2; return 1; }
     normalize_menu_step || return 1
     echo; wrap_line "$(compact_menu_label "$title")"; echo
-    print_menu_item 0 'Back'
+    print_menu_item 0 "$zero_label"
     for label in "$@"; do print_menu_item "$i" "$label"; i=$((i+1)); done
     while :; do
         read -r -p 'Select: ' answer || return 2

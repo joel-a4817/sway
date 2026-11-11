@@ -457,29 +457,28 @@ def stop_external_delay():
 
 def start_external_delay():
     stop_external_delay()
+    mode=audio_mode()
+    if mode not in ('ipad_both','laptop_both'):return
     offset=both_output_local_delay_ms()
-    if offset>=0:return
     matrix=both_output_matrix()
     external_left=matrix['left']=='external'
-    delay_ms=abs(offset)
-    # Use an exact raw-PCM delay relay rather than ffmpeg adelay.  The relay
-    # inserts a calculated number of 96-kHz S32_LE stereo frames, so negative
-    # offsets measurably delay the SonoBus/iPad branch without timestamps,
-    # resampling or filter-graph latency ambiguity.
-    relay=Path(HOME)/'.config/sway/scripts/audio-delay-pcm.py'
-    if not relay.is_file():raise RuntimeError(f'Missing external delay relay: {relay}')
+    # Positive offset delays only PC. Negative offset delays only external.
+    # The SonoBus branch always traverses this dedicated cable, including at
+    # zero delay, so there is no direct path that can silently bypass tuning.
+    delay_samples=max(0,int(round(-offset*96.0)))
     pan=('pan=stereo|c0=c0|c1=0*c0' if external_left else 'pan=stereo|c0=0*c1|c1=c1')
+    audio_filter=pan+f',adelay=delays={delay_samples}S:all=1'
     ffmpeg=shutil.which('ffmpeg')
-    if not ffmpeg:raise RuntimeError('ffmpeg is required to isolate the external both-output channel')
-    command='set -o pipefail; "$1" -q -D camilladsp_output_shared -r 96000 -f S32_LE -c 2 -t raw | "$2" -hide_banner -loglevel error -f s32le -ar 96000 -ac 2 -i pipe:0 -af "$6" -f s32le -ar 96000 -ac 2 pipe:1 | "$3" "$4" --milliseconds "$5" --rate 96000 --channels 2 --bytes-per-sample 4 | "$7" -q -D hw:Loopback,0,2 -r 96000 -f S32_LE -c 2 -t raw'
-    args=[exe('bash'),'-c',command,'external-delay',exe('arecord'),ffmpeg,exe('python3'),str(relay),str(delay_ms),pan,exe('aplay')]
+    if not ffmpeg:raise RuntimeError('ffmpeg is required for both-output synchronization')
+    command='set -o pipefail; "$1" -q -D camilladsp_output_shared -r 96000 -f S32_LE -c 2 -t raw | "$2" -hide_banner -loglevel error -f s32le -ar 96000 -ac 2 -i pipe:0 -af "$4" -f s32le -ar 96000 -ac 2 pipe:1 | "$3" -q -D hw:Loopback,0,2 -r 96000 -f S32_LE -c 2 -t raw'
+    args=[exe('bash'),'-c',command,'external-delay',exe('arecord'),ffmpeg,exe('aplay'),audio_filter]
     log_path=STATE/'external-delay.log'
     with log_path.open('wb',buffering=0) as log:
         process=subprocess.Popen(args,stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True,env=media_env())
     deadline=time.monotonic()+1.0
     while time.monotonic()<deadline:
         if process.poll() is not None:
-            raise RuntimeError('External PCM-delay relay exited: '+log_tail(log_path)[-2000:])
+            raise RuntimeError('External sync feeder exited: '+log_tail(log_path)[-2000:])
         time.sleep(.05)
     EXTERNALDELAYPID.write_text(str(process.pid)+'\n')
 

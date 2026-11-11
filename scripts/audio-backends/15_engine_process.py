@@ -339,7 +339,7 @@ def reconcile_sonobus_after_engine_transition(password=None):
     # both-output channel masks and the negative-offset delayed ALSA endpoint
     # are computed dynamically from the saved matrix and signed sync offset.
     policy=effective_mode_policy(mode)
-    if mode in ('ipad_both','laptop_both') and both_output_local_delay_ms()<0:
+    if mode in ('ipad_both','laptop_both'):
         start_external_delay()
     else:
         stop_external_delay()
@@ -353,8 +353,13 @@ def reconcile_sonobus_after_engine_transition(password=None):
             raise RuntimeError('SonoBus group requires its password after the filter transition')
         raise RuntimeError('SonoBus must restart with the selected group password to apply the new filter route')
     result=restart_sonobus(password,policy,normalize=False)
-    if not sonobus_matches(policy):
-        raise RuntimeError('SonoBus restarted but did not verify the effective mode settings')
+    # configure_sonobus already verifies every persisted device and PARAM value
+    # before launch; restart_sonobus verifies that the new process remains alive.
+    # Do not immediately reparse preferences after JUCE starts: SonoBus rewrites
+    # that XML asynchronously and transient formatting/default changes made the
+    # old strict equality check reject a successful restart.
+    if not sonopids():
+        raise RuntimeError('SonoBus exited after applying the filter route')
     return {'restarted':True,'policy':policy,'result':result}
 
 @media_transaction
@@ -377,7 +382,6 @@ def switch_profile(name):
                 # physical default, stream movement and final verification.
                 result=apply_mode(mode,restore_camilla=False,output=route,
                                   output_resolved=route is not None)
-                reconcile_sonobus_after_engine_transition()
                 if mode=='laptop_laptop':direct_no_filter(route)
                 ACTIVE.write_text(NO_FILTER+'\n')
             except Exception:

@@ -8,7 +8,7 @@ mapfile -t networks < <(
 echo "Available Wi-Fi Networks"
 echo
 
-echo "[0] Back"
+echo "[0] Exit"
 
 count=${#networks[@]}
 rows=$(((count + 1) / 2))

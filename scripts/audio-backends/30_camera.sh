@@ -28,7 +28,7 @@ camera_picker() (
       jq -e --arg k "${device_keys[i]}" --arg n "$current" '.[]|select(.key==$k)|.nodes[]|select(.name==$n)' <<<"$topo" >/dev/null && { current_device="${device_keys[i]}"; current_device_label="${device_labels[i]}"; }
     done
     while :; do
-    choose_index 'Cameras | Physical device' "${device_labels[@]}" || return 0
+    choose_index --exit 'Cameras | Physical device' "${device_labels[@]}" || return 0
     device_key="${device_keys[number]}"; device_label="${device_labels[number]}"
     break
     done

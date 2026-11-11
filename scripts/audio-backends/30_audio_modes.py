@@ -124,8 +124,10 @@ def effective_mode_policy(name):
     matrix=both_output_matrix()
     external_channel='left' if matrix['left']=='external' else 'right'
     policy['sendChannels']=1
-    if both_output_local_delay_ms()<0:
-        policy['inputDevice']='CamillaDSP SonoBus Delayed'
+    # Both-output SonoBus must always capture the dedicated feeder endpoint.
+    # This prevents the live client from bypassing negative external delay by
+    # remaining attached to the direct CamillaDSP capture device.
+    policy['inputDevice']='CamillaDSP SonoBus Delayed'
     policy['inputChannelsMask']='1' if external_channel=='left' else '10'
     policy['externalChannel']=external_channel
     policy['pcChannel']='right' if external_channel=='left' else 'left'

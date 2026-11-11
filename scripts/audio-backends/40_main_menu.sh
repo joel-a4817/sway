@@ -78,50 +78,56 @@ case "$selected" in
     done
     ;;
  select-output)
-    choose_index 'Audio output' \
-      'Play external audio on external output' \
-      'Play external audio on PC output' \
-      'Play external audio on both outputs' \
-      'Play PC audio on external output' \
-      'Play PC audio on PC output' \
-      'Play PC audio on both outputs' || exit 0
-    modes=(ipad_ipad ipad_laptop ipad_both laptop_ipad laptop_laptop laptop_both)
-    selected_mode="${modes[number]}"
-    case "$selected_mode" in
-      ipad_ipad|laptop_ipad)
-        python3 "$TOPOLOGY_SCRIPT" --set-mode "$selected_mode" >>"$ACTION_LOG" 2>&1 || exit 1
-        exit 0 ;;
-      ipad_both|laptop_both)
-        choose_index 'Channel destination' \
-          'Left channel -> external output; Right channel -> PC output' \
-          'Left channel -> PC output; Right channel -> external output' || exit 0
-        if ((number==0)); then
-          matrix_left=external; matrix_right=pc
-        else
-          matrix_left=pc; matrix_right=external
-        fi
-        # Defer the matrix mutation until commit so Back never changes live routing.
-        ;;
-    esac
-    # Topology discovery is read-only. Do not create a preview or change modes
-    # until the user chooses an actual playback device.
-    TOPOLOGY_JSON="$(output_topology)" || { wrap_line 'Output topology unavailable.' >&2; exit 1; }
-    mapfile -t CARDS < <(jq -r '.cards[] | [.name,.label] | @tsv' <<<"$TOPOLOGY_JSON")
-    ((${#CARDS[@]})) || { wrap_line 'No playback devices currently exposed.' >&2; exit 1; }
-    labels=()
-    for item in "${CARDS[@]}"; do labels+=("${item#*$'\t'}"); done
-    current_card="$(jq -r '.saved.card // empty' <<<"$TOPOLOGY_JSON")"
-    current_card_index=''
-    current_card_label=''
-    for i in "${!CARDS[@]}"; do
-        if [[ "${CARDS[i]%%$'\t'*}" == "$current_card" ]]; then
-            current_card_index="$i"; current_card_label="${labels[i]}"; break
-        fi
-    done
-    while :; do
-        choose_index 'Audio outputs | Playback device' "${labels[@]}" || exit 0
+    select_playback_card() {
+        TOPOLOGY_JSON="$(output_topology)" || { wrap_line 'Output topology unavailable.' >&2; return 1; }
+        mapfile -t CARDS < <(jq -r '.cards[] | [.name,.label] | @tsv' <<<"$TOPOLOGY_JSON")
+        ((${#CARDS[@]})) || { wrap_line 'No playback devices currently exposed.' >&2; return 1; }
+        labels=()
+        for item in "${CARDS[@]}"; do labels+=("${item#*$'\t'}"); done
+        if ! choose_index --back 'Audio outputs | Playback device' "${labels[@]}"; then return 2; fi
         selected="$number"
-        break
+        return 0
+    }
+    while :; do
+        choose_index --exit 'Audio output' \
+          'Play external audio on external output' \
+          'Play external audio on PC output' \
+          'Play external audio on both outputs' \
+          'Play PC audio on external output' \
+          'Play PC audio on PC output' \
+          'Play PC audio on both outputs' || exit 0
+        modes=(ipad_ipad ipad_laptop ipad_both laptop_ipad laptop_laptop laptop_both)
+        selected_mode="${modes[number]}"
+        matrix_left=''; matrix_right=''
+        case "$selected_mode" in
+          ipad_ipad|laptop_ipad)
+            python3 "$TOPOLOGY_SCRIPT" --set-mode "$selected_mode" >>"$ACTION_LOG" 2>&1 || exit 1
+            exit 0 ;;
+          ipad_both|laptop_both)
+            while :; do
+                choose_index --back 'Channel destination' \
+                  'Left channel -> external output; Right channel -> PC output' \
+                  'Left channel -> PC output; Right channel -> external output' || break
+                if ((number==0)); then matrix_left=external; matrix_right=pc
+                else matrix_left=pc; matrix_right=external; fi
+                # The playback-device list is the third level. Back returns to
+                # Channel destination rather than closing Media Control.
+                select_playback_card
+                card_status=$?
+                ((card_status==0)) && break 2
+                ((card_status==2)) && continue
+                exit "$card_status"
+            done
+            # Back from Channel destination returns to Audio output.
+            continue ;;
+          *)
+            # For two-level routes, Back from playback device returns here.
+            select_playback_card
+            card_status=$?
+            ((card_status==0)) && break
+            ((card_status==2)) && continue
+            exit "$card_status" ;;
+        esac
     done
     ;;
  select-input)
@@ -179,7 +185,7 @@ case "$selected" in
             labels+=("$label")
         done
         echo; wrap_line "Listening profiles${filter_path:+ / $filter_path}"; echo
-        printf '[0] Back\n'
+        if [[ -z "$filter_path" ]]; then printf '[0] Exit\n'; else printf '[0] Back\n'; fi
         [[ -z "$filter_path" ]] && print_menu_item 1 'No filter (bypass CamillaDSP)'
         if [[ -z "$filter_path" ]]; then filter_menu_offset=2; else filter_menu_offset=1; fi
         for i in "${!labels[@]}"; do print_menu_item "$((i + filter_menu_offset))" "${labels[i]}"; done
