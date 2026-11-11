@@ -40,13 +40,13 @@ case "$selected" in
     echo
     wrap_line 'Both-output PC delay'
     echo
-    printf '[0] Back\n'
+    printf '[B] Back\n'
     wrap_line "Current PC-output delay: ${BOTH_DELAY_MS} ms"
     while :; do
-        read -r -p 'Delay in ms (0-500): ' delay_value || exit 0
-        [[ "$delay_value" == 0 ]] && exit 0
+        read -r -p 'Delay in ms (0-500, B=Back): ' delay_value || exit 0
+        [[ "$delay_value" =~ ^[Bb]$ ]] && exit 0
         if [[ "$delay_value" =~ ^([0-9]{1,3})(\.[0-9]{1,3})?$ ]] &&
-           awk -v value="$delay_value" 'BEGIN { exit !(value > 0 && value <= 500) }'; then
+           awk -v value="$delay_value" 'BEGIN { exit !(value >= 0 && value <= 500) }'; then
             flock -u 9
             delay_result="$(python3 "$TOPOLOGY_SCRIPT" --both-delay-set "$delay_value" 2>&1)" || {
                 status=$?
@@ -58,7 +58,7 @@ case "$selected" in
             wrap_line "Both-output PC delay applied: ${applied_delay} ms"
             exit 0
         fi
-        wrap_line 'Enter 0 for Back, or a delay greater than 0 and no more than 500 ms.'
+        wrap_line 'Enter B for Back, or a delay from 0 through 500 ms.'
     done
     ;;
  select-output)

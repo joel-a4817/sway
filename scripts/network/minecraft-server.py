@@ -269,8 +269,8 @@ def on_signal(sig,frame):
     if CRITICAL:print("\nCritical save/transfer continues; interrupt ignored.",file=sys.stderr);return
     raise KeyboardInterrupt
 def main():
-    for d in (ROOT,RUNTIME_ROOT,BACKUPS,COORD):d.mkdir(parents=True,exist_ok=True)
     p=argparse.ArgumentParser();p.add_argument("action",nargs="?",default="toggle",choices=["toggle","start","stop","status","logs","takeover","list"]);p.add_argument("server",nargs="?");p.add_argument("--machine",action="store_true");p.add_argument("--remote",action="store_true");a=p.parse_args()
+    for d in (ROOT,RUNTIME_ROOT,BACKUPS,COORD):d.mkdir(parents=True,exist_ok=True)
     for sig in (signal.SIGINT,signal.SIGTERM,signal.SIGHUP):signal.signal(sig,on_signal)
     with LOCK.open("w") as lock:
         try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
