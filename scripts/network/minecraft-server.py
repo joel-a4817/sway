@@ -5,7 +5,7 @@ import argparse, datetime as dt, fcntl, json, os, re, shutil, signal, socket, su
 from pathlib import Path
 from urllib import request, parse
 
-HOME=Path.home(); ROOT=HOME/"minecraft-server"; RUNTIME_ROOT=HOME/".local/state/minecraft-server/runtime"
+HOME=Path.home(); ROOT=HOME/"minecraft-server"; RUNTIME_ROOT=Path("/srv/minecraft")
 BACKUPS=ROOT/"backups"; COORD=ROOT/"coordination"; LOCK=COORD/"local.lock"
 PEERS=HOME/".config/minecraft-server/peers"; NETWORK_STATE=Path("/run/user")/str(os.getuid())/"minecraft-server-network.json"
 CRITICAL=False
