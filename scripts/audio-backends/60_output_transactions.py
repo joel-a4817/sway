@@ -439,6 +439,8 @@ def start_local_monitor(route=None,resolved=False,persist=True):
         ffmpeg=shutil.which('ffmpeg')
         if not ffmpeg:raise RuntimeError('ffmpeg is required for split-channel both-output routing')
         pan='pan=stereo|c0=c1|c1=c1' if channel else 'pan=stereo|c0=c0|c1=c0'
+        samples=max(0,int(round(both_output_local_delay_ms()*96.0)))
+        pan=pan+f',adelay={samples}S|{samples}S'
         command='set -o pipefail; "$1" -q -D camilladsp_output_shared -r 96000 -f S32_LE -c 2 -t raw | "$2" -hide_banner -loglevel error -f s32le -ar 96000 -ac 2 -i pipe:0 -af "$5" -f s32le -ar 96000 -ac 2 pipe:1 | "$3" --playback --device="$4" --rate=96000 --format=s32le --channels=2'
         args=[exe('bash'),'-c',command,'monitor',exe('arecord'),ffmpeg,exe('pacat'),sink,pan]
     else:

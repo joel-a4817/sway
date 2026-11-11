@@ -28,9 +28,8 @@ camera_picker() (
       jq -e --arg k "${device_keys[i]}" --arg n "$current" '.[]|select(.key==$k)|.nodes[]|select(.name==$n)' <<<"$topo" >/dev/null && { current_device="${device_keys[i]}"; current_device_label="${device_labels[i]}"; }
     done
     while :; do
-    choose_index 'Cameras | Physical device' "Current${current_device_label:+ ($(compact_item_label "$current_device_label"))}" "${device_labels[@]}" || return 1
-    if ((number==0)); then [[ -n "$current_device" ]] || { wrap_line 'No current camera is exposed; select a numbered camera.'; continue; }; device_key="$current_device"; device_label="$current_device_label"
-    else device_key="${device_keys[number-1]}"; device_label="${device_labels[number-1]}"; fi
+    choose_index 'Cameras | Physical device' "${device_labels[@]}" || return 0
+    device_key="${device_keys[number]}"; device_label="${device_labels[number]}"
     break
     done
     # Device Select applies its last endpoint before the endpoint menu.
@@ -53,11 +52,8 @@ camera_picker() (
     mapfile -t node_labels < <(jq -r --arg k "$device_key" '.[]|select(.key==$k)|.nodes[].label' <<<"$topo")
     while :; do
       current_node_label=''; for i in "${!node_names[@]}"; do [[ "${node_names[i]}" == "$current" ]] && current_node_label="${node_labels[i]}"; done
-      choose_index "$device_label | Camera endpoint" "Current${current_node_label:+ ($(compact_item_label "$current_node_label"))}" "${node_labels[@]}" || { [[ "$original_camera_id" =~ ^[0-9]+$ ]] && wpctl set-default "$original_camera_id" >/dev/null 2>&1; return 1; }
-      if ((number==0)); then
-        if [[ -z "$current_node_label" ]]; then wrap_line 'No current endpoint belongs to this camera. Select again.'; continue; fi
-        for i in "${!node_names[@]}"; do [[ "${node_names[i]}" == "$current" ]] && node_id="${node_ids[i]}" && node_name="${node_names[i]}" && node_label="${node_labels[i]}"; done
-      else node_id="${node_ids[number-1]}"; node_name="${node_names[number-1]}"; node_label="${node_labels[number-1]}"; fi
+      choose_index "$device_label | Camera endpoint" "${node_labels[@]}" || { [[ "$original_camera_id" =~ ^[0-9]+$ ]] && wpctl set-default "$original_camera_id" >/dev/null 2>&1; camera_picker; return $?; }
+      node_id="${node_ids[number]}"; node_name="${node_names[number]}"; node_label="${node_labels[number]}"
       break
     done
     # Revalidate against a fresh graph, then set and confirm the default.

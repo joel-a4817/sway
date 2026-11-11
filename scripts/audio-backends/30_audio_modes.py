@@ -35,7 +35,7 @@ def atomic(path,text):
     temporary.write_text(text)
     os.replace(temporary,path)
 
-GROUPS=STATE/'sonobus-groups.json'; LOCALMONPID=STATE/'local-monitor.pid'; LOCALSINK=STATE/'local-output-route.json'; OUTPUT_MATRIX=STATE/'both-output-matrix'
+GROUPS=STATE/'sonobus-groups.json'; LOCALMONPID=STATE/'local-monitor.pid'; LOCALSINK=STATE/'local-output-route.json'; OUTPUT_MATRIX=STATE/'both-output-matrix'; BOTH_OUTPUT_DELAY=STATE/'both-output-local-delay-ms'
 MODES={
 'ipad_external':('iPad → external','airplay',False,True),
 'laptop_external':('Laptop → external','system',False,True),
@@ -90,6 +90,15 @@ MODE_POLICIES={
 }
 
 
+def both_output_local_delay_ms():
+    try:value=float(BOTH_OUTPUT_DELAY.read_text().strip())
+    except (OSError,ValueError):value=0.0
+    return max(0.0,min(500.0,value))
+def set_both_output_local_delay_ms(value):
+    value=float(value)
+    if not 0.0<=value<=500.0:raise ValueError('Both-output delay must be between 0 and 500 ms')
+    atomic(BOTH_OUTPUT_DELAY,('{:.3f}'.format(value).rstrip('0').rstrip('.') or '0')+'\n')
+    return {'milliseconds':value}
 def both_output_matrix():
     default={'left':'external','right':'pc'}
     try:data=json.loads(OUTPUT_MATRIX.read_text())

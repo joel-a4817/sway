@@ -55,21 +55,23 @@ print_menu_item() {
     wrap_prefixed_line "${tag}[$1] " "$text"
 }
 choose_index() {
-    local title="$1" answer i=0; shift
+    local title="$1" answer i=1 choice; shift
     ((${#@})) || { echo "No choices for $title" >&2; return 1; }
     pause_all_playback
     echo; wrap_line "$(compact_menu_label "$title")"; echo
+    print_menu_item 0 'Back'
     for label in "$@"; do print_menu_item "$i" "$label"; i=$((i+1)); done
     while :; do
-        read -r -p 'Select: ' answer || return 1
+        read -r -p 'Select: ' answer || return 2
         [[ "$answer" =~ ^[0-9]+$ && ${#answer} -le 9 ]] || { wrap_line 'Enter a listed number.'; continue; }
         number=$((10#$answer))
-        if ((number < i)); then
-            local choice="${@:$((number+1)):1}"
+        ((number==0)) && return 2
+        if ((number>=1 && number<i)); then
+            choice="${@:$number:1}"
             case "$(compact_item_label "$choice")" in
-                '[N/A] '*|'[INT] '*|'[MON] '*|'[LOOP] '*|'[VIRT] '*)
-                    wrap_line 'That item cannot be selected.'; continue ;;
+                '[N/A] '*|'[INT] '*|'[MON] '*|'[LOOP] '*|'[VIRT] '*) wrap_line 'That item cannot be selected.'; continue ;;
             esac
+            number=$((number-1))
             pause_all_playback
             return 0
         fi

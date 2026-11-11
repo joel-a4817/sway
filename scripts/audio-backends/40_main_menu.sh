@@ -4,23 +4,11 @@ if [[ -e "$AUDIO_STOPPED_FILE" ]]; then
 else
     AUDIO_TOGGLE_LABEL='Stop audio'
 fi
-VNC_STATUS="$(python3 "$TOPOLOGY_SCRIPT" --vnc-status 2>>"$ACTION_LOG" || true)"
-if [[ "$(jq -r '.running // false' <<<"$VNC_STATUS" 2>/dev/null)" == true ]]; then
-    VNC_TOGGLE_LABEL='Stop VNC'
-else
-    VNC_TOGGLE_LABEL='Start VNC'
-fi
-
+DELAY_JSON="$(python3 "$TOPOLOGY_SCRIPT" --both-delay-status 2>>"$ACTION_LOG" || true)"
+BOTH_DELAY_MS="$(jq -r '.milliseconds // 0' <<<"$DELAY_JSON" 2>/dev/null)"
 ARGS=(-t warning -y overlay -m 'Media control')
 ARGS+=( -z "$AUDIO_TOGGLE_LABEL" "printf '%s\n' audio-toggle > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
-ARGS+=( -z "$VNC_TOGGLE_LABEL" "printf '%s\n' vnc-toggle > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
-WEBREMOTE_SCRIPT="$HOME/.config/sway/scripts/network/start-ipad-webremote.sh"
-if "$WEBREMOTE_SCRIPT" --status >/dev/null 2>&1; then
-    WEBREMOTE_TOGGLE_LABEL='Stop iPad Web Remote'
-else
-    WEBREMOTE_TOGGLE_LABEL='Start iPad Web Remote'
-fi
-ARGS+=( -z "$WEBREMOTE_TOGGLE_LABEL" "printf '%s\n' web-remote > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
+ARGS+=( -z "Both-output sync delay (${BOTH_DELAY_MS} ms)" "printf '%s\n' both-delay > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
 SAFE_JSON="$(python3 "$TOPOLOGY_SCRIPT" --safe-volume-status 2>>"$ACTION_LOG" || true)"
 if [[ "$(jq -r '.available // false' <<<"$SAFE_JSON" 2>/dev/null)" == true ]]; then
   SAFE_PERCENT="$(jq -r '.percent' <<<"$SAFE_JSON")"
@@ -46,23 +34,17 @@ kill "$SWAYNAG_PID" 2>/dev/null || true
 wait "$SWAYNAG_PID" 2>/dev/null || true
 selected="$(cat "$CARD_SELECTION_FILE")"
 case "$selected" in
-   web-remote)
-    flock -u 9
-    "$WEBREMOTE_SCRIPT" toggle
-    exit $?
-    ;;
  safe-volume) flock -u 9; python3 "$TOPOLOGY_SCRIPT" --safe-volume-apply || exit $?; wrap_line "Safe max applied: ${SAFE_PERCENT}%"; exit 0 ;;
  safe-volume-na) wrap_line 'Safe max unavailable.'; exit 0 ;;
  select-output)
     choose_index 'Audio output' \
-      'Keep current configuration' \
       'Play external audio on external output' \
       'Play external audio on PC output' \
       'Play external audio on both outputs' \
       'Play PC audio on external output' \
       'Play PC audio on PC output' \
       'Play PC audio on both outputs' || exit 0
-    modes=('' ipad_ipad ipad_laptop ipad_both laptop_ipad laptop_laptop laptop_both)
+    modes=(ipad_ipad ipad_laptop ipad_both laptop_ipad laptop_laptop laptop_both)
     selected_mode="${modes[number]}"
     case "$selected_mode" in
       ipad_ipad|laptop_ipad)
@@ -96,11 +78,8 @@ case "$selected" in
         fi
     done
     while :; do
-        choose_index 'Audio outputs | Playback device' "Current${current_card_label:+ ($(compact_item_label "$current_card_label"))}" "${labels[@]}" || exit 0
-        if ((number == 0)); then
-            [[ -n "$current_card_index" ]] || { wrap_line 'No current output is exposed; select a numbered device.'; continue; }
-            selected="$current_card_index"
-        else selected="$((number-1))"; fi
+        choose_index 'Audio outputs | Playback device' "${labels[@]}" || exit 0
+        selected="$number"
         break
     done
     ;;
@@ -159,22 +138,23 @@ case "$selected" in
             labels+=("$label")
         done
         echo; wrap_line "Listening profiles${filter_path:+ / $filter_path}"; echo
-        [[ -n "$filter_path" ]] && printf '[0] Back\n'
-        [[ -z "$filter_path" ]] && printf '[0] No filter (bypass CamillaDSP)\n'
-        for i in "${!labels[@]}"; do print_menu_item "$((i+1))" "${labels[i]}"; done
-        [[ -z "$filter_path" ]] && print_menu_item "$((${#labels[@]}+1))" 'Create custom spatial filter'
+        printf '[0] Back\n'
+        [[ -z "$filter_path" ]] && print_menu_item 1 'No filter (bypass CamillaDSP)'
+        for i in "${!labels[@]}"; do print_menu_item "$((i + ([[ -z "$filter_path" ]] && echo 2 || echo 1)))" "${labels[i]}"; done
+        [[ -z "$filter_path" ]] && print_menu_item "$((${#labels[@]}+2))" 'Create custom spatial filter'
         ((${#labels[@]})) || { [[ -n "$filter_path" ]] || { wrap_line 'No filter folders or YAML files found.' >&2; exit 1; }; }
         while :; do
             read -r -p 'Select: ' answer || exit 0
             [[ "$answer" =~ ^[0-9]+$ ]] || { wrap_line 'Enter a listed number.'; continue; }
             number=$((10#$answer))
-            if ((number==0)) && [[ -z "$filter_path" ]]; then selected_filter='__no_filter__'; selected_label='No filter (bypass CamillaDSP)'; break 2; fi
+            if ((number==0)) && [[ -z "$filter_path" ]]; then exit 0; fi
+            if ((number==1)) && [[ -z "$filter_path" ]]; then selected_filter='__no_filter__'; selected_label='No filter (bypass CamillaDSP)'; break 2; fi
             if ((number==0)) && [[ -n "$filter_path" ]]; then
                 filter_path="$(jq -r '.parent // empty' <<<"$directory")"; continue 2
             fi
-            if [[ -z "$filter_path" ]] && ((number==${#labels[@]}+1)); then flock -u 9; python3 "$TOPOLOGY_SCRIPT" --create-custom-filter; exit $?; fi
-            ((number>=1 && number<=${#labels[@]})) || { wrap_line 'Enter a listed number.'; continue; }
-            index=$((number-1)); break
+            if [[ -z "$filter_path" ]] && ((number==${#labels[@]}+2)); then flock -u 9; python3 "$TOPOLOGY_SCRIPT" --create-custom-filter; exit $?; fi
+            ((number>=[[ -z "$filter_path" ]] && echo 2 || echo 1 && number<=${#labels[@]}+([[ -z "$filter_path" ]] && echo 1 || echo 0))) || { wrap_line 'Enter a listed number.'; continue; }
+            index=$((number-([[ -z "$filter_path" ]] && echo 2 || echo 1))); break
         done
         if [[ "${types[index]}" == directory ]]; then filter_path="${ids[index]}"; continue; fi
         selected_filter="${ids[index]}"; selected_label="${labels[index]}"; break
@@ -211,16 +191,13 @@ last_profile="$(jq -r '.stageSelection.profile // empty' <<<"$TOPOLOGY_JSON")"
 printf '%s\n' "${profiles[@]}" | grep -Fqx -- "$last_profile" || last_profile="$active"
 printf '%s\n' "${profiles[@]}" | grep -Fqx -- "$last_profile" || last_profile=''
 last_profile_label="$(jq -r --arg n "$card" --arg p "$last_profile" '.cards[]|select(.name==$n)|.profiles[]|select((.index|tostring)==$p)|.label' <<<"$TOPOLOGY_JSON")"
-labels=("Last profile${last_profile_label:+ ($last_profile_label)}")
+labels=()
 for profile in "${profiles[@]}"; do
     labels+=("$(jq -r --arg n "$card" --arg p "$profile" '.cards[]|select(.name==$n) as $card|$card.profiles[]|select((.index|tostring)==$p)|(if ($card.internal==true or .available=="no" or .available=="false" or ((.name|ascii_downcase)=="off") or (.label|test("^\\[(INT|MON|LOOP|VIRT|N/A)\\]"))) then "[N/A] " else "" end) + (.label|sub("^\\[(N/A|INT|MON|LOOP|VIRT)\\] ";""))' <<<"$TOPOLOGY_JSON")")
 done
 while :; do
     choose_index "Card: $card_label | Playback profile" "${labels[@]}" || exit 0
-    if ((number==0)); then
-        [[ -n "$last_profile" ]] || { wrap_line 'The last known profile is unavailable. Select again.'; continue; }
-        profile="$last_profile"
-    else profile="${profiles[number-1]}"; fi
+    profile="${profiles[number]}"
     profile_selectable="$(jq -r --arg n "$card" --arg p "$profile" '.cards[]|select(.name==$n) as $card|$card.profiles[]|select((.index|tostring)==$p)|($card.internal!=true and .available!="no" and .available!="false" and ((.name|ascii_downcase)!="off") and ((.label|test("^\\[(INT|MON|LOOP|VIRT|N/A)\\]"))|not))' <<<"$TOPOLOGY_JSON")"
     [[ "$profile_selectable" == true ]] && break
     wrap_line 'That playback profile cannot be used. Select again.'
@@ -234,7 +211,7 @@ last_route="$(jq -r '.stageSelection.port // empty' <<<"$TOPOLOGY_JSON")"
 printf '%s\n' "${routes[@]}" | grep -Fqx -- "$last_route" || last_route="$(jq -r --arg n "$card" '.cards[]|select(.name==$n)|.activeRoutes[0] // empty' <<<"$TOPOLOGY_JSON")"
 printf '%s\n' "${routes[@]}" | grep -Fqx -- "$last_route" || last_route=''
 last_route_label="$(jq -r --arg n "$card" --arg r "$last_route" '.cards[]|select(.name==$n)|.routes[]|select((.index|tostring)==$r)|.label' <<<"$TOPOLOGY_JSON")"
-labels=("Last route${last_route_label:+ ($last_route_label)}")
+labels=()
 if ((${#routes[@]})); then
     for r in "${routes[@]}"; do
         labels+=("$(jq -r --arg n "$card" --arg p "$profile" --arg r "$r" '.cards[]|select(.name==$n)|.routes[]|select((.index|tostring)==$r)|(if (.available=="no" or .available=="false" or ((.name|ascii_downcase)=="off") or ((.profiles|length)>0 and ([.profiles[]|tostring]|index($p))==null)) then "[N/A] " else "" end) + (.label|sub("^\\[(N/A|INT|MON|LOOP|VIRT)\\] ";""))' <<<"$TOPOLOGY_JSON")")
@@ -245,13 +222,8 @@ fi
 if ((${#routes[@]})); then
 while :; do
     choose_index 'Output route' "${labels[@]}" || exit 0
-    if ((number==0)); then
-        [[ -n "$last_route" ]] || { wrap_line 'The last known route is unavailable. Select again.'; continue; }
-        candidate="$last_route"
-    else
-        ((number-1 < ${#routes[@]})) || { wrap_line 'That output route is unavailable. Select again.'; continue; }
-        candidate="${routes[number-1]}"
-    fi
+    ((number < ${#routes[@]})) || { wrap_line 'That output route is unavailable. Select again.'; continue; }
+    candidate="${routes[number]}"
     usable="$(jq -r --arg n "$card" --arg p "$profile" --arg r "$candidate" '.cards[]|select(.name==$n)|.routes[]|select((.index|tostring)==$r)|(.available!="no" and .available!="false" and ((.name|ascii_downcase)!="off") and ((.profiles|length)==0 or ([.profiles[]|tostring]|index($p))!=null))' <<<"$TOPOLOGY_JSON")"
     [[ "$usable" == true ]] && { route="$candidate"; break; }
     wrap_line 'That output route is unavailable for this profile. Select again.'
@@ -271,7 +243,7 @@ if [[ -z "$last_sink" && "$(jq -r '.saved.card // empty' <<<"$TOPOLOGY_JSON")" =
     last_sink="$(jq -r '.saved.sink // empty' <<<"$TOPOLOGY_JSON")"
 fi
 last_sink_label="$(jq -r --arg n "$card" --arg s "$last_sink" '.cards[]|select(.name==$n)|.sinks[]|select(.name==$s)|.label' <<<"$TOPOLOGY_JSON")"
-labels=("Last sink${last_sink_label:+ ($last_sink_label)}")
+labels=()
 for x in "${sinks[@]}"; do
     labels+=("$(jq -r --arg n "$card" --arg s "$x" --arg r "$route" '
       .cards[]|select(.name==$n) as $card|.sinks[]|select(.name==$s) as $sink|
@@ -283,16 +255,8 @@ done
 ((${#sinks[@]})) || { wrap_line 'No playback sinks exposed by the selected profile.' >&2; exit 1; }
 while :; do
     choose_index 'Playback sink' "${labels[@]}" || exit 0
-    if ((number==0)); then
-        [[ -n "$last_sink" ]] || { wrap_line 'No last known sink is exposed. Select again.'; continue; }
-        candidate="$last_sink"
-        idx=''
-        for i in "${!sinks[@]}"; do [[ "${sinks[i]}" == "$candidate" ]] && idx="$((i+1))"; done
-        [[ -n "$idx" ]] || { wrap_line 'Last known sink is no longer exposed. Select again.'; continue; }
-    else
-        ((number-1 < ${#sinks[@]})) || { wrap_line 'Select an exposed sink.'; continue; }
-        idx="$number";candidate="${sinks[number-1]}"
-    fi
+    ((number < ${#sinks[@]})) || { wrap_line 'Select an exposed sink.'; continue; }
+    idx="$number";candidate="${sinks[number]}"
     [[ "${labels[idx]}" != '[N/A] '* ]] && { sink="$candidate"; break; }
     wrap_line 'That sink cannot be selected. Select again.'
 done

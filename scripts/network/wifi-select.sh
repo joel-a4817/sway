@@ -8,7 +8,7 @@ mapfile -t networks < <(
 echo "Available Wi-Fi Networks"
 echo
 
-echo "[0] Keep current connection"
+echo "[0] Back"
 
 count=${#networks[@]}
 rows=$(((count + 1) / 2))
@@ -31,7 +31,6 @@ echo
 read -rp "Select network: " choice
 
 if [[ "$choice" == "0" ]]; then
-    echo "Keeping current network."
     exit 0
 fi
 

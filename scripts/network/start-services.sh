@@ -2,56 +2,56 @@
 set -euo pipefail
 MINECRAFT="/home/joel/.config/sway/scripts/network/minecraft-server.py"
 IPAD="/home/joel/.config/sway/scripts/network/start-ipad-webremote.sh"
+VNC_UNIT="camilladsp-wayvnc.service"
+
 mapfile -t SERVERS < <("$MINECRAFT" list)
 
-printf '%s\n' 'Choose the services that should be running.'
-printf '%s\n' 'Enter comma-separated numbers. Empty input cancels.'
+printf '%s\n' 'Toggle services'
+printf '%s\n' 'Enter comma-separated numbers. [0] exits.'
+printf '  [0] Exit\n'
 if "$IPAD" --status >/dev/null 2>&1; then
-  printf '  0) iPad Web Remote [running]\n'
+  printf '  [1] iPad Web Remote [running]\n'
 else
-  printf '  0) iPad Web Remote\n'
+  printf '  [1] iPad Web Remote\n'
+fi
+if systemctl --user is-active --quiet "$VNC_UNIT"; then
+  printf '  [2] VNC [running]\n'
+else
+  printf '  [2] VNC\n'
 fi
 for i in "${!SERVERS[@]}"; do
   name="${SERVERS[$i]}"
+  number=$((i + 3))
   if systemctl is-active --quiet "minecraft-server-${name}.service"; then
-    printf '  %d) Minecraft: %s [running]\n' "$((i + 1))" "$name"
+    printf '  [%d] Minecraft: %s [running]\n' "$number" "$name"
   else
-    printf '  %d) Minecraft: %s\n' "$((i + 1))" "$name"
+    printf '  [%d] Minecraft: %s\n' "$number" "$name"
   fi
 done
-read -r -p 'Selection: ' INPUT
-[[ -n "${INPUT//[[:space:]]/}" ]] || exit 0
 
-WANT_IPAD=0
-WANTED=()
-IFS=',' read -ra TOKENS <<< "$INPUT"
-for token in "${TOKENS[@]}"; do
+read -r -p 'Selection: ' input
+[[ -n "${input//[[:space:]]/}" ]] || exit 0
+IFS=',' read -ra tokens <<< "$input"
+selected=()
+for token in "${tokens[@]}"; do
   token="${token//[[:space:]]/}"
   [[ "$token" =~ ^[0-9]+$ ]] || { printf 'Invalid selection: %s\n' "$token" >&2; exit 2; }
-  if (( token == 0 )); then
-    WANT_IPAD=1
-  elif (( token >= 1 && token <= ${#SERVERS[@]} )); then
-    WANTED+=("${SERVERS[$((token - 1))]}")
-  else
-    printf 'Selection out of range: %s\n' "$token" >&2; exit 2
-  fi
+  (( token == 0 )) && exit 0
+  (( token >= 1 && token <= ${#SERVERS[@]} + 2 )) || { printf 'Selection out of range: %s\n' "$token" >&2; exit 2; }
+  for seen in "${selected[@]:-}"; do [[ "$seen" == "$token" ]] && continue 2; done
+  selected+=("$token")
 done
 
-# Stop Minecraft servers omitted from the desired set.
-mapfile -t RUNNING < <(systemctl list-units --state=active --type=service --no-legend 'minecraft-server-*.service' | sed -n 's/^[[:space:]]*minecraft-server-\([^ ]*\)\.service.*/\1/p')
-for running in "${RUNNING[@]}"; do
-  keep=0
-  for wanted in "${WANTED[@]}"; do [[ "$running" == "$wanted" ]] && keep=1; done
-  (( keep )) || "$MINECRAFT" stop "$running"
+for token in "${selected[@]}"; do
+  case "$token" in
+    1) "$IPAD" toggle ;;
+    2)
+      if systemctl --user is-active --quiet "$VNC_UNIT"; then
+        systemctl --user stop "$VNC_UNIT"
+      else
+        systemctl --user start "$VNC_UNIT"
+      fi
+      ;;
+    *) "$MINECRAFT" toggle "${SERVERS[$((token - 3))]}" ;;
+  esac
 done
-
-# Start selected servers that are not already running. Multiple are allowed.
-for wanted in "${WANTED[@]}"; do
-  systemctl is-active --quiet "minecraft-server-${wanted}.service" || "$MINECRAFT" start "$wanted"
-done
-
-if (( WANT_IPAD )); then
-  "$IPAD" --status >/dev/null 2>&1 || "$IPAD" toggle
-else
-  "$IPAD" --status >/dev/null 2>&1 && "$IPAD" toggle || true
-fi

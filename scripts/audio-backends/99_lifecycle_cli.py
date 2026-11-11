@@ -274,6 +274,13 @@ def topology_cli():
         if len(sys.argv) in (3,4) and sys.argv[1]=='--set-mode':
             output=json.loads(sys.argv[3]) if len(sys.argv)==4 else None
             print(json.dumps(set_mode(sys.argv[2],output=output),ensure_ascii=False));return 0
+        if len(sys.argv)==2 and sys.argv[1]=='--both-delay-status':
+            print(json.dumps({'milliseconds':both_output_local_delay_ms()}));return
+        if len(sys.argv)==3 and sys.argv[1]=='--both-delay-set':
+            result=set_both_output_local_delay_ms(sys.argv[2])
+            if audio_mode() in ('ipad_both','laptop_both') and alive(rpid(LOCALMONPID)):
+                restore_selected_local_output()
+            print(json.dumps(result));return
         if len(sys.argv)==2 and sys.argv[1]=='--audio-toggle':
             print(json.dumps(toggle_audio_services()))
             return

@@ -872,7 +872,7 @@ def row(number,label):
     print(prefix+lines[0])
     for line in lines[1:]:print(' '*len(prefix)+line)
 def choose(title,choices):
-    print(f'\n{title}');row(0,'Exit without saving')
+    print(f'\n{title}');row(0,'Back')
     for number,label in enumerate(choices,1):row(number,label)
     while True:
         answer=input('Select:').strip()
@@ -882,7 +882,7 @@ def choose(title,choices):
 def ask(label,default=''):
     suffix=f' [{default}]' if default else ''
     while True:
-        value=input(f'{label}{suffix} (0 to exit): ').strip()
+        value=input(f'{label}{suffix} (0 to go back): ').strip()
         if value=='0':raise KeyboardInterrupt
         value=value or default
         if value and '\n' not in value and '\r' not in value:return value

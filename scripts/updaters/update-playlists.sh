@@ -59,7 +59,7 @@ fi
 echo
 echo "Playlist Update"
 echo
-echo '[0] Exit without updating'
+echo '[0] Back'
 for i in "${!folders[@]}"; do
     printf '[%d] %s\n' "$((i + 1))" "$(basename "${folders[$i]}")"
 done
@@ -69,7 +69,6 @@ echo
 read -r -p "Select playlist: " choice
 
 if [[ "$choice" == 0 ]]; then
-    echo "No playlists updated."
     pause_before_close
     exit 0
 fi
