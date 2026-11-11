@@ -1,4 +1,8 @@
 # Output devices are enumerated when Outputs is selected, not cached.
+pause_all_playback() {
+    command -v playerctl >/dev/null 2>&1 || return 0
+    playerctl --all-players pause >/dev/null 2>&1 || true
+}
 terminal_columns() {
     local columns
     columns="$(stty size </dev/tty 2>/dev/null | awk '{print $2}')"
@@ -53,6 +57,7 @@ print_menu_item() {
 choose_index() {
     local title="$1" answer i=0; shift
     ((${#@})) || { echo "No choices for $title" >&2; return 1; }
+    pause_all_playback
     echo; wrap_line "$(compact_menu_label "$title")"; echo
     for label in "$@"; do print_menu_item "$i" "$label"; i=$((i+1)); done
     while :; do
@@ -65,6 +70,7 @@ choose_index() {
                 '[N/A] '*|'[INT] '*|'[MON] '*|'[LOOP] '*|'[VIRT] '*)
                     wrap_line 'That item cannot be selected.'; continue ;;
             esac
+            pause_all_playback
             return 0
         fi
         wrap_line 'Enter a listed number.'

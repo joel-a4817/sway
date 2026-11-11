@@ -4,6 +4,16 @@ set -u
 SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
 SELF_PID=$$
 
+pause_all_playback() {
+    # Pause every MPRIS-capable player, including mpv instances exposing MPRIS.
+    # An individual player disappearing between enumeration and pause is benign.
+    command -v playerctl >/dev/null 2>&1 || return 0
+    playerctl --all-players pause >/dev/null 2>&1 || true
+}
+
+# Media Control is a paused configuration surface from the moment it opens.
+pause_all_playback
+
 is_previous_media_control() {
     local pid="$1" comm arg
     [[ "$pid" =~ ^[0-9]+$ && "$pid" != "$SELF_PID" && -r "/proc/$pid/cmdline" ]] || return 1

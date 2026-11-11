@@ -1,294 +1,244 @@
 #!/usr/bin/env python3
-"""Safe, terminal-independent Minecraft server lifecycle manager."""
+"""Safe multi-server Fabric lifecycle manager for NixOS/nix-minecraft."""
 from __future__ import annotations
-SERVICE = "minecraft-server-main.service"
-import argparse, datetime as dt, fcntl, json, os, shutil, signal, socket, subprocess, sys, tarfile, tempfile, time
+import argparse, datetime as dt, fcntl, json, os, re, shutil, signal, socket, subprocess, sys, tarfile, time
 from pathlib import Path
 from urllib import request, parse
 
-HOME = Path.home()
-ROOT = HOME / "minecraft-server"
-RUNTIME = HOME / ".local/state/minecraft-server/runtime"
-SNAPSHOT = ROOT / "snapshot"
-BACKUPS = ROOT / "backups"
-COORD = ROOT / "coordination"
-LOCK = COORD / "local.lock"
-NETWORK_STATE = Path("/run/user") / str(os.getuid()) / "minecraft-server-network.json"
-OWNER = COORD / "owner.json"
-PEERS = HOME / ".config/minecraft-server/peers"
-WEBREMOTE = HOME / "start-ipad-webremote.sh"
-PORT = 25565
-CRITICAL = False
-DETACHED = False
+HOME=Path.home(); ROOT=HOME/"minecraft-server"; RUNTIME_ROOT=HOME/".local/state/minecraft-server/runtime"
+BACKUPS=ROOT/"backups"; COORD=ROOT/"coordination"; LOCK=COORD/"local.lock"
+PEERS=HOME/".config/minecraft-server/peers"; NETWORK_STATE=Path("/run/user")/str(os.getuid())/"minecraft-server-network.json"
+CRITICAL=False
 
-def run(cmd, *, check=True, capture=False, timeout=None):
-    return subprocess.run(cmd, check=check, text=True,
-                          stdout=subprocess.PIPE if capture else None,
-                          stderr=subprocess.STDOUT if capture else None,
-                          timeout=timeout)
+def run(cmd,check=True,capture=False,timeout=None):
+    return subprocess.run(cmd,check=check,text=True,stdout=subprocess.PIPE if capture else None,stderr=subprocess.STDOUT if capture else None,timeout=timeout)
+def unit(name): return f"minecraft-server-{name}.service"
+def valid_name(name): return bool(re.fullmatch(r"[a-z0-9][a-z0-9-]*",name or ""))
+def parse_names(value):
+    if not value: return []
+    names=[]
+    for item in value.split(","):
+        name=item.strip()
+        if not valid_name(name): raise RuntimeError(f"Invalid server name: {name!r}")
+        if name not in names: names.append(name)
+    return names
+def active(name): return run(["systemctl","is-active","--quiet",unit(name)],check=False).returncode==0
 
-def active() -> bool:
-    return run(["systemctl", "is-active", "--quiet", SERVICE], check=False).returncode == 0
-
-def port_busy() -> bool:
-    with socket.socket() as s:
-        s.settimeout(.3)
-        return s.connect_ex(("127.0.0.1", PORT)) == 0
+def available_servers():
+    r=run(["systemctl","list-unit-files","--no-legend","--no-pager","minecraft-server-*.service"],check=False,capture=True)
+    names=[]
+    for line in r.stdout.splitlines():
+        first=line.split()[0] if line.split() else ""
+        m=re.fullmatch(r"minecraft-server-(.+)\.service",first)
+        if m and valid_name(m.group(1)): names.append(m.group(1))
+    return sorted(set(names))
+def running_servers(): return [x for x in available_servers() if active(x)]
+def select_server(requested,purpose="start"):
+    names=available_servers()
+    if requested:
+        if requested not in names: raise RuntimeError(f"Unknown server '{requested}'. Available: {', '.join(names) or 'none'}")
+        return requested
+    candidates=running_servers() if purpose=="stop" else names
+    if len(candidates)==1:return candidates[0]
+    if not candidates: raise RuntimeError("No Minecraft servers are declared in NixOS")
+    if not sys.stdin.isatty(): raise RuntimeError("Multiple servers exist; specify the server name")
+    print(f"Choose a server to {purpose}:")
+    for i,name in enumerate(candidates,1): print(f"  {i}) {name}{' (running)' if active(name) else ''}")
+    while True:
+        raw=input("Selection: ").strip()
+        if raw.isdigit() and 1<=int(raw)<=len(candidates): return candidates[int(raw)-1]
+        if raw in candidates:return raw
+        print("Invalid selection.")
 
 def peer_groups():
-    """Format: group-name address1 address2 ...; addresses may include user@host."""
     groups=[]
-    if not PEERS.exists(): return groups
-    for number, raw in enumerate(PEERS.read_text().splitlines(), 1):
-        line=raw.split("#",1)[0].strip()
-        if not line: continue
-        fields=line.split()
-        if len(fields) < 2:
-            raise RuntimeError(f"Invalid peers line {number}: expected GROUP ADDRESS [ADDRESS ...]")
-        groups.append((fields[0], fields[1:]))
-    names=[name for name,_ in groups]
-    if len(names) != len(set(names)):
-        raise RuntimeError("Duplicate peer group name in peers file")
+    if not PEERS.exists():return groups
+    for number,raw in enumerate(PEERS.read_text().splitlines(),1):
+        fields=raw.split("#",1)[0].split()
+        if not fields:continue
+        if len(fields)<2:raise RuntimeError(f"Invalid peers line {number}: expected GROUP ADDRESS [ADDRESS ...]")
+        groups.append((fields[0],fields[1:]))
+    names=[x[0] for x in groups]
+    if len(names)!=len(set(names)):raise RuntimeError("Duplicate peer group name")
     return groups
-
-def ssh_address(address, args, check=False):
-    return run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=4", address,
-                "/home/joel/.config/sway/scripts/network/minecraft-server.py", *args], check=check, capture=True, timeout=240)
-
-def query_group(name, addresses, args):
-    failures=[]
+def ssh(address,args):
+    return run(["ssh","-o","BatchMode=yes","-o","ConnectTimeout=4",address,"/home/joel/.config/sway/scripts/network/minecraft-server.py",*args],check=False,capture=True,timeout=300)
+def query_group(addresses,args):
     for address in addresses:
-        try:
-            result=ssh_address(address,args)
-        except (subprocess.TimeoutExpired, OSError) as exc:
-            failures.append(f"{address}: {exc}")
-            continue
-        # Exit 0=running, 3=stopped. Either proves this physical peer was reached.
-        if result.returncode in (0,3): return address,result
-        failures.append(f"{address}: {result.stdout.strip() or 'SSH failed'}")
-    return None, failures
+        try:r=ssh(address,args)
+        except (subprocess.TimeoutExpired,OSError):continue
+        if r.returncode in (0,3):return address,r
+    return None,None
+def remote_state():
+    found=[]; unreachable=[]
+    for label,addresses in peer_groups():
+        address,r=query_group(addresses,["status","--machine"])
+        if not address:unreachable.append(label);continue
+        text=r.stdout.strip()
+        if text.startswith("running"):
+            names=text.split()[1:]
+            found.append((label,address,names))
+    return found,unreachable
 
 def syncthing_config():
     import xml.etree.ElementTree as ET
-    cfg = HOME / ".local/state/syncthing/config.xml"
-    if not cfg.exists(): return None
-    root = ET.parse(cfg).getroot()
-    key = root.findtext("gui/apikey")
+    cfg=HOME/".local/state/syncthing/config.xml"
+    if not cfg.exists():return None
+    root=ET.parse(cfg).getroot(); key=root.findtext("gui/apikey")
     for folder in root.findall("folder"):
-        try: path = Path(os.path.expandvars(os.path.expanduser(folder.get("path", "")))).resolve()
-        except OSError: continue
-        if path == ROOT.resolve():
-            return key, folder.get("id")
+        try:path=Path(os.path.expandvars(os.path.expanduser(folder.get("path","")))).resolve()
+        except OSError:continue
+        if path==ROOT.resolve():return key,folder.get("id")
     return None
-
 def syncthing_wait(timeout=300):
-    item = syncthing_config()
-    if not item:
-        raise RuntimeError("Configure ~/minecraft-server as its own Syncthing folder before starting")
-    key, folder = item
-    headers = {"X-API-Key": key}
-    request.urlopen(request.Request("http://127.0.0.1:8384/rest/db/scan?" + parse.urlencode({"folder":folder}), method="POST", headers=headers), timeout=10).read()
-    end = time.time() + timeout
-    while time.time() < end:
-        data = json.load(request.urlopen(request.Request(
-            "http://127.0.0.1:8384/rest/db/status?" + parse.urlencode({"folder": folder}),
-            headers=headers,
-        ), timeout=10))
-        if (data.get("state") == "idle"
-                and int(data.get("needTotalItems", 0)) == 0
-                and int(data.get("needBytes", 0)) == 0
-                and int(data.get("pullErrors", 0)) == 0):
-            return
+    item=syncthing_config()
+    if not item:raise RuntimeError("Configure ~/minecraft-server as its own Syncthing folder")
+    key,folder=item; headers={"X-API-Key":key}
+    request.urlopen(request.Request("http://127.0.0.1:8384/rest/db/scan?"+parse.urlencode({"folder":folder}),method="POST",headers=headers),timeout=10).read()
+    end=time.time()+timeout
+    while time.time()<end:
+        data=json.load(request.urlopen(request.Request("http://127.0.0.1:8384/rest/db/status?"+parse.urlencode({"folder":folder}),headers=headers),timeout=10))
+        if data.get("state")=="idle" and int(data.get("needTotalItems",0))==0 and int(data.get("needBytes",0))==0 and int(data.get("pullErrors",0))==0:return
         time.sleep(2)
     raise RuntimeError("Syncthing folder did not become idle and fully local within 5 minutes")
-
-def atomic_mirror(src: Path, dst: Path):
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    temp = dst.with_name(dst.name + ".incoming")
-    shutil.rmtree(temp, ignore_errors=True); temp.mkdir()
-    if src.exists(): run(["rsync", "-a", "--delete", f"{src}/", f"{temp}/"])
-    old = dst.with_name(dst.name + ".old")
-    shutil.rmtree(old, ignore_errors=True)
-    if dst.exists(): dst.rename(old)
-    temp.rename(dst); shutil.rmtree(old, ignore_errors=True)
-
-def backup():
-    BACKUPS.mkdir(parents=True, exist_ok=True)
-    name = dt.datetime.now().strftime("minecraft-%Y%m%d-%H%M%S.tar.gz")
-    with tarfile.open(BACKUPS / name, "w:gz") as t: t.add(RUNTIME, arcname="runtime")
-    items = sorted(BACKUPS.glob("minecraft-*.tar.gz"), key=lambda p:p.stat().st_mtime, reverse=True)
-    for old in items[10:]: old.unlink()
-
-def write_owner():
-    COORD.mkdir(parents=True, exist_ok=True)
-    temp = OWNER.with_suffix(".tmp")
-    temp.write_text(json.dumps({
-        "host": socket.gethostname(),
-        "pid": os.getpid(),
-        "started": dt.datetime.now(dt.timezone.utc).isoformat(),
-    }, indent=2) + "\n")
-    os.replace(temp, OWNER)
-
-def ensure_dependencies():
-    if run(["systemctl", "cat", SERVICE], check=False, capture=True).returncode != 0:
-        raise RuntimeError(f"{SERVICE} is not installed; rebuild the NixOS configuration first")
-    # NetworkManager must be active. Tailscale is intentionally neither started nor stopped here.
-    if run(["systemctl", "is-active", "--quiet", "NetworkManager.service"], check=False).returncode != 0:
-        raise RuntimeError("NetworkManager.service is not active")
-    # Syncthing may be a user or system service. Start the known unit if present.
-    user = run(["systemctl", "--user", "status", "syncthing.service"], check=False, capture=True)
-    if user.returncode in (0, 3):
-        run(["systemctl", "--user", "start", "syncthing.service"])
-    else:
-        system = run(["systemctl", "status", "syncthing.service"], check=False, capture=True)
-        if system.returncode in (0, 3):
-            run(["sudo", "systemctl", "start", "syncthing.service"])
-    # Require the API used for safe snapshot coordination.
+def ensure_dependencies(name=None):
+    if name and run(["systemctl","cat",unit(name)],check=False,capture=True).returncode!=0:raise RuntimeError(f"{unit(name)} is not installed; rebuild NixOS")
+    if run(["systemctl","is-active","--quiet","NetworkManager.service"],check=False).returncode!=0:raise RuntimeError("NetworkManager is not active")
+    run(["systemctl","--user","start","syncthing.service"],check=False)
     for _ in range(30):
-        try:
-            request.urlopen("http://127.0.0.1:8384/rest/noauth/health", timeout=2).read()
-            return
-        except Exception:
-            time.sleep(1)
-    raise RuntimeError("Syncthing API did not become available on 127.0.0.1:8384")
-
-def remote_running():
-    found=[]; unreachable=[]
-    for name, addresses in peer_groups():
-        address,result=query_group(name,addresses,["status","--machine"])
-        if address is None:
-            unreachable.append(name)
-        elif result.returncode == 0 and result.stdout.strip()=="running":
-            found.append((name,address))
-    return found,unreachable
-
+        try:request.urlopen("http://127.0.0.1:8384/rest/noauth/health",timeout=2).read();return
+        except Exception:time.sleep(1)
+    raise RuntimeError("Syncthing API did not become available")
 def network_prepare():
-    """Use Ethernet only when physical carrier, NetworkManager connectivity and IPv4 are present."""
-    state={"ethernet_device": None}
-    r=run(["nmcli","-t","-f","DEVICE,TYPE,STATE","device","status"],check=False,capture=True)
-    rows=[line.split(":",2) for line in r.stdout.splitlines() if line]
-    devices=[x[0] for x in rows if len(x)==3 and x[1]=="ethernet"]
     usable=[]
-    for dev in devices:
-        carrier=Path(f"/sys/class/net/{dev}/carrier")
-        try: linked=carrier.read_text().strip()=="1"
-        except OSError: linked=False
-        if not linked:
-            continue
+    r=run(["nmcli","-t","-f","DEVICE,TYPE","device","status"],check=False,capture=True)
+    for line in r.stdout.splitlines():
+        fields=line.split(":",1)
+        if len(fields)!=2 or fields[1]!="ethernet":continue
+        dev=fields[0]
+        try:linked=(Path(f"/sys/class/net/{dev}/carrier").read_text().strip()=="1")
+        except OSError:linked=False
+        if not linked:continue
         print(f"Ethernet carrier detected on {dev}; requesting a connection...")
         run(["nmcli","device","connect",dev],check=False,capture=True,timeout=30)
         for _ in range(30):
-            state_q=run(["nmcli","-g","GENERAL.STATE","device","show",dev],check=False,capture=True)
-            ip_q=run(["nmcli","-g","IP4.ADDRESS","device","show",dev],check=False,capture=True)
-            if state_q.stdout.startswith("100") and ip_q.stdout.strip():
-                usable.append(dev)
-                break
+            st=run(["nmcli","-g","GENERAL.STATE","device","show",dev],check=False,capture=True).stdout
+            ip=run(["nmcli","-g","IP4.ADDRESS","device","show",dev],check=False,capture=True).stdout
+            if st.startswith("100") and ip.strip():usable.append(dev);break
             time.sleep(1)
-    if usable:
-        dev=usable[0]
-        state["ethernet_device"]=dev
-        print(f"Using connected Ethernet with IPv4: {dev}")
-    else:
-        print("No Ethernet interface has both physical link and IPv4; keeping the existing connection.")
-    NETWORK_STATE.parent.mkdir(parents=True,exist_ok=True)
-    NETWORK_STATE.write_text(json.dumps(state)+"\n")
-
+    print(f"Using connected Ethernet with IPv4: {usable[0]}" if usable else "No usable Ethernet; keeping the existing connection.")
+    NETWORK_STATE.parent.mkdir(parents=True,exist_ok=True); NETWORK_STATE.write_text(json.dumps({"ethernet_device":usable[0] if usable else None})+"\n")
 def network_restore():
-    state={}
-    try: state=json.loads(NETWORK_STATE.read_text())
-    except (FileNotFoundError, json.JSONDecodeError): pass
-    try: NETWORK_STATE.unlink()
-    except FileNotFoundError: pass
+    try:NETWORK_STATE.unlink()
+    except FileNotFoundError:pass
+def atomic_mirror(src,dst):
+    dst.parent.mkdir(parents=True,exist_ok=True); temp=dst.with_name(dst.name+".incoming"); old=dst.with_name(dst.name+".old")
+    shutil.rmtree(temp,ignore_errors=True);temp.mkdir()
+    if src.exists():run(["rsync","-a","--delete",f"{src}/",f"{temp}/"])
+    shutil.rmtree(old,ignore_errors=True)
+    if dst.exists():dst.rename(old)
+    temp.rename(dst);shutil.rmtree(old,ignore_errors=True)
+def server_paths(name):return RUNTIME_ROOT/name,ROOT/"servers"/name/"snapshot",BACKUPS/name,COORD/f"{name}.owner.json"
+def backup(name,runtime):
+    folder=BACKUPS/name;folder.mkdir(parents=True,exist_ok=True); path=folder/dt.datetime.now().strftime(f"{name}-%Y%m%d-%H%M%S.tar.gz")
+    with tarfile.open(path,"w:gz") as t:t.add(runtime,arcname=name)
+    for old in sorted(folder.glob(f"{name}-*.tar.gz"),key=lambda p:p.stat().st_mtime,reverse=True)[10:]:old.unlink()
+def port_for(name):
+    prop=RUNTIME_ROOT/name/"server.properties"
+    if prop.exists():
+        for line in prop.read_text(errors="replace").splitlines():
+            if line.startswith("server-port="):
+                try:return int(line.split("=",1)[1])
+                except ValueError:pass
+    return 25565
+def port_busy(port):
+    with socket.socket() as s:s.settimeout(.3);return s.connect_ex(("127.0.0.1",port))==0
 
-def start(force=False):
+def start(name=None,force=False):
     global CRITICAL
-    if active(): print("Minecraft server is already running locally."); return
-    ensure_dependencies()
-    found, unreachable = remote_running()
-    if len(found)>1: raise RuntimeError("Split brain detected: running on " + ", ".join(name for name,_ in found))
-    if unreachable and not force: raise RuntimeError("Cannot verify peer(s): " + ", ".join(unreachable) + ". Use takeover only after checking them.")
-    if found:
-        name,address=found[0]
-        print(f"Stopping remote Minecraft server on {name} through {address}...")
-        r=ssh_address(address,["stop","--remote"])
-        if r.returncode: raise RuntimeError(r.stdout.strip() or "remote stop failed")
-    print("Waiting for the synced snapshot..."); syncthing_wait()
-    network_prepare()
-    if port_busy(): raise RuntimeError(f"TCP {PORT} is already occupied locally")
-    CRITICAL=True
-    atomic_mirror(SNAPSHOT,RUNTIME)
-    write_owner()
+    name=select_server(name,"start");ensure_dependencies(name)
+    if active(name):print(f"{name} is already running locally.");return
+    found,unreachable=remote_state()
+    if unreachable and not force:raise RuntimeError("Cannot verify peer(s): "+", ".join(unreachable))
+    for label,address,names in found:
+        if name in names:
+            print(f"Stopping remote server {name} on {label} through {address}...")
+            r=ssh(address,["stop",name,"--remote"])
+            if r.returncode:raise RuntimeError(r.stdout.strip() or "remote stop failed")
+    print("Waiting for the synced snapshot...");syncthing_wait();network_prepare()
+    runtime,snapshot,_,owner=server_paths(name); CRITICAL=True;atomic_mirror(snapshot,runtime)
+    owner.parent.mkdir(parents=True,exist_ok=True);owner.write_text(json.dumps({"server":name,"host":socket.gethostname(),"started":dt.datetime.now(dt.timezone.utc).isoformat()})+"\n")
     try:
-        run(["sudo","systemctl","start",SERVICE])
-        for _ in range(120):
-            if active() and port_busy():
-                CRITICAL=False
-                print(f"Minecraft server started on {socket.gethostname()}:{PORT}")
-                return
+        result=run(["sudo","systemctl","start",unit(name)],check=False,capture=True)
+        if result.returncode:
+            log=run(["journalctl","-u",unit(name),"-n","80","--no-pager"],check=False,capture=True).stdout.strip()
+            raise RuntimeError((result.stdout.strip()+"\n"+log).strip())
+        for _ in range(180):
+            if active(name) and port_busy(port_for(name)):CRITICAL=False;print(f"Minecraft server '{name}' started on port {port_for(name)}");return
             time.sleep(1)
-        run(["sudo", "systemctl", "stop", SERVICE], check=False)
-        raise RuntimeError("Minecraft service did not become ready")
+        run(["sudo","systemctl","stop",unit(name)],check=False);raise RuntimeError(f"{name} did not become ready")
     except Exception:
-        try: OWNER.unlink()
-        except FileNotFoundError: pass
-        network_restore()
-        CRITICAL=False
-        raise
-
-def stop(remote=False):
+        try:owner.unlink()
+        except FileNotFoundError:pass
+        network_restore();CRITICAL=False;raise
+def stop(name=None,remote=False):
     global CRITICAL
-    if not active():
-        print("Minecraft server is already stopped locally.")
-        return
-    ensure_dependencies()
-    CRITICAL=True
-    print("Stopping Minecraft cleanly...")
-    run(["sudo","systemctl","stop",SERVICE])
+    name=select_server(name,"stop")
+    if not active(name):print(f"{name} is already stopped locally.");return
+    ensure_dependencies(name);runtime,snapshot,_,owner=server_paths(name);CRITICAL=True
+    print(f"Stopping '{name}' cleanly...");run(["sudo","systemctl","stop",unit(name)])
     end=time.time()+180
-    while active() and time.time()<end: time.sleep(1)
-    if active(): raise RuntimeError("Minecraft did not stop within 180 seconds")
-    backup(); atomic_mirror(RUNTIME,SNAPSHOT)
-    network_restore()
-    try: OWNER.unlink()
-    except FileNotFoundError: pass
-    print("Publishing stopped snapshot through Syncthing..."); syncthing_wait()
-    CRITICAL=False
-    print("Minecraft server stopped, backed up, and published.")
-
+    while active(name) and time.time()<end:time.sleep(1)
+    if active(name):raise RuntimeError(f"{name} did not stop within 180 seconds")
+    backup(name,runtime);atomic_mirror(runtime,snapshot);network_restore()
+    try:owner.unlink()
+    except FileNotFoundError:pass
+    print("Publishing stopped snapshot through Syncthing...");syncthing_wait();CRITICAL=False;print(f"'{name}' stopped, backed up, and published.")
 def status(machine=False):
-    state="running" if active() else "stopped"
-    if machine: print(state); return 0 if state=="running" else 3
-    print(f"Minecraft: {state}; port {PORT}: {'listening' if port_busy() else 'closed'}")
-    found, unreachable=remote_running()
-    if found: print("Remote active host(s): " + ", ".join(f"{name} via {address}" for name,address in found))
-    if unreachable: print("Unreachable peer(s): " + ", ".join(unreachable))
-    return 0 if state=="running" else 3
-
-def on_signal(sig, frame):
-    global DETACHED
-    if CRITICAL:
-        print("\nCritical save/transfer is protected and will continue; Ctrl+C is ignored in this phase.", file=sys.stderr)
-        DETACHED=True
-        return
+    running=running_servers()
+    if machine:
+        print("running "+" ".join(running) if running else "stopped");return 0 if running else 3
+    names=available_servers();print("Available servers: "+(", ".join(names) or "none"));print("Running locally: "+(", ".join(running) or "none"))
+    found,unreachable=remote_state()
+    for label,address,servers in found:print(f"Remote {label} via {address}: {', '.join(servers)}")
+    if unreachable:print("Unreachable peers: "+", ".join(unreachable))
+    return 0 if running else 3
+def on_signal(sig,frame):
+    if CRITICAL:print("\nCritical save/transfer continues; interrupt ignored.",file=sys.stderr);return
     raise KeyboardInterrupt
-
 def main():
-    for d in (ROOT,RUNTIME,SNAPSHOT,BACKUPS,COORD): d.mkdir(parents=True,exist_ok=True)
-    p=argparse.ArgumentParser(); p.add_argument("action",nargs="?",default="toggle",choices=["toggle","start","stop","status","logs","takeover"]); p.add_argument("--machine",action="store_true"); p.add_argument("--remote",action="store_true")
-    a=p.parse_args()
-    signal.signal(signal.SIGINT,on_signal); signal.signal(signal.SIGTERM,on_signal); signal.signal(signal.SIGHUP,on_signal)
+    for d in (ROOT,RUNTIME_ROOT,BACKUPS,COORD):d.mkdir(parents=True,exist_ok=True)
+    p=argparse.ArgumentParser();p.add_argument("action",nargs="?",default="toggle",choices=["toggle","start","stop","status","logs","takeover","list"]);p.add_argument("server",nargs="?");p.add_argument("--machine",action="store_true");p.add_argument("--remote",action="store_true");a=p.parse_args()
+    for sig in (signal.SIGINT,signal.SIGTERM,signal.SIGHUP):signal.signal(sig,on_signal)
     with LOCK.open("w") as lock:
-        try: fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        except BlockingIOError: raise RuntimeError("Another Minecraft transition is already in progress")
-        if a.action=="status": return status(a.machine)
-        if a.action=="logs": return run(["journalctl","-u",SERVICE,"-f"],check=False).returncode
-        if a.action=="toggle": stop() if active() else start()
-        elif a.action=="start": start()
-        elif a.action=="takeover": start(force=True)
-        elif a.action=="stop": stop(a.remote)
+        try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError:raise RuntimeError("Another Minecraft transition is in progress")
+        if a.action=="list":print("\n".join(available_servers()));return 0
+        if a.action=="status":return status(a.machine)
+        if a.action=="logs":
+            name=select_server(a.server,"view logs for");return run(["journalctl","-u",unit(name),"-f"],check=False).returncode
+        requested=parse_names(a.server)
+        if a.action in ("start","takeover"):
+            if not requested: requested=[select_server(None,"start")]
+            available=set(available_servers())
+            unknown=[x for x in requested if x not in available]
+            if unknown: raise RuntimeError("Unknown server(s): "+", ".join(unknown))
+            for name in requested: start(name,a.action=="takeover")
+        elif a.action=="stop":
+            if not requested: requested=running_servers()
+            for name in requested:
+                if active(name): stop(name,a.remote)
+        elif a.action=="toggle":
+            if requested:
+                for name in requested:
+                    stop(name) if active(name) else start(name)
+            else:
+                running=running_servers()
+                if running:
+                    for name in running: stop(name)
+                else:start(select_server(None,"start"))
     return 0
-
 if __name__=="__main__":
-    try: raise SystemExit(main())
-    except KeyboardInterrupt: print("Cancelled safely.",file=sys.stderr); raise SystemExit(130)
-    except Exception as e: print(f"minecraft-server: {e}",file=sys.stderr); raise SystemExit(1)
+    try:raise SystemExit(main())
+    except KeyboardInterrupt:print("Cancelled safely.",file=sys.stderr);raise SystemExit(130)
+    except Exception as e:print(f"minecraft-server: {e}",file=sys.stderr);raise SystemExit(1)
