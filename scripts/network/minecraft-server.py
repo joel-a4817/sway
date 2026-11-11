@@ -219,6 +219,7 @@ def start(name=None,force=False):
     runtime,snapshot,_,owner=server_paths(name); CRITICAL=True;atomic_mirror(snapshot,runtime)
     owner.parent.mkdir(parents=True,exist_ok=True);owner.write_text(json.dumps({"server":name,"host":socket.gethostname(),"started":dt.datetime.now(dt.timezone.utc).isoformat()})+"\n")
     try:
+        run(["sudo","systemctl","reset-failed",unit(name)],check=False,capture=True)
         result=run(["sudo","systemctl","start",unit(name)],check=False,capture=True)
         if result.returncode:
             log=run(["journalctl","-u",unit(name),"-n","80","--no-pager"],check=False,capture=True).stdout.strip()
