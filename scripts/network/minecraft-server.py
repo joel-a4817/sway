@@ -303,15 +303,36 @@ def unit_failure(name):
         return f"{unit(name)} failed ({active_state}/{sub_state}, result={result})\n{log}".strip()
     return None
 
+def local_node_name():
+    # Resolve this machine's identity from Tailscale, not a hardcoded hostname.
+    try:
+        data=json.loads(run(["tailscale","status","--json"],capture=True,timeout=10).stdout or "{}")
+        dns=((data.get("Self") or {}).get("DNSName") or "").rstrip(".")
+        if dns:return dns.split(".",1)[0]
+    except Exception:pass
+    return socket.gethostname().split(".",1)[0]
+
 def start(name=None,force=False):
     global CRITICAL
     name=select_server(name,"start");ensure_dependencies(name)
     if active(name):print(f"{name} is already running locally.");return
+    # Give a concurrently initiated peer enough time to acquire its own lock.
+    # Both sides then observe "transitioning" and use the same deterministic
+    # MagicDNS-name election, so exactly one side can continue.
+    time.sleep(1.0)
     found,unreachable=remote_state()
     if unreachable and not force:raise RuntimeError("Cannot verify peer(s): "+", ".join(unreachable))
     transitioning=[label for label,address,names in found if "transitioning" in names]
     if transitioning:
-        raise RuntimeError("Peer transition already in progress on: "+", ".join(transitioning)+". Retry after it finishes.")
+        local=local_node_name()
+        winner=min([local]+transitioning)
+        if local!=winner:
+            raise RuntimeError(f"Concurrent Minecraft request won by {winner}; this request on {local} was cancelled safely")
+        print(f"Concurrent request detected; {local} won deterministic handover arbitration.")
+        # A transitioning peer has not established an authoritative running
+        # state yet. It will observe losing the same election and release its
+        # local lock without touching services or the floating address.
+        found=[item for item in found if "transitioning" not in item[2]]
     for label,address,names in found:
         remote_servers=[item for item in names if not item.startswith("floating=")]
         owns_floating=any(item==f"floating={FLOATING_IP}" for item in names)
