@@ -8,7 +8,10 @@ PEERS="$HOME/.config/minecraft-server/peers"
 
 mapfile -t SERVERS < <("$MINECRAFT" list)
 THIS_DEVICE="$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName // empty' | sed 's/\.$//; s/\..*$//' || true)"
-[[ -n "$THIS_DEVICE" ]] || THIS_DEVICE="$(hostname -s)"
+if [[ -z "$THIS_DEVICE" ]]; then
+    printf '%s\n' 'Cannot determine this device Tailscale MagicDNS identity.' >&2
+    exit 1
+fi
 declare -A LOCAL=()
 declare -A REMOTE=()
 peer_error=""
@@ -28,9 +31,17 @@ if [[ -s "$PEERS" ]]; then
         label="${fields[0]//[|,;]/}"
         verified=0
         errors=()
-        for address in "${fields[@]:1}"; do
-            address="${address//[|,;]/}"
-            [[ -n "$address" ]] || continue
+        peer_dns="$(tailscale status --json 2>/dev/null | jq -r --arg label "$label" '
+          [.Peer[] | (.DNSName // "") | rtrimstr(".") | select(split(".")[0] == $label)][0] // empty')"
+        if [[ -z "$peer_dns" ]]; then
+            errors+=("$label: not present in live Tailscale MagicDNS peer map")
+        fi
+        for configured in "${fields[@]:1}"; do
+            configured="${configured//[|,;]/}"
+            [[ -n "$configured" && -n "$peer_dns" ]] || continue
+            user="${configured%@*}"
+            [[ "$configured" == *"@"* ]] || user="${USER:-joel}"
+            address="$user@$peer_dns"
             if ! ssh -o BatchMode=yes -o ConnectTimeout=4 "$address" true >/dev/null 2>&1; then
                 errors+=("$address: SSH verification failed")
                 continue

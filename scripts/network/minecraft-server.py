@@ -65,6 +65,27 @@ def peer_groups():
     names=[x[0] for x in groups]
     if len(names)!=len(set(names)):raise RuntimeError("Duplicate peer group name")
     return groups
+def resolved_peer_groups():
+    """Resolve configured peer labels to live full MagicDNS names."""
+    groups=peer_groups()
+    try:data=json.loads(run(["tailscale","status","--json"],capture=True,timeout=10).stdout or "{}")
+    except Exception as error:raise RuntimeError(f"Cannot read Tailscale peer map: {error}")
+    peers={}
+    for peer in (data.get("Peer") or {}).values():
+        dns=(peer.get("DNSName") or "").rstrip(".")
+        if dns:peers[dns.split(".",1)[0]]=dns
+    resolved=[]
+    for label,addresses in groups:
+        dns=peers.get(label)
+        if not dns:raise RuntimeError(f"Peer {label!r} is not present in the live Tailscale MagicDNS peer map")
+        users=[]
+        for address in addresses:
+            user=address.rsplit("@",1)[0] if "@" in address else os.environ.get("USER","joel")
+            target=f"{user}@{dns}"
+            if target not in users:users.append(target)
+        resolved.append((label,users))
+    return resolved
+
 def ssh(address,args):
     return run(["ssh","-o","BatchMode=yes","-o","ConnectTimeout=4",address,"/home/joel/.config/sway/scripts/network/minecraft-server.py",*args],check=False,capture=True,timeout=300)
 def query_group(addresses,args):
@@ -93,7 +114,7 @@ def query_group(addresses,args):
     return None,None,"",failures
 def validate_peer_identities():
     local=local_node_name()
-    for label,addresses in peer_groups():
+    for label,addresses in resolved_peer_groups():
         verified=False;failures=[]
         for address in addresses:
             try:
@@ -120,7 +141,7 @@ def validate_peer_identities():
 
 def remote_state():
     found=[];unreachable=[]
-    for label,addresses in peer_groups():
+    for label,addresses in resolved_peer_groups():
         address,r,text,failures=query_group(addresses,["status","--machine"])
         if not address:
             detail="; ".join(failures) if failures else "no address attempted"
@@ -336,8 +357,9 @@ def local_node_name():
         data=json.loads(run(["tailscale","status","--json"],capture=True,timeout=10).stdout or "{}")
         dns=((data.get("Self") or {}).get("DNSName") or "").rstrip(".")
         if dns:return dns.split(".",1)[0]
-    except Exception:pass
-    return socket.gethostname().split(".",1)[0]
+    except Exception as error:
+        raise RuntimeError(f"Cannot determine this device's Tailscale MagicDNS identity: {error}")
+    raise RuntimeError("This device has no Tailscale MagicDNS identity")
 
 @contextlib.contextmanager
 def cluster_transition_lock(remote_action=False):
@@ -347,7 +369,7 @@ def cluster_transition_lock(remote_action=False):
         return
     validate_peer_identities()
     local=local_node_name()
-    groups=peer_groups()
+    groups=resolved_peer_groups()
     labels=[label for label,addresses in groups]
     coordinator=min([local]+labels)
     if coordinator==local:
@@ -426,19 +448,9 @@ def start(name=None,force=False):
             failure=unit_failure(name)
             if failure:raise RuntimeError(failure)
             if active(name) and port_busy(port):
-                # A listener can appear briefly and then die. Do not report a
-                # successful start until both systemd and TCP remain healthy.
-                stable_until=time.monotonic()+10
-                while time.monotonic()<stable_until:
-                    failure=unit_failure(name)
-                    if failure:raise RuntimeError(failure)
-                    if not active(name) or not port_busy(port):
-                        log=run(["journalctl","-u",unit(name),"-n","120","--no-pager"],check=False,capture=True).stdout.strip()
-                        raise RuntimeError(f"{name} stopped during startup stability check\n{log}".strip())
-                    time.sleep(1)
                 domain=ddns_update();public=public_ipv4()
                 CRITICAL=False
-                print(f"Minecraft server '{name}' started and remained stable on port {port}")
+                print(f"Minecraft server '{name}' started on port {port}")
                 print(f"Router target: {FLOATING_IP}:{port}")
                 if public:print(f"Public address: {public}:{port}")
                 else:print("Public address: unavailable",file=sys.stderr)
