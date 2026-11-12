@@ -53,42 +53,42 @@ MODES={
 MODE_POLICIES={
 'ipad_external': {
     'sendMute':False,'receiveMute':True,
-    'inputDevice':'CamillaDSP SonoBus','outputDevice':'SonoBus Silent Output',
+    'inputDevice':'CamillaDSP SonoBus Stereo','outputDevice':'SonoBus Silent Output',
     'description':'AirPlay through CamillaDSP to external SonoBus receivers',
 },
 'laptop_external': {
     'sendMute':False,'receiveMute':True,
-    'inputDevice':'CamillaDSP SonoBus','outputDevice':'SonoBus Silent Output',
+    'inputDevice':'CamillaDSP SonoBus Stereo','outputDevice':'SonoBus Silent Output',
     'description':'Laptop audio through CamillaDSP to external SonoBus receivers',
 },
 'ipad_ipad': {
     'sendMute':False,'receiveMute':True,
-    'inputDevice':'CamillaDSP SonoBus','outputDevice':'SonoBus Silent Output',
+    'inputDevice':'CamillaDSP SonoBus Stereo','outputDevice':'SonoBus Silent Output',
     'description':'iPad AirPlay through CamillaDSP and SonoBus back to the iPad only',
 },
 'ipad_laptop': {
     'sendMute':True,'receiveMute':True,
-    'inputDevice':'CamillaDSP SonoBus','outputDevice':'SonoBus Silent Output',
+    'inputDevice':'CamillaDSP SonoBus Stereo','outputDevice':'SonoBus Silent Output',
     'description':'AirPlay through CamillaDSP to laptop output only',
 },
 'ipad_both': {
     'sendMute':False,'receiveMute':True,
-    'inputDevice':'CamillaDSP SonoBus','outputDevice':'SonoBus Silent Output',
+    'inputDevice':'CamillaDSP SonoBus Stereo','outputDevice':'SonoBus Silent Output',
     'description':'AirPlay through CamillaDSP to iPad and the highest-priority physical laptop output',
 },
 'laptop_ipad': {
     'sendMute':False,'receiveMute':True,
-    'inputDevice':'CamillaDSP SonoBus','outputDevice':'SonoBus Silent Output',
+    'inputDevice':'CamillaDSP SonoBus Stereo','outputDevice':'SonoBus Silent Output',
     'description':'Laptop audio through CamillaDSP to iPad',
 },
 'laptop_laptop': {
     'sendMute':True,'receiveMute':True,
-    'inputDevice':'CamillaDSP SonoBus','outputDevice':'SonoBus Silent Output',
+    'inputDevice':'CamillaDSP SonoBus Stereo','outputDevice':'SonoBus Silent Output',
     'description':'Laptop audio through CamillaDSP to laptop output only',
 },
 'laptop_both': {
     'sendMute':False,'receiveMute':True,
-    'inputDevice':'CamillaDSP SonoBus','outputDevice':'SonoBus Silent Output',
+    'inputDevice':'CamillaDSP SonoBus Stereo','outputDevice':'SonoBus Silent Output',
     'description':'Laptop audio through CamillaDSP to iPad and the highest-priority physical laptop output',
 },
 }
@@ -100,7 +100,7 @@ def both_output_local_delay_ms():
     return max(-500.0,min(500.0,value))
 def set_both_output_local_delay_ms(value):
     value=float(value)
-    if not 0.0<=value<=500.0:raise ValueError('Both-output PC delay must be between 0 and 500 ms')
+    if not -500.0<=value<=500.0:raise ValueError('Both-output sync offset must be between -500 and 500 ms')
     atomic(BOTH_OUTPUT_DELAY,('{:.3f}'.format(value).rstrip('0').rstrip('.') or '0')+'\n')
     return {'milliseconds':value}
 
@@ -141,24 +141,26 @@ def configure_both_output_filterless():
         {'dest':1,'sources':[{'channel':1,'gain':0.0}]},
     ]}}
     data['filters']={};data['pipeline']=[{'type':'Mixer','name':'media_control_stereo_identity'}]
-    offset=both_output_local_delay_ms();matrix=both_output_matrix();delayed=None
-    if offset:
-        delayed='external' if offset<0 else 'pc';channel=0 if matrix['left']==delayed else 1
-        data['filters']['media_control_sync_delay']={'type':'Delay','parameters':{'delay':abs(offset),'unit':'ms','subsample':False}}
-        data['pipeline'].append({'type':'Filter','channels':[channel],'names':['media_control_sync_delay']})
+    offset=both_output_local_delay_ms();matrix=both_output_matrix()
+    delayed='external' if offset<0 else ('pc' if offset>0 else None)
     data['title']='Filterless / dedicated split distributor'
-    data['description']='Identity stereo processing; separate mono ALSA subdevices for SonoBus and PC playback'
+    data['description']='Identity stereo processing; signed branch delay is applied after channel separation by audio-split-distributor.py'
     atomic(path,yaml.safe_dump(data,sort_keys=False,allow_unicode=True,encoding=None))
     return {'path':str(path),'milliseconds':offset,'delayedBranch':delayed,'externalChannel':matrix['left'],'pcChannel':matrix['right']}
 
 def verify_both_output_sync():
     mode=audio_mode()
     if mode not in ('ipad_both','laptop_both'):return {'active':False,'reason':'not-both-output'}
-    offset=both_output_local_delay_ms();policy=effective_mode_policy(mode)
-    if offset<0:raise RuntimeError('Negative both-output offsets are unsupported; use 0 to 500 ms to delay the PC branch')
-    if policy.get('sendChannels')!=2 or policy.get('inputChannelsMask')!='11' or policy.get('inputDevice')!='CamillaDSP SonoBus':
-        raise RuntimeError('Both-output SonoBus policy is not full stereo')
-    return {'active':True,'mode':mode,'stereo':True,'externalDevice':'CamillaDSP SonoBus','pcDelayMilliseconds':offset,'externalDelayMilliseconds':0.0}
+    offset=both_output_local_delay_ms();policy=effective_mode_policy(mode);matrix=both_output_matrix()
+    if policy.get('sendChannels')!=1 or policy.get('inputChannelsMask')!='1' or policy.get('inputDevice')!='CamillaDSP SonoBus':
+        raise RuntimeError('Both-output SonoBus policy is not isolated to the dedicated external mono endpoint')
+    return {
+        'active':True,'mode':mode,'externalDevice':'CamillaDSP SonoBus',
+        'externalChannel':'left' if matrix['left']=='external' else 'right',
+        'pcChannel':'right' if matrix['left']=='external' else 'left',
+        'sendChannels':1,'syncOffsetMilliseconds':offset,
+        'delayedBranch':'external' if offset<0 else ('pc' if offset>0 else None),
+    }
 
 def both_output_matrix():
     default={'left':'external','right':'pc'}
@@ -181,7 +183,7 @@ def effective_mode_policy(name):
     if name not in ('ipad_both','laptop_both'):return policy
     matrix=both_output_matrix();external_is_left=matrix['left']=='external'
     policy['sendChannels']=1
-    policy['inputDevice']='CamillaDSP External Mono'
+    policy['inputDevice']='CamillaDSP SonoBus'
     policy['inputChannelsMask']='1'
     policy['externalChannel']='left' if external_is_left else 'right'
     policy['pcChannel']='right' if external_is_left else 'left'

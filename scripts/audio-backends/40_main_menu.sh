@@ -174,14 +174,9 @@ case "$selected" in
             run_quiet_action python3 "$TOPOLOGY_SCRIPT" --set-mode "$selected_mode" || exit $?
             exit 0 ;;
           ipad_both|laptop_both)
-            choose_index --back 'Both outputs | Mono channel destination' \
-              'Left mono -> external; Right mono -> PC' \
-              'Right mono -> external; Left mono -> PC'
-            status=$?
-            ((status==3)) && exit 0
-            ((status==2)) && continue
-            if ((number==0)); then matrix_left=external; matrix_right=pc
-            else matrix_left=pc; matrix_right=external; fi
+            # Both destinations receive the same full stereo programme. Splitting
+            # L/R across network and local branches produced incoherent playback.
+            matrix_left=''; matrix_right=''
             break ;;
           *) break ;;
         esac
