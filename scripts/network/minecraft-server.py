@@ -286,12 +286,25 @@ def start(name=None,force=False):
     found,unreachable=remote_state()
     if unreachable and not force:raise RuntimeError("Cannot verify peer(s): "+", ".join(unreachable))
     for label,address,names in found:
-        if any(item==f"floating={FLOATING_IP}" for item in names):
-            raise RuntimeError(f"Peer {label} already owns Minecraft service address {FLOATING_IP}")
-        if name in names:
-            print(f"Stopping remote server {name} on {label} through {address}...")
-            r=ssh(address,["stop",name,"--remote"])
-            if r.returncode:raise RuntimeError(r.stdout.strip() or "remote stop failed")
+        remote_servers=[item for item in names if not item.startswith("floating=")]
+        owns_floating=any(item==f"floating={FLOATING_IP}" for item in names)
+        # The floating address belongs to the Minecraft host, not to one server.
+        # A handover must stop every remote Minecraft service before moving it.
+        for remote_name in remote_servers:
+            print(f"Stopping remote server {remote_name} on {label} through {address}...")
+            r=ssh(address,["stop",remote_name,"--remote"])
+            if r.returncode:raise RuntimeError((r.stdout or "").strip() or "remote stop failed")
+        if owns_floating and not remote_servers:
+            print(f"Releasing stale Minecraft service address on {label} through {address}...")
+            r=ssh(address,["release-network","--remote"])
+            if r.returncode:raise RuntimeError((r.stdout or "").strip() or "remote network release failed")
+        if remote_servers or owns_floating:
+            deadline=time.time()+240
+            while time.time()<deadline:
+                check_address,check_result,check_text,_=query_group([address],["status","--machine"])
+                if check_address and check_text=="stopped":break
+                time.sleep(1)
+            else:raise RuntimeError(f"Peer {label} did not complete Minecraft handover within 240 seconds")
     print("Waiting for the synced snapshot...");syncthing_wait();network_prepare()
     runtime,snapshot,_,owner=server_paths(name); CRITICAL=True;atomic_mirror(snapshot,runtime)
     owner.parent.mkdir(parents=True,exist_ok=True);owner.write_text(json.dumps({"server":name,"host":socket.gethostname(),"started":dt.datetime.now(dt.timezone.utc).isoformat()})+"\n")
@@ -350,7 +363,7 @@ def on_signal(sig,frame):
     if CRITICAL:print("\nCritical save/transfer continues; interrupt ignored.",file=sys.stderr);return
     raise KeyboardInterrupt
 def main():
-    p=argparse.ArgumentParser();p.add_argument("action",nargs="?",default="toggle",choices=["toggle","start","stop","status","logs","takeover","list"]);p.add_argument("server",nargs="?");p.add_argument("--machine",action="store_true");p.add_argument("--remote",action="store_true");a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument("action",nargs="?",default="toggle",choices=["toggle","start","stop","status","logs","takeover","list","release-network"]);p.add_argument("server",nargs="?");p.add_argument("--machine",action="store_true");p.add_argument("--remote",action="store_true");a=p.parse_args()
     for d in (ROOT,RUNTIME_ROOT,BACKUPS,COORD):d.mkdir(parents=True,exist_ok=True)
     for sig in (signal.SIGINT,signal.SIGTERM,signal.SIGHUP):signal.signal(sig,on_signal)
     # Machine status is a read-only peer probe. It must remain available while
@@ -364,6 +377,9 @@ def main():
         if a.action=="status":return status(a.machine)
         if a.action=="logs":
             name=select_server(a.server,"view logs for");return run(["journalctl","-u",unit(name),"-f"],check=False).returncode
+        if a.action=="release-network":
+            if running_servers():raise RuntimeError("Cannot release Minecraft service address while a local server is running")
+            network_restore();return 0
         requested=parse_names(a.server)
         if a.action in ("start","takeover"):
             if not requested: requested=[select_server(None,"start")]
