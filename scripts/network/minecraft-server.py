@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Safe multi-server Fabric lifecycle manager for NixOS/nix-minecraft."""
 from __future__ import annotations
-import argparse, datetime as dt, fcntl, json, os, re, shutil, signal, socket, subprocess, sys, tarfile, time
+import argparse, contextlib, datetime as dt, fcntl, json, os, re, shutil, signal, socket, subprocess, sys, tarfile, time
 from pathlib import Path
 from urllib import request, parse
 import ipaddress
@@ -312,6 +312,46 @@ def local_node_name():
     except Exception:pass
     return socket.gethostname().split(".",1)[0]
 
+@contextlib.contextmanager
+def cluster_transition_lock(remote_action=False):
+    """One cross-laptop mutex, hosted by the lowest live MagicDNS name."""
+    if remote_action:
+        yield
+        return
+    local=local_node_name()
+    groups=peer_groups()
+    labels=[label for label,addresses in groups]
+    coordinator=min([local]+labels)
+    if coordinator==local:
+        path=COORD/"cluster.lock"
+        with path.open("a+") as handle:
+            try:fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except BlockingIOError:raise RuntimeError(f"Minecraft transition already in progress through coordinator {coordinator}")
+            try:yield
+            finally:fcntl.flock(handle,fcntl.LOCK_UN)
+        return
+    addresses=next((addresses for label,addresses in groups if label==coordinator),None)
+    if not addresses:raise RuntimeError(f"No SSH address for Minecraft coordinator {coordinator}")
+    process=None;failure=[]
+    for address in addresses:
+        command=["ssh","-o","BatchMode=yes","-o","ConnectTimeout=4",address,
+                 "mkdir -p ~/minecraft-server/coordination && exec flock -n ~/minecraft-server/coordination/cluster.lock sh -c 'echo LOCKED; cat >/dev/null'"]
+        try:
+            candidate=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+            line=candidate.stdout.readline().strip()
+        except OSError as error:
+            failure.append(f"{address}: {error}");continue
+        if line=="LOCKED":process=candidate;break
+        output=line+candidate.communicate(timeout=5)[0]
+        failure.append(f"{address}: {output.strip() or 'cluster lock busy'}")
+    if process is None:raise RuntimeError("Cannot acquire Minecraft cluster lock: "+"; ".join(failure))
+    try:yield
+    finally:
+        try:process.stdin.close()
+        except Exception:pass
+        try:process.wait(timeout=5)
+        except subprocess.TimeoutExpired:process.terminate()
+
 def start(name=None,force=False):
     global CRITICAL
     name=select_server(name,"start");ensure_dependencies(name)
@@ -431,7 +471,10 @@ def main():
     # misreported as an unreachable peer.
     if a.action=="status" and a.machine:return machine_status()
     if a.action=="menu-status":return menu_status()
-    with LOCK.open("w") as lock:
+    mutating=a.action in ("toggle","start","stop","takeover","release-network")
+    cluster=contextlib.nullcontext() if not mutating else cluster_transition_lock(a.remote)
+    with cluster:
+      with LOCK.open("w") as lock:
         try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         except BlockingIOError:raise RuntimeError("Another Minecraft transition is in progress")
         if a.action=="list":print("\n".join(available_servers()));return 0
