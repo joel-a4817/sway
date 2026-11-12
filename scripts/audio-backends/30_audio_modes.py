@@ -136,50 +136,23 @@ def configure_both_output_filterless():
     path=PROFILES/BOTH_FILTER
     if not path.is_file():raise RuntimeError(f'Missing both-output profile: {path}')
     data=yaml.safe_load(path.read_text(encoding='utf-8')) or {}
-    if not isinstance(data,dict):raise RuntimeError('00-filterless.yml is not a YAML mapping')
-    offset=both_output_local_delay_ms();matrix=both_output_matrix()
-    delayed='pc' if offset>0 else ('external' if offset<0 else None)
-    channel=0 if matrix['left']==delayed else 1
-    filters=data.setdefault('filters',{})
-    pipeline=data.setdefault('pipeline',[])
+    filters=data.setdefault('filters',{});pipeline=data.setdefault('pipeline',[])
     filters.pop('media_control_sync_delay',None)
-    pipeline[:]=[step for step in pipeline if not (isinstance(step,dict) and step.get('type')=='Filter' and 'media_control_sync_delay' in step.get('names',[]))]
-    if delayed:
-        filters['media_control_sync_delay']={'type':'Delay','parameters':{'delay':abs(float(offset)),'unit':'ms','subsample':False}}
-        pipeline.append({'type':'Filter','channels':[channel],'names':['media_control_sync_delay']})
-    data['title']='Filterless / Both-output sync'
-    data['description']=f'Pass-through both-output profile; signed offset {offset} ms; delayed destination {delayed or "none"}'
+    pipeline[:]=[step for step in pipeline if not (isinstance(step,dict) and 'media_control_sync_delay' in step.get('names',[]))]
+    matrix=both_output_matrix()
+    data['title']='Filterless / split mono both-output'
+    data['description']='One mono source channel to SonoBus and the opposite mono source channel to PC; branch delay is applied only in the PC monitor'
     atomic(path,yaml.safe_dump(data,sort_keys=False,allow_unicode=True,encoding=None))
-    return {'path':str(path),'milliseconds':offset,'delayed':delayed,'channel':channel if delayed else None}
+    return {'path':str(path),'milliseconds':both_output_local_delay_ms(),'externalChannel':matrix['left'],'pcChannel':matrix['right']}
 
 def verify_both_output_sync():
     mode=audio_mode()
-    if mode not in ('ipad_both','laptop_both'):
-        return {'active':False,'reason':'not-both-output'}
-    path=PROFILES/BOTH_FILTER
-    data=yaml.safe_load(path.read_text(encoding='utf-8')) or {}
-    offset=both_output_local_delay_ms();matrix=both_output_matrix();policy=effective_mode_policy(mode)
-    delayed='pc' if offset>0 else ('external' if offset<0 else None)
-    expected_channel=(0 if matrix['left']==delayed else 1) if delayed else None
-    definition=(data.get('filters') or {}).get('media_control_sync_delay')
-    stages=[step for step in (data.get('pipeline') or []) if isinstance(step,dict) and 'media_control_sync_delay' in step.get('names',[])]
-    if delayed:
-        if not isinstance(definition,dict):raise RuntimeError('Both-output delay filter is missing from 00-filterless.yml')
-        parameters=definition.get('parameters') or {}
-        if definition.get('type')!='Delay' or float(parameters.get('delay',-1))!=abs(float(offset)) or parameters.get('unit')!='ms':
-            raise RuntimeError('Both-output delay filter parameters do not match the saved offset')
-        if len(stages)!=1 or stages[0].get('channels')!=[expected_channel]:
-            raise RuntimeError('Both-output delay pipeline channel does not match the output matrix')
-    elif definition is not None or stages:
-        raise RuntimeError('Zero offset still has a delay stage in 00-filterless.yml')
-    external_channel='left' if matrix['left']=='external' else 'right'
-    expected_mask='1'
-    expected_device='CamillaDSP SonoBus Left' if external_channel=='left' else 'CamillaDSP SonoBus Right'
-    if policy.get('sendChannels')!=1 or policy.get('inputChannelsMask')!=expected_mask or policy.get('inputDevice')!=expected_device:
-        raise RuntimeError('SonoBus policy does not match the processed external channel')
-    return {'active':True,'milliseconds':offset,'delayed':delayed,'delayChannel':expected_channel,
-            'externalChannel':external_channel,'sendChannels':1,'inputChannelsMask':expected_mask,
-            'inputDevice':policy['inputDevice'],'profile':str(path)}
+    if mode not in ('ipad_both','laptop_both'):return {'active':False,'reason':'not-both-output'}
+    offset=both_output_local_delay_ms();policy=effective_mode_policy(mode);matrix=both_output_matrix()
+    expected_device=('CamillaDSP SonoBus External Delayed' if offset<0 else 'CamillaDSP SonoBus '+('Left' if matrix['left']=='external' else 'Right'))
+    if policy.get('sendChannels')!=1 or policy.get('inputChannelsMask')!='1' or policy.get('inputDevice')!=expected_device:
+        raise RuntimeError('Both-output SonoBus policy is not isolated to exactly one mono channel')
+    return {'active':True,'mode':mode,'externalMono':matrix['left'],'pcMono':matrix['right'],'externalDevice':expected_device,'sendChannels':1,'pcDelayMilliseconds':offset}
 
 def both_output_matrix():
     default={'left':'external','right':'pc'}
@@ -199,20 +172,14 @@ def set_both_output_matrix(left,right):
 
 def effective_mode_policy(name):
     policy=dict(MODE_POLICIES[name])
-    if name not in ('ipad_both','laptop_both'):
-        policy['sendChannels']=2
-        policy['inputChannelsMask']='11'
-        return policy
-    matrix=both_output_matrix()
-    external_channel='left' if matrix['left']=='external' else 'right'
-    # The ALSA endpoint itself exposes exactly one channel.  Do not rely on
-    # SonoBus/JUCE's input mask to split a stereo capture device.
+    if name not in ('ipad_both','laptop_both'):return policy
+    matrix=both_output_matrix();external_is_left=matrix['left']=='external'
     policy['sendChannels']=1
-    policy['inputDevice']='CamillaDSP SonoBus Left' if external_channel=='left' else 'CamillaDSP SonoBus Right'
+    policy['inputDevice']=('CamillaDSP SonoBus External Delayed' if both_output_local_delay_ms()<0 else 'CamillaDSP SonoBus '+('Left' if external_is_left else 'Right'))
     policy['inputChannelsMask']='1'
-    policy['externalChannel']=external_channel
-    policy['pcChannel']='right' if external_channel=='left' else 'left'
-    policy['description']=policy['description']+'; '+external_channel+' channel to SonoBus, '+policy['pcChannel']+' channel to PC output'
+    policy['externalChannel']='left' if external_is_left else 'right'
+    policy['pcChannel']='right' if external_is_left else 'left'
+    policy['description']=policy['description']+'; exactly one mono channel to SonoBus and the opposite mono channel to PC output'
     return policy
 
 def _read_json(path,default):

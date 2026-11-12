@@ -158,6 +158,8 @@ def apply_mode(name,password=None,restore_camilla=True,output=None,output_resolv
         if local:start_local_monitor(selected,resolved=True)
         elif alive(rpid(LOCALMONPID)):stop_local_monitor()
     stop_external_delay()
+    if sono and name in ('ipad_both','laptop_both') and both_output_local_delay_ms()<0:
+        start_external_delay()
     if sono:
         # Negative sync uses a different ALSA capture endpoint. Always restart
         # SonoBus after rebuilding that relay; persisted XML alone does not

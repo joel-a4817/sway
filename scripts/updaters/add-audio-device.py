@@ -601,24 +601,6 @@ def validate_production_room_matrix():
     print(f'Production-room matrix: {info.frames} samples ({info.frames/info.samplerate:.3f} s), 4-channel LL,LR,RL,RR at {info.samplerate} Hz',flush=True)
     return path
 
-def measurement_devices():
-    if not MEASUREMENTS_DIR.is_dir():raise SystemExit(f'Missing measurement folder: {MEASUREMENTS_DIR}')
-    csvs=sorted((p for p in MEASUREMENTS_DIR.iterdir() if p.is_file() and p.suffix.casefold()=='.csv'),key=lambda p:(p.name.casefold(),p.name))
-    if not csvs:raise SystemExit(f'No CSV files found in {MEASUREMENTS_DIR}')
-    result=[dict(item) for item in HPCFS]
-    def key(path):return Path(path).stem.removesuffix(' - Raw').casefold()
-    configured={key(configured_path(item)) for item in result};expected=set()
-    for csv_path in csvs:
-        name=re.sub(r'[\\/:*?"<>|]+','_',csv_path.stem).strip()
-        if not name or name in ('.','..') or any(ord(c)<32 for c in name):raise SystemExit(f'Invalid measurement filename: {csv_path.name}')
-        wav_name=name+' - HpCF - Raw.wav'
-        if wav_name.casefold() in expected:raise SystemExit(f'Measurement output collision: {csv_path.name}')
-        expected.add(wav_name.casefold());source=(HPCF_ANECHOIC/wav_name).resolve()
-        if key(source) in configured:continue
-        if not source.is_file():raise SystemExit(f'Missing CSV-derived Raw HpCF: {source}; run the HpCF builder first')
-        result.append({'file':wav_name,'label':name,'type':'in-ear'});configured.add(key(source))
-    return result
-
 def runtime_profile_variants(path,text):
     # Runtime chunksize and peak-limiter selection now edits the selected YAML
     # in place through Media Control. Keep one file per logical filter.
@@ -627,9 +609,10 @@ def runtime_profile_variants(path,text):
 def expand_runtime_profiles(candidates):
     return [variant for path,text in candidates for variant in runtime_profile_variants(path,text)]
 
-def build_profile_candidates(all_measurements=False,spatial_wav=None):
+def build_profile_candidates(spatial_wav=None):
     generated=[(CAMILLA_ROOT/'00-filterless.yml',filterless_text())]
-    configured=list(measurement_devices() if all_measurements else HPCFS)
+    configured=[dict(item) for item in HPCFS]
+    validate_unique(configured)
     if not configured:return generated,[]
     if not HPCF_ANECHOIC.is_dir():raise SystemExit(f'Missing B&K 5128 HpCF folder: {HPCF_ANECHOIC}')
     if not SOFA_AVERAGE_WAV.is_file():raise SystemExit(f'Missing SOFA average WAV: {SOFA_AVERAGE_WAV}')
@@ -829,13 +812,13 @@ def commit_profiles(candidates):
     removed_yaml=sorted(before_yaml-set(expected))
     removed_dirs=sorted(before_dirs-expected_device_dirs)
     return changed,removed_yaml,removed_dirs
-def rebuild_all_filters(all_measurements=False):
+def rebuild_all_filters():
     print(f'Writing profiles and safe-volume index to: {CAMILLA_ROOT}')
     # One spatial source, identical for CamillaDSP and JamesDSP exports.
     validate_current_spatial_fir()
     validate_production_room_matrix()
     print('CamillaDSP and S5 use the same v66 spatial WAV; no proxy or fallback.',flush=True)
-    candidates,devices=build_profile_candidates(all_measurements,spatial_wav=SOFA_AVERAGE_WAV)
+    candidates,devices=build_profile_candidates(spatial_wav=SOFA_AVERAGE_WAV)
     if not Path('/etc/camilladsp-peak-limiter-v11').is_file():raise SystemExit('Generated profiles require the installed NixOS peak-limiter-v11 module.')
     camilladsp=Path('/run/current-system/sw/bin/camilladsp')
     if not camilladsp.is_file():raise SystemExit(f'Missing CamillaDSP executable: {camilladsp}')
@@ -860,19 +843,27 @@ def row(number,label):
     prefix=f'[{number}] ';width=max(1,shutil.get_terminal_size((80,24)).columns-len(prefix));lines=textwrap.wrap(str(label),width=width,break_long_words=True,break_on_hyphens=False) or ['']
     print(prefix+lines[0])
     for line in lines[1:]:print(' '*len(prefix)+line)
-def choose(title,choices):
-    print(f'\n{title}');row(0,'Back')
+class BackStep(Exception):pass
+class ExitMenu(Exception):pass
+
+def choose(title,choices,allow_back=True):
+    print(f'\n{title}');row('E','Exit')
+    if allow_back:row('B','Back')
     for number,label in enumerate(choices,1):row(number,label)
     while True:
-        answer=input('Select:').strip()
-        if answer=='0':raise KeyboardInterrupt
+        answer=input('Select: ').strip().casefold()
+        if answer=='e':raise ExitMenu
+        if answer=='b':
+            if allow_back:raise BackStep
+            print('Back is unavailable at this first step.');continue
         if answer.isdecimal() and 1<=int(answer)<=len(choices):return int(answer)-1
-        print('Select an available number.')
+        print('Enter E, B where shown, or an available number.')
 def ask(label,default=''):
     suffix=f' [{default}]' if default else ''
     while True:
-        value=input(f'{label}{suffix} (0 to go back): ').strip()
-        if value=='0':raise KeyboardInterrupt
+        value=input(f'{label}{suffix} (B to go back, E to exit): ').strip()
+        if value.casefold()=='e':raise ExitMenu
+        if value.casefold()=='b':raise BackStep
         value=value or default
         if value and '\n' not in value and '\r' not in value:return value
         print(f'{label} is required.')
@@ -970,13 +961,21 @@ def pause():
         finally:termios.tcsetattr(fd,termios.TCSADRAIN,settings)
     print()
 def manager_main():
-    text=CONFIG_SCRIPT.read_text(encoding='utf-8');actions=(add,edit,remove,clean_custom_filters,clean_devices,update_filters);choice=choose('Audio device manager',('Add device','Edit device','Remove device','Clean custom filters','Clean devices','Update all filters'));actions[choice](text)
+    actions=(add,edit,remove,clean_custom_filters,clean_devices,update_filters)
+    while True:
+        text=CONFIG_SCRIPT.read_text(encoding='utf-8')
+        choice=choose('Audio device manager',('Add device','Edit device','Remove device','Clean custom filters','Clean devices','Update all filters'),allow_back=False)
+        try:actions[choice](text)
+        except BackStep:continue
+        return
+
 if __name__=='__main__':
-    if sys.argv[1:] in (['--rebuild'],['--rebuild-all']):rebuild_all_filters(all_measurements=sys.argv[1:]==['--rebuild-all']);raise SystemExit(0)
+    if sys.argv[1:] in (['--rebuild'],['--rebuild-all']):rebuild_all_filters();raise SystemExit(0)
     if sys.argv[1:]:raise SystemExit('Usage: add-audio-device.py [--rebuild | --rebuild-all]')
     if not(sys.stdin.isatty() and sys.stdout.isatty()):relaunch();raise SystemExit(0)
     status=0
     try:manager_main()
+    except ExitMenu:print('\nExited.');status=0
     except KeyboardInterrupt:print('\nCancelled.');status=130
     except Exception as error:print(f'\nError: {error}',file=sys.stderr);status=1
     finally:shutil.rmtree(SCRIPT_DIR/'__pycache__',ignore_errors=True);pause()

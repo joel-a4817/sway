@@ -190,33 +190,52 @@ def create_custom_filter(request):
     return {'profile':_filter_relative(target),'s5':str(updater['COMBINED_FILTER_ROOT']/Path(_filter_relative(target)).with_suffix('.wav')),'points':count,'source':'SOFA','freeField':True}
 
 def custom_filter_cli():
-    schema=custom_filter_schema();devices=schema['devices']
-    def pick(title,items):
+    schema=custom_filter_schema();devices=schema['devices'];cat=hrir_catalog()
+    class Back(Exception):pass
+    class Exit(Exception):pass
+    def pick(title,items,allow_back=True):
         while True:
-            print('\n'+title)
+            print('\n'+title);print('[E] Exit')
+            if allow_back:print('[B] Back')
             for i,x in enumerate(items,1):print(f'[{i}] {x}')
-            answer=input('Select (0 cancels): ').strip()
-            if answer=='0':raise KeyboardInterrupt
+            answer=input('Select: ').strip().casefold()
+            if answer=='e':raise Exit
+            if answer=='b':
+                if allow_back:raise Back
+                print('Back is unavailable at this first step.');continue
             if answer.isdecimal() and 1<=int(answer)<=len(items):return int(answer)-1
-            print('Enter a listed number.')
-    if not devices:raise RuntimeError('No compatible device baselines found')
-    device=devices[pick('Device',[x['label'] for x in devices])];points=[];cat=hrir_catalog()
-    print(f"Azimuth range {schema['azimuth']['min']} to {schema['azimuth']['max']}; elevation range {schema['elevation']['min']} to {schema['elevation']['max']}")
+            print('Enter E, B where shown, or a listed number.')
+    if not devices:raise RuntimeError('No compatible configured device baselines found')
     while True:
-        raw=input('Azimuth elevation, separated by a space (0 cancels; example 20.5 -15): ').strip()
-        if raw=='0':raise KeyboardInterrupt
-        parts=raw.split()
-        if len(parts)!=2:print('Enter two decimal numbers separated by a space.');continue
-        try:az=_coord_value(parts[0]);el=_coord_value(parts[1])
-        except ValueError as error:print(error);continue
-        if (az,el) not in cat:
-            nearby=sorted(cat,key=lambda pair:(float(pair[0])-float(az))**2+(float(pair[1])-float(el))**2)[:5]
-            print('That exact coordinate does not exist. Nearby valid options: '+', '.join('az '+a+' / el '+e for a,e in nearby));continue
-        source=('average','left','right','stereo','swap')[pick('Audio for this point',['Averaged mono to both ears','Left channel to both ears','Right channel to both ears','Left to left, right to right','Left to right, right to left'])]
-        points.append({'azimuth':az,'elevation':el,'source':source})
-        if pick('Next',['Create filter','Add another SOFA point'])==0:break
-    while True:
-        name=input('Filter name: ').strip()
-        try:result=create_custom_filter({'device':device['id'],'name':name,'points':points});break
-        except FileExistsError:print('A custom filter with that name already exists for this device. Enter another name.')
-    print('Created '+result['profile'])
+        try:device=devices[pick('Device',[x['label'] for x in devices],allow_back=False)]
+        except Exit:return
+        points=[]
+        while True:
+            print(f"Azimuth range {schema['azimuth']['min']} to {schema['azimuth']['max']}; elevation range {schema['elevation']['min']} to {schema['elevation']['max']}")
+            raw=input('Azimuth elevation (B to go back, E to exit; example 20.5 -15): ').strip()
+            if raw.casefold()=='e':return
+            if raw.casefold()=='b':break
+            parts=raw.split()
+            if len(parts)!=2:print('Enter two decimal numbers.');continue
+            try:az=_coord_value(parts[0]);el=_coord_value(parts[1])
+            except ValueError as error:print(error);continue
+            if (az,el) not in cat:
+                nearby=sorted(cat,key=lambda pair:(float(pair[0])-float(az))**2+(float(pair[1])-float(el))**2)[:5]
+                print('Exact coordinate unavailable. Nearby: '+', '.join('az '+a+' / el '+e for a,e in nearby));continue
+            try:source=('average','left','right','stereo','swap')[pick('Audio for this point',['Averaged mono to both ears','Left channel to both ears','Right channel to both ears','Left to left, right to right','Left to right, right to left'])]
+            except Back:continue
+            except Exit:return
+            points.append({'azimuth':az,'elevation':el,'source':source})
+            try:next_step=pick('Next',['Create filter','Add another SOFA point'])
+            except Back:points.pop();continue
+            except Exit:return
+            if next_step==1:continue
+            while True:
+                name=input('Filter name (B to go back, E to exit): ').strip()
+                if name.casefold()=='e':return
+                if name.casefold()=='b':break
+                try:result=create_custom_filter({'device':device['id'],'name':name,'points':points})
+                except FileExistsError:print('That filter already exists.');continue
+                print('Created '+result['profile']);return
+            continue
+        # Back from coordinate returns to device selection.

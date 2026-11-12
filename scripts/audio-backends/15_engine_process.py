@@ -163,14 +163,6 @@ def stop_camilla_for_no_filter():
         raise RuntimeError('CamillaDSP still running while applying No filter (PID '+
                            ', '.join(map(str,remaining))+')')
 
-def validate_camilla_profile(p):
-    result=run([str(CAMILLA),'--check',str(p)],False,30)
-    if result.returncode:
-        detail=(result.stderr or result.stdout).strip()
-        raise RuntimeError(
-            'Invalid CamillaDSP profile '+p.name+
-            ((': '+detail) if detail else '')
-        )
 
 def log_tail(path,limit=8192):
     try:

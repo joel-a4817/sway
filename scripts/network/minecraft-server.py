@@ -46,9 +46,11 @@ def select_server(requested,purpose="start"):
     if not candidates: raise RuntimeError("No Minecraft servers are declared in NixOS")
     if not sys.stdin.isatty(): raise RuntimeError("Multiple servers exist; specify the server name")
     print(f"Choose a server to {purpose}:")
+    print("  [E] Exit")
     for i,name in enumerate(candidates,1): print(f"  {i}) {name}{' (running)' if active(name) else ''}")
     while True:
         raw=input("Selection: ").strip()
+        if raw.casefold()=="e":raise SystemExit(0)
         if raw.isdigit() and 1<=int(raw)<=len(candidates): return candidates[int(raw)-1]
         if raw in candidates:return raw
         print("Invalid selection.")

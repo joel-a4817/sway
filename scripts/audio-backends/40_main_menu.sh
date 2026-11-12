@@ -122,7 +122,7 @@ case "$selected" in
     wrap_line "Current sync offset: ${BOTH_DELAY_MS} ms"
     normalize_menu_step || exit 1
     while :; do
-        read -r -p 'Offset in ms (-500 to 500, E=Exit): ' delay_value || exit 0
+        read -r -p 'Sync offset in ms (-500 to 500, E=Exit): ' delay_value || exit 0
         [[ "$delay_value" =~ ^[Ee]$ ]] && exit 0
         if [[ "$delay_value" =~ ^-?([0-9]{1,3})(\.[0-9]{1,3})?$ ]] &&
            awk -v value="$delay_value" 'BEGIN { exit !(value >= -500 && value <= 500) }'; then
@@ -174,9 +174,9 @@ case "$selected" in
             run_quiet_action python3 "$TOPOLOGY_SCRIPT" --set-mode "$selected_mode" || exit $?
             exit 0 ;;
           ipad_both|laptop_both)
-            choose_index --back 'Channel destination' \
-              'Left channel -> external output; Right channel -> PC output' \
-              'Left channel -> PC output; Right channel -> external output'
+            choose_index --back 'Both outputs | Mono channel destination' \
+              'Left mono -> external; Right mono -> PC' \
+              'Right mono -> external; Left mono -> PC'
             status=$?
             ((status==3)) && exit 0
             ((status==2)) && continue
@@ -316,10 +316,9 @@ while :; do
         [[ "$internal" == true && "$label" != '[INT] '* && "$label" != '[LOOP] '* && "$label" != '[VIRT] '* ]] && label="[INT] $label"
         labels+=("$label")
     done
-    choose_index --back 'Audio outputs | Device' "${labels[@]}"
+    choose_index --exit 'Audio outputs | Device' "${labels[@]}"
     choice_status=$?
     if ((choice_status==3)); then cancel_output_picker; exit 0; fi
-    if ((choice_status==2)); then cancel_output_picker; exec "$0" select-output; fi
     card="${cards[number]}";card_label="${labels[number]}"
     [[ "$card_label" != '[INT] '* && "$card_label" != '[LOOP] '* && "$card_label" != '[VIRT] '* ]] || { wrap_line 'That device is informational and cannot be selected.'; continue; }
 
@@ -385,7 +384,10 @@ while :; do
                     sinks+=("$(jq -r '.name' <<<"$item")")
                     labels+=("$(jq -r '.label // .name // "Unnamed sink"' <<<"$item")")
                 done
-                ((${#labels[@]})) || { wrap_line 'No playback sinks are compatible with that route.'; break; }
+                if ((${#labels[@]}==0)); then
+                    wrap_line 'No playback sinks are compatible with that route.'
+                    break
+                fi
                 if select_only_valid_suboption "Playback sink"; then
                     choice_status=0
                 else

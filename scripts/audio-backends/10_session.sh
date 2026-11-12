@@ -100,17 +100,18 @@ handle_script_exit() {
     EXIT_HANDLER_RUNNING=1
     trap - EXIT INT TERM HUP QUIT
     if [[ ${OUTPUT_PREVIEW_ACTIVE:-0} == 1 ]]; then
-        python3 "$TOPOLOGY_SCRIPT" --cancel-output-preview >/dev/null 2>>"$ACTION_LOG" || echo 'Output preview rollback failed; inspect the log.' >&2
+        python3 "$TOPOLOGY_SCRIPT" --cancel-output-preview >/dev/null 2>>"$ACTION_LOG" || true
     fi
     if (( ! FINAL_PAUSE_REACHED && ! ${REPLACED:-0} )); then
-        if (( status != 0 )); then
+        # Ctrl-C is a user cancellation, not a backend failure.
+        if (( status != 0 && status != 130 )); then
             echo; echo "Audio script exited unexpectedly."; echo "Exit status: $status"
             [[ -s "$ACTION_LOG" ]] && echo "Details: $ACTION_LOG"
         fi
         if ((${#AUTO_SELECTED_SUMMARY[@]})); then
             echo
             echo "Automatically selected because only one valid option was available:"
-            printf '  %s\n' "${AUTO_SELECTED_SUMMARY[@]}"
+            printf '%s\n' "${AUTO_SELECTED_SUMMARY[@]}" | awk '!seen[$0]++ { print "  " $0 }'
         fi
         pause_before_close
     fi

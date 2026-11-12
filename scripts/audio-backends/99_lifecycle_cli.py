@@ -162,17 +162,6 @@ def toggle_audio_services():
         else:
             stop_audio_services()
         return {'stopped':STOPPED.exists()}
-def cleanup():
-    # Host shutdown is not Stop all audio. Leave the local playback graph
-    # available to Media Control after selecting the clean laptop mode.
-    if STOPPED.exists():return
-    with LOCK:
-        saved_master=capture_master_volume()
-        try:
-            apply_mode('laptop_laptop')
-            normalize_audio_volumes(saved_master)
-        except Exception as error:
-            print('Could not restore laptop audio during host shutdown: '+str(error),flush=True)
 
 def move_sonobus_to_workspace1(timeout=20.0):
     """Wait for SonoBus, then move every visible SonoBus container to workspace 1."""
