@@ -31,25 +31,28 @@ if [[ -s "$PEERS" ]]; then
         for address in "${fields[@]:1}"; do
             address="${address//[|,;]/}"
             [[ -n "$address" ]] || continue
-            # One SSH invocation returns an exact ActiveState for every unit.
-            # systemctl show exits successfully for inactive units, unlike
-            # systemctl is-active, so stopped peers cannot be mistaken for SSH failures.
-            remote="$(ssh -o BatchMode=yes -o ConnectTimeout=4 "$address"                 systemctl show --property=ActiveState --value                 "${SERVERS[@]/#/minecraft-server-}" 2>&1)" || {
-                errors+=("$address: $remote")
-                continue
-            }
-            mapfile -t states <<< "$remote"
-            if ((${#states[@]} != ${#SERVERS[@]})); then
-                errors+=("$address: expected ${#SERVERS[@]} unit states, got ${#states[@]}")
+            if ! ssh -o BatchMode=yes -o ConnectTimeout=4 "$address" true >/dev/null 2>&1; then
+                errors+=("$address: SSH verification failed")
                 continue
             fi
             verified=1
-            for i in "${!SERVERS[@]}"; do
-                [[ "${states[$i]}" == active ]] || continue
-                name="${SERVERS[$i]}"
-                REMOTE["$name"]="${REMOTE[$name]:+${REMOTE[$name]},}$label"
+            for name in "${SERVERS[@]}"; do
+                state="$(ssh -o BatchMode=yes -o ConnectTimeout=4 "$address" \
+                    systemctl show --property=ActiveState --value \
+                    "minecraft-server-${name}.service" 2>&1)" || {
+                    errors+=("$address: status check failed for $name: $state")
+                    verified=0
+                    break
+                }
+                state="${state//$'\r'/}"
+                state="${state//$'\n'/}"
+                case "$state" in
+                    active) REMOTE["$name"]="${REMOTE[$name]:+${REMOTE[$name]},}$label" ;;
+                    inactive|failed|activating|deactivating|reloading) ;;
+                    *) errors+=("$address: unexpected state for $name: ${state:-empty}"); verified=0; break ;;
+                esac
             done
-            break
+            ((verified)) && break
         done
         if ((! verified)); then
             peer_error+="${peer_error:+; }$label (${errors[*]:-no usable address})"
