@@ -75,8 +75,10 @@ def query_group(addresses,args):
             failures.append(f"{address}: timed out");continue
         except OSError as error:
             failures.append(f"{address}: {error}");continue
-        lines=[line.strip() for line in r.stdout.splitlines() if line.strip()]
-        status=lines[-1] if lines else ""
+        lines=[line.strip() for line in (r.stdout or "").splitlines() if line.strip()]
+        status=next((line for line in reversed(lines)
+                     if line=="stopped" or line.startswith("stopped ") or
+                        line=="running" or line.startswith("running ")),"")
         # The peer protocol is the machine-readable status line, not a generic
         # assumption that every useful remote command must return zero. Accept
         # both the current zero status and the historical stopped=3 status.
@@ -95,7 +97,8 @@ def remote_state():
         if not address:
             detail="; ".join(failures) if failures else "no address attempted"
             unreachable.append(f"{label} ({detail})");continue
-        names=text.split()[1:] if text.startswith("running") else []
+        fields=text.split()
+        names=fields[1:] if fields else []
         found.append((label,address,names))
     return found,unreachable
 

@@ -6,10 +6,15 @@ VNC_UNIT="camilladsp-wayvnc.service"
 
 mapfile -t SERVERS < <("$MINECRAFT" list)
 declare -A MC_STATUS=()
+MC_PEER_ERROR=""
 while IFS=$'\t' read -r server location; do
-  [[ -n "$server" && "$server" != "!peer" ]] || continue
+  [[ -n "$server" ]] || continue
+  if [[ "$server" == "!peer" ]]; then
+    MC_PEER_ERROR="$location"
+    continue
+  fi
   MC_STATUS["$server"]="$location"
-done < <("$MINECRAFT" menu-status 2>/dev/null || true)
+done < <("$MINECRAFT" menu-status 2>&1 || true)
 
 printf '%s\n' 'Toggle services'
 printf '%s\n' 'Enter comma-separated numbers. [0] exits.'
@@ -33,6 +38,9 @@ for i in "${!SERVERS[@]}"; do
     *) printf '  [%d] Minecraft: %s\n' "$number" "$name" ;;
   esac
 done
+if [[ -n "$MC_PEER_ERROR" ]]; then
+  printf '  [!] Minecraft peer status unavailable: %s\n' "$MC_PEER_ERROR"
+fi
 
 read -r -p 'Selection: ' input
 [[ -n "${input//[[:space:]]/}" ]] || exit 0
