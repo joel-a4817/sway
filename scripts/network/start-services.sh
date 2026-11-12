@@ -3,23 +3,56 @@ set -euo pipefail
 MINECRAFT="/home/joel/.config/sway/scripts/network/minecraft-server.py"
 IPAD="/home/joel/.config/sway/scripts/network/start-ipad-webremote.sh"
 VNC_UNIT="camilladsp-wayvnc.service"
+PEERS="$HOME/.config/minecraft-server/peers"
 
 mapfile -t SERVERS < <("$MINECRAFT" list)
-declare -A MC_STATUS=()
-MC_PEER_ERROR=""
-while IFS=$'\t' read -r server location; do
-  [[ -n "$server" ]] || continue
-  if [[ "$server" == "!peer" ]]; then
-    MC_PEER_ERROR="$location"
-    continue
+declare -A LOCAL_RUNNING=()
+declare -A PEER_RUNNING=()
+peer_errors=()
+
+# Local state comes straight from systemd, not from cached manager output.
+for name in "${SERVERS[@]}"; do
+  if systemctl is-active --quiet "minecraft-server-${name}.service"; then
+    LOCAL_RUNNING["$name"]=1
   fi
-  current="${MC_STATUS[$server]:-}"
-  if [[ -z "$current" ]]; then
-    MC_STATUS["$server"]="$location"
-  elif [[ ",$current," != *",$location,"* ]]; then
-    MC_STATUS["$server"]="$current,$location"
-  fi
-done < <("$MINECRAFT" menu-status 2>&1 || true)
+done
+
+# Remote state comes directly from each peer listed in the peers file.
+if [[ -r "$PEERS" ]]; then
+  while IFS= read -r raw || [[ -n "$raw" ]]; do
+    raw="${raw%%#*}"
+    read -ra fields <<< "$raw"
+    ((${#fields[@]} >= 2)) || continue
+    label="${fields[0]//[|,;]/}"
+    status=""
+    detail=""
+    for address in "${fields[@]:1}"; do
+      address="${address//[|,;]/}"
+      [[ -n "$address" ]] || continue
+      output="$(ssh -o BatchMode=yes -o ConnectTimeout=4 "$address" \
+        '~/.config/sway/scripts/network/minecraft-server.py status --machine' 2>&1)" || rc=$?
+      rc="${rc:-0}"
+      # Select only a real machine-protocol line. Ignore login banners/noise.
+      status="$(printf '%s\n' "$output" | awk '/^(running|stopped|transitioning)( |$)/ {line=$0} END {print line}')"
+      if [[ -n "$status" ]]; then
+        break
+      fi
+      detail="${address}: ${output:-exit $rc}"
+      rc=0
+    done
+    if [[ -z "$status" ]]; then
+      peer_errors+=("$label (${detail:-no usable address})")
+      continue
+    fi
+    if [[ "$status" == running* ]]; then
+      read -ra words <<< "$status"
+      for word in "${words[@]:1}"; do
+        [[ "$word" == floating=* ]] && continue
+        PEER_RUNNING["$word"]="${PEER_RUNNING[$word]:+${PEER_RUNNING[$word]},}$label"
+      done
+    fi
+  done < "$PEERS"
+fi
 
 printf '%s\n' 'Toggle services'
 printf '%s\n' 'Enter comma-separated numbers. [0] exits.'
@@ -37,26 +70,25 @@ fi
 for i in "${!SERVERS[@]}"; do
   name="${SERVERS[$i]}"
   number=$((i + 3))
-  state="${MC_STATUS[$name]:-}"
-  case "$state" in
-    # Test combined states before the broad peer:* pattern. Previously a state
-    # ordered as peer:<host>,local was swallowed by peer:* and falsely displayed
-    # only "running on <host>" instead of reporting the real dual-run conflict.
-    *local,*peer:*|*peer:*,*local*)
-      peer="${state#*peer:}"; peer="${peer%%,*}"
-      printf '  [%d] Minecraft: %s [CONFLICT: running locally and on %s]\n' "$number" "$name" "$peer"
-      ;;
-    local) printf '  [%d] Minecraft: %s [running locally]\n' "$number" "$name" ;;
-    peer:*) printf '  [%d] Minecraft: %s [running on %s]\n' "$number" "$name" "${state#peer:}" ;;
-    *) printf '  [%d] Minecraft: %s\n' "$number" "$name" ;;
-  esac
+  local_running="${LOCAL_RUNNING[$name]:-}"
+  peer_running="${PEER_RUNNING[$name]:-}"
+  if [[ -n "$local_running" && -n "$peer_running" ]]; then
+    printf '  [%d] Minecraft: %s [CONFLICT: running locally and on %s]\n' "$number" "$name" "$peer_running"
+  elif [[ -n "$local_running" ]]; then
+    printf '  [%d] Minecraft: %s [running locally]\n' "$number" "$name"
+  elif [[ -n "$peer_running" ]]; then
+    printf '  [%d] Minecraft: %s [running on %s]\n' "$number" "$name" "$peer_running"
+  else
+    printf '  [%d] Minecraft: %s\n' "$number" "$name"
+  fi
 done
-if [[ -n "$MC_PEER_ERROR" ]]; then
-  printf '  [!] Minecraft peer status unavailable: %s\n' "$MC_PEER_ERROR"
+if ((${#peer_errors[@]})); then
+  printf '  [!] Minecraft peer status unavailable: %s\n' "$(IFS='; '; echo "${peer_errors[*]}")"
 fi
 
 read -r -p 'Selection: ' input
 [[ -n "${input//[[:space:]]/}" ]] || exit 0
+[[ "$input" =~ ^[Ee]$ ]] && exit 0
 IFS=',' read -ra tokens <<< "$input"
 selected=()
 for token in "${tokens[@]}"; do
@@ -67,7 +99,6 @@ for token in "${tokens[@]}"; do
   for seen in "${selected[@]:-}"; do [[ "$seen" == "$token" ]] && continue 2; done
   selected+=("$token")
 done
-
 for token in "${selected[@]}"; do
   case "$token" in
     1) "$IPAD" toggle ;;
