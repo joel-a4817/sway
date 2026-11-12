@@ -83,7 +83,9 @@ def query_group(addresses,args):
         if (status=="stopped" or status.startswith("stopped ") or
                 status=="running" or status.startswith("running ")):
             return address,r,status,failures
-        detail=(r.stderr.strip() or r.stdout.strip() or f"exit {r.returncode}")
+        # run(capture=True) merges stderr into stdout, so CompletedProcess.stderr
+        # is None. Never call strip() on it.
+        detail=((r.stderr or "").strip() or (r.stdout or "").strip() or f"exit {r.returncode}")
         failures.append(f"{address}: {detail}")
     return None,None,"",failures
 def remote_state():
