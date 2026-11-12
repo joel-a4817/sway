@@ -51,7 +51,8 @@ print_menu_item() {
     wrap_prefixed_line "${tag}[$1] " "$text"
 }
 choose_index() {
-    local allow_back=0 title answer i=1 choice key last
+    local allow_back=0 title answer choice key last_label label compact
+    local i=1 scan_index=0 valid_count=0 valid_index=-1 last_index=-1 last_choice=''
     if [[ "${1:-}" == --exit ]]; then shift
     elif [[ "${1:-}" == --back ]]; then allow_back=1; shift
     fi
@@ -60,21 +61,48 @@ choose_index() {
     normalize_menu_step || return 1
     key="$(printf '%s' "$title" | sha256sum | cut -d' ' -f1)"
     mkdir -p "$STATE_DIR/menu-last"
-    last="$(cat "$STATE_DIR/menu-last/$key" 2>/dev/null || true)"
+    last_label="$(cat "$STATE_DIR/menu-last/$key" 2>/dev/null || true)"
+
+    for choice in "$@"; do
+        compact="$(compact_item_label "$choice")"
+        case "$compact" in
+          '[N/A] '*|'[INT] '*|'[MON] '*|'[LOOP] '*|'[VIRT] '*) ;;
+          *)
+            valid_index=$scan_index
+            ((valid_count+=1))
+            if [[ -n "$last_label" && "$compact" == "$last_label" ]]; then
+                last_index=$scan_index; last_choice="$choice"
+            fi
+            ;;
+        esac
+        ((scan_index+=1))
+    done
+
+    if ((valid_count==1)); then
+        number=$valid_index
+        choice="${@:$((number+1)):1}"
+        compact="$(compact_item_label "$choice")"
+        printf '%s\n' "$compact" >"$STATE_DIR/menu-last/$key"
+        AUTO_SELECTED_SUMMARY+=("$(compact_menu_label "$title"): $compact")
+        normalize_menu_step || return 1
+        return 0
+    fi
+
     echo; wrap_line "$(compact_menu_label "$title")"; echo
     print_menu_item E 'Exit'
     ((allow_back)) && print_menu_item B 'Back'
-    [[ "$last" =~ ^[0-9]+$ && $last -lt ${#@} ]] && print_menu_item 0 "Use last valid: ${@:$((last+1)):1}"
-    for label in "$@"; do print_menu_item "$i" "$label"; i=$((i+1)); done
+    ((last_index>=0)) && print_menu_item 0 "Use last valid: $last_choice"
+    i=1
+    for label in "$@"; do print_menu_item "$i" "$label"; ((i+=1)); done
     while :; do
         read -r -p 'Select: ' answer || return 3
         case "$answer" in
           [Ee]) return 3 ;;
           [Bb]) ((allow_back)) && return 2; wrap_line 'Back is unavailable at this first step.'; continue ;;
           0)
-            [[ "$last" =~ ^[0-9]+$ && $last -lt ${#@} ]] || { wrap_line 'No previous valid selection is saved for this menu.'; continue; }
-            number=$last ;;
-          * )
+            ((last_index>=0)) || { wrap_line 'No previous valid selection is saved for this menu.'; continue; }
+            number=$last_index ;;
+          *)
             [[ "$answer" =~ ^[0-9]+$ && ${#answer} -le 9 ]] || { wrap_line 'Enter E, B where shown, 0 where shown, or a listed number.'; continue; }
             number=$((10#$answer-1))
             ((number>=0 && number<${#@})) || { wrap_line 'Enter a listed option.'; continue; } ;;
@@ -83,7 +111,7 @@ choose_index() {
         case "$(compact_item_label "$choice")" in
           '[N/A] '*|'[INT] '*|'[MON] '*|'[LOOP] '*|'[VIRT] '*) wrap_line 'That item cannot be selected.'; continue ;;
         esac
-        printf '%s\n' "$number" >"$STATE_DIR/menu-last/$key"
+        printf '%s\n' "$(compact_item_label "$choice")" >"$STATE_DIR/menu-last/$key"
         normalize_menu_step || return 1
         return 0
     done

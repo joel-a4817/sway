@@ -17,22 +17,22 @@ else
   if [[ "$runtime_available" == true ]]; then
     runtime_chunk="$(jq -r '.chunksize' <<<"$RUNTIME_JSON")"
     runtime_limiter="$(jq -r 'if .peakLimiter then "on" else "off" end' <<<"$RUNTIME_JSON")"
-    ARGS+=( -z "CamillaDSP runtime (${runtime_chunk} frames, limiter ${runtime_limiter})" "printf '%s\n' profile-runtime > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
+    ARGS+=( -z "Runtime ${runtime_chunk},${runtime_limiter}" "printf '%s\n' profile-runtime > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
   else
-    ARGS+=( -z 'CamillaDSP runtime unavailable' "printf '%s\n' profile-runtime > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
+    ARGS+=( -z 'Runtime N/A' "printf '%s\n' profile-runtime > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
   fi
 fi
 SAFE_JSON="$(python3 "$TOPOLOGY_SCRIPT" --safe-volume-status 2>>"$ACTION_LOG" || true)"
 if [[ "$(jq -r '.available // false' <<<"$SAFE_JSON" 2>/dev/null)" == true ]]; then
-  SAFE_PERCENT="$(jq -r '.percent' <<<"$SAFE_JSON")"
-  SAFE_VOLUME_DB="$(jq -r '(.percent | tonumber) as $p | if $p > 0 then (60 * (($p / 100) | log) / (10 | log)) else null end | if . == null then "N/A" else (. * 1000000 | round / 1000000 | tostring) end' <<<"$SAFE_JSON")"
-  ARGS+=( -z "Safe max ${SAFE_PERCENT}% (volume ${SAFE_VOLUME_DB} dB)" "printf '%s\n' safe-volume > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
+  SAFE_PERCENT="$(jq -r '(.percent | tonumber * 10 | round / 10)' <<<"$SAFE_JSON")"
+  SAFE_VOLUME_DB="$(jq -r '(.percent | tonumber) as $p | if $p > 0 then (60 * (($p / 100) | log) / (10 | log)) else null end | if . == null then "N/A" else (. * 10 | round / 10) end' <<<"$SAFE_JSON")"
+  ARGS+=( -z "Safe max ${SAFE_PERCENT}%, volume ${SAFE_VOLUME_DB} dB" "printf '%s\n' safe-volume > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
 else
   ARGS+=( -z 'Safe max N/A' "printf '%s\n' safe-volume-na > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
 fi
-ARGS+=( -z 'CamillaDSP filters' "printf '%s\n' select-filter > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
-ARGS+=( -z 'Create custom spatial filter' "printf '%s\n' create-custom-filter > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
-ARGS+=( -z 'All Media Control status' "printf '%s\n' all-status > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
+ARGS+=( -z 'Filters' "printf '%s\n' select-filter > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
+ARGS+=( -z 'Custom filter' "printf '%s\n' create-custom-filter > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
+ARGS+=( -z 'Status' "printf '%s\n' all-status > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
 ARGS+=( -z 'Audio input' "printf '%s\n' select-input > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
 ARGS+=( -z 'Camera' "printf '%s\n' select-camera > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
 ARGS+=( -z 'Audio output' "printf '%s\n' select-output > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
@@ -248,7 +248,7 @@ case "$selected" in
         [[ -z "$filter_path" ]] && print_menu_item 1 'No filter (bypass CamillaDSP)'
         if [[ -z "$filter_path" ]]; then filter_menu_offset=2; else filter_menu_offset=1; fi
         for i in "${!labels[@]}"; do print_menu_item "$((i + filter_menu_offset))" "${labels[i]}"; done
-        [[ -z "$filter_path" ]] && print_menu_item "$((${#labels[@]}+2))" 'Create custom spatial filter'
+        [[ -z "$filter_path" ]] && print_menu_item "$((${#labels[@]}+2))" 'Custom filter'
         ((${#labels[@]})) || { [[ -n "$filter_path" ]] || { wrap_line 'No filter folders or YAML files found.' >&2; exit 1; }; }
         while :; do
             read -r -p 'Select: ' answer || exit 0
@@ -284,7 +284,7 @@ OUTPUT_PREVIEW_ACTIVE=1
 # This is intentionally limited to staged topology pickers whose labels carry
 # an explicit [N/A] validity marker; ordinary menus must still be shown.
 select_only_valid_suboption() {
-    local index valid_count=0 valid_index=-1
+    local summary_label="${1:-Selection}" index valid_count=0 valid_index=-1
     for index in "${!labels[@]}"; do
         [[ "${labels[index]}" == '[N/A] '* ]] && continue
         valid_index=$index
@@ -292,6 +292,7 @@ select_only_valid_suboption() {
     done
     ((valid_count==1)) || return 1
     number=$valid_index
+    AUTO_SELECTED_SUMMARY+=("$summary_label: ${labels[valid_index]}")
 }
 
 cancel_output_picker() {
@@ -299,7 +300,6 @@ cancel_output_picker() {
     MEDIA_CONTROL_PICKER_PID=$$ python3 "$TOPOLOGY_SCRIPT" --cancel-output-preview >>"$ACTION_LOG" 2>&1 || true
     OUTPUT_PREVIEW_ACTIVE=0
 }
-trap cancel_output_picker EXIT INT TERM HUP
 
 # The output picker intentionally does not mutate the live graph between menu
 # stages.  It commits only the final complete request, so Back is lossless.
@@ -334,7 +334,7 @@ while :; do
             [[ "$available" == no || "$available" == false ]] && label="[N/A] $label"
             labels+=("$label")
         done
-        if select_only_valid_suboption; then
+        if select_only_valid_suboption "Profile"; then
             choice_status=0
         else
             choose_index --back "Card: $card_label | Profile" "${labels[@]}"
@@ -361,7 +361,7 @@ while :; do
                 labels+=("$label")
             done
             ((${#labels[@]})) || { wrap_line 'No routes are compatible with that profile.'; break; }
-            if select_only_valid_suboption; then
+            if select_only_valid_suboption "Output route"; then
                 choice_status=0
             else
                 choose_index --back 'Output route' "${labels[@]}"
@@ -386,7 +386,7 @@ while :; do
                     labels+=("$(jq -r '.label // .name // "Unnamed sink"' <<<"$item")")
                 done
                 ((${#labels[@]})) || { wrap_line 'No playback sinks are compatible with that route.'; break; }
-                if select_only_valid_suboption; then
+                if select_only_valid_suboption "Playback sink"; then
                     choice_status=0
                 else
                     choose_index --back 'Playback sink' "${labels[@]}"
@@ -404,7 +404,7 @@ while :; do
                 else
                     run_quiet_action python3 "$TOPOLOGY_SCRIPT" --switch-output "$request" || exit $?
                 fi
-                OUTPUT_PREVIEW_ACTIVE=0;trap - EXIT INT TERM HUP
+                OUTPUT_PREVIEW_ACTIVE=0
                 wrap_line "Playback output applied: $card_label"
                 exit 0
             done

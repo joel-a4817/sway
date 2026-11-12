@@ -220,7 +220,8 @@ def start_camilla(p):
     global CAMILLA_PROCESS
     target=profile(profile_id(p) if isinstance(p,Path) else str(p))
     repair_stale_playback_capture_device(target)
-    validate_camilla_profile(target)
+    # The live start is the authoritative validation. camilladsp --check opens
+    # ALSA devices and can fail while the existing engine still owns them.
     logpath=STATE/'camilladsp.log'
     transient=('Device or resource busy','Input/output error')
     for attempt in range(3):
@@ -387,7 +388,6 @@ def switch_profile(name):
                 raise
             return {'profile':NO_FILTER,'pid':None,'mode':result}
         target=profile(name)
-        validate_camilla_profile(target)
         pid=rpid(CAMPID)
         was_bypass=selected_filter()==NO_FILTER
         if alive(rpid(BYPASSPID)):

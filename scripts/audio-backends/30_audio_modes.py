@@ -31,9 +31,13 @@ def stop_sonobus():
 
 
 def atomic(path,text):
+    if isinstance(text,bytes):text=text.decode('utf-8')
+    if not isinstance(text,str):raise TypeError(f'atomic text must be str, not {type(text).__name__}')
     temporary=path.with_name('.'+path.name+'.'+uuid.uuid4().hex)
-    temporary.write_text(text)
-    os.replace(temporary,path)
+    try:
+        temporary.write_text(text,encoding='utf-8')
+        os.replace(temporary,path)
+    finally:temporary.unlink(missing_ok=True)
 
 GROUPS=STATE/'sonobus-groups.json'; LOCALMONPID=STATE/'local-monitor.pid'; EXTERNALDELAYPID=STATE/'external-delay.pid'; LOCALSINK=STATE/'local-output-route.json'; OUTPUT_MATRIX=STATE/'both-output-matrix'; BOTH_OUTPUT_DELAY=STATE/'both-output-sync-offset-ms'; LEGACY_BOTH_OUTPUT_DELAY=STATE/'both-output-local-delay-ms'
 MODES={
@@ -125,8 +129,7 @@ def configure_active_profile_runtime(chunksize,peak_limiter):
     devices=data.setdefault('devices',{});devices['chunksize']=chunksize
     playback=devices.setdefault('playback',{})
     playback['device']='camilladsp_peak_limited' if enabled else 'hw:Loopback,0,1'
-    atomic(path,yaml.safe_dump(data,sort_keys=False,allow_unicode=True))
-    validate_camilla_profile(path)
+    atomic(path,yaml.safe_dump(data,sort_keys=False,allow_unicode=True,encoding=None))
     return {'profile':selected,'chunksize':chunksize,'peakLimiter':enabled}
 
 def configure_both_output_filterless():
@@ -146,8 +149,7 @@ def configure_both_output_filterless():
         pipeline.append({'type':'Filter','channels':[channel],'names':['media_control_sync_delay']})
     data['title']='Filterless / Both-output sync'
     data['description']=f'Pass-through both-output profile; signed offset {offset} ms; delayed destination {delayed or "none"}'
-    atomic(path,yaml.safe_dump(data,sort_keys=False,allow_unicode=True))
-    validate_camilla_profile(path)
+    atomic(path,yaml.safe_dump(data,sort_keys=False,allow_unicode=True,encoding=None))
     return {'path':str(path),'milliseconds':offset,'delayed':delayed,'channel':channel if delayed else None}
 
 def verify_both_output_sync():
@@ -175,7 +177,6 @@ def verify_both_output_sync():
     expected_device='CamillaDSP SonoBus Left' if external_channel=='left' else 'CamillaDSP SonoBus Right'
     if policy.get('sendChannels')!=1 or policy.get('inputChannelsMask')!=expected_mask or policy.get('inputDevice')!=expected_device:
         raise RuntimeError('SonoBus policy does not match the processed external channel')
-    validate_camilla_profile(path)
     return {'active':True,'milliseconds':offset,'delayed':delayed,'delayChannel':expected_channel,
             'externalChannel':external_channel,'sendChannels':1,'inputChannelsMask':expected_mask,
             'inputDevice':policy['inputDevice'],'profile':str(path)}

@@ -60,6 +60,7 @@ chmod 700 "$STATE_DIR" 2>/dev/null || true
 printf '[%s] media-control pid=%s\n' "$(date -Iseconds 2>/dev/null || date)" "$$" >"$ACTION_LOG"
 FINAL_PAUSE_REACHED=0
 EXIT_HANDLER_RUNNING=0
+declare -a AUTO_SELECTED_SUMMARY=()
 
 cleanup() {
     if [[ "${SWAYNAG_PID:-}" =~ ^[1-9][0-9]*$ ]] &&
@@ -105,6 +106,11 @@ handle_script_exit() {
         if (( status != 0 )); then
             echo; echo "Audio script exited unexpectedly."; echo "Exit status: $status"
             [[ -s "$ACTION_LOG" ]] && echo "Details: $ACTION_LOG"
+        fi
+        if ((${#AUTO_SELECTED_SUMMARY[@]})); then
+            echo
+            echo "Automatically selected because only one valid option was available:"
+            printf '  %s\n' "${AUTO_SELECTED_SUMMARY[@]}"
         fi
         pause_before_close
     fi
@@ -177,6 +183,8 @@ run_quiet_action() {
     output="$("$@" 2>&1)"; status=$?
     if (( status != 0 )); then
         printf '%s\n' "$output" >&2
+        printf '%s\n' "$output" >>"$ACTION_LOG"
+        pause_before_close
         return "$status"
     fi
 }
