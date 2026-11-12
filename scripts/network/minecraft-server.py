@@ -57,7 +57,8 @@ def peer_groups():
     groups=[]
     if not PEERS.exists():return groups
     for number,raw in enumerate(PEERS.read_text().splitlines(),1):
-        fields=raw.split("#",1)[0].split()
+        fields=[field.strip("|,;") for field in raw.split("#",1)[0].split()]
+        fields=[field for field in fields if field]
         if not fields:continue
         if len(fields)<2:raise RuntimeError(f"Invalid peers line {number}: expected GROUP ADDRESS [ADDRESS ...]")
         groups.append((fields[0],fields[1:]))
@@ -149,7 +150,10 @@ def floating_claim():
     if current!=dev:
         probe=run(["sudo","arping","-D","-c","2","-w","2","-I",dev,FLOATING_IP],check=False,capture=True)
         if probe.returncode not in (0,):raise RuntimeError(f"Floating LAN address {FLOATING_IP} is already in use")
-        run(["sudo","ip","addr","add",f"{FLOATING_IP}/32","dev",dev,"label",f"{dev}:minecraft"])
+        # Do not add an IPv4 label here. Linux interface labels share IFNAMSIZ
+        # (15 bytes) with the base device name; names such as wlp0s20f3:minecraft
+        # are rejected with "Attribute failed policy validation".
+        run(["sudo","ip","addr","add",f"{FLOATING_IP}/32","dev",dev])
     run(["sudo","arping","-U","-c","3","-I",dev,FLOATING_IP],check=False,capture=True)
     NETWORK_STATE.parent.mkdir(parents=True,exist_ok=True)
     NETWORK_STATE.write_text(json.dumps({"device":dev,"gateway":gateway,"primary":address,"floating":FLOATING_IP})+"\n")
