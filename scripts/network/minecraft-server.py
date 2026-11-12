@@ -325,7 +325,7 @@ def status(machine=False):
     running=running_servers()
     if machine:
         suffix=f" floating={FLOATING_IP}" if floating_present() else ""
-        print(("running "+" ".join(running) if running else "stopped")+suffix);return 0 if running else 3
+        print(("running "+" ".join(running) if running else "stopped")+suffix);return 0
     names=available_servers();print("Available servers: "+(", ".join(names) or "none"));print("Running locally: "+(", ".join(running) or "none"))
     found,unreachable=remote_state()
     for label,address,servers in found:print(f"Remote {label} via {address}: {', '.join(servers)}")
