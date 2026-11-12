@@ -77,12 +77,13 @@ def query_group(addresses,args):
             failures.append(f"{address}: {error}");continue
         lines=[line.strip() for line in (r.stdout or "").splitlines() if line.strip()]
         status=next((line for line in reversed(lines)
-                     if line=="stopped" or line.startswith("stopped ") or
+                     if line=="transitioning" or
+                        line=="stopped" or line.startswith("stopped ") or
                         line=="running" or line.startswith("running ")),"")
         # The peer protocol is the machine-readable status line, not a generic
         # assumption that every useful remote command must return zero. Accept
         # both the current zero status and the historical stopped=3 status.
-        if (status=="stopped" or status.startswith("stopped ") or
+        if (status=="transitioning" or status=="stopped" or status.startswith("stopped ") or
                 status=="running" or status.startswith("running ")):
             return address,r,status,failures
         # run(capture=True) merges stderr into stdout, so CompletedProcess.stderr
@@ -98,7 +99,7 @@ def remote_state():
             detail="; ".join(failures) if failures else "no address attempted"
             unreachable.append(f"{label} ({detail})");continue
         fields=text.split()
-        names=fields[1:] if fields else []
+        names=["transitioning"] if text=="transitioning" else (fields[1:] if fields else [])
         found.append((label,address,names))
     return found,unreachable
 
@@ -308,6 +309,9 @@ def start(name=None,force=False):
     if active(name):print(f"{name} is already running locally.");return
     found,unreachable=remote_state()
     if unreachable and not force:raise RuntimeError("Cannot verify peer(s): "+", ".join(unreachable))
+    transitioning=[label for label,address,names in found if "transitioning" in names]
+    if transitioning:
+        raise RuntimeError("Peer transition already in progress on: "+", ".join(transitioning)+". Retry after it finishes.")
     for label,address,names in found:
         remote_servers=[item for item in names if not item.startswith("floating=")]
         owns_floating=any(item==f"floating={FLOATING_IP}" for item in names)
@@ -384,6 +388,16 @@ def status(machine=False):
     for label,address,servers in found:print(f"Remote {label} via {address}: {', '.join(servers)}")
     if unreachable:print("Unreachable peers: "+", ".join(unreachable))
     return 0 if running else 3
+def machine_status():
+    # A separate status process must report that start/stop currently owns the
+    # lock. Reporting plain "stopped" here allowed both laptops to start at once.
+    with LOCK.open("a+") as probe:
+        try:fcntl.flock(probe,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("transitioning");return 0
+        try:return status(True)
+        finally:fcntl.flock(probe,fcntl.LOCK_UN)
+
 def on_signal(sig,frame):
     if CRITICAL:print("\nCritical save/transfer continues; interrupt ignored.",file=sys.stderr);return
     raise KeyboardInterrupt
@@ -394,7 +408,7 @@ def main():
     # Machine status is a read-only peer probe. It must remain available while
     # start/stop owns the transition lock; otherwise a normal handover is
     # misreported as an unreachable peer.
-    if a.action=="status" and a.machine:return status(True)
+    if a.action=="status" and a.machine:return machine_status()
     if a.action=="menu-status":return menu_status()
     with LOCK.open("w") as lock:
         try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
