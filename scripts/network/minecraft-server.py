@@ -87,7 +87,7 @@ def resolved_peer_groups():
     return resolved
 
 def ssh(address,args):
-    return run(["ssh","-i",str(HOME/".ssh/minecraft_peers"),"-o","IdentitiesOnly=yes","-o","BatchMode=yes","-o","ConnectTimeout=4",address,"/home/joel/.config/sway/scripts/network/minecraft-server.py",*args],check=False,capture=True,timeout=300)
+    return run(["ssh","-i",str(HOME/".ssh/minecraft_peers"),"-o","IdentitiesOnly=yes","-o","StrictHostKeyChecking=accept-new","-o","BatchMode=yes","-o","ConnectTimeout=4",address,"/home/joel/.config/sway/scripts/network/minecraft-server.py",*args],check=False,capture=True,timeout=300)
 def query_group(addresses,args):
     failures=[]
     for address in addresses:
@@ -118,7 +118,7 @@ def validate_peer_identities():
         verified=False;failures=[]
         for address in addresses:
             try:
-                result=run(["ssh","-i",str(HOME/".ssh/minecraft_peers"),"-o","IdentitiesOnly=yes","-o","BatchMode=yes","-o","ConnectTimeout=4",address,
+                result=run(["ssh","-i",str(HOME/".ssh/minecraft_peers"),"-o","IdentitiesOnly=yes","-o","StrictHostKeyChecking=accept-new","-o","BatchMode=yes","-o","ConnectTimeout=4",address,
                             "tailscale status --json"],check=False,capture=True,timeout=15)
             except (subprocess.TimeoutExpired,OSError) as error:
                 failures.append(f"{address}: {error}");continue
@@ -384,7 +384,7 @@ def cluster_transition_lock(remote_action=False):
     if not addresses:raise RuntimeError(f"No SSH address for Minecraft coordinator {coordinator}")
     process=None;failure=[]
     for address in addresses:
-        command=["ssh","-i",str(HOME/".ssh/minecraft_peers"),"-o","IdentitiesOnly=yes","-o","BatchMode=yes","-o","ConnectTimeout=4",address,
+        command=["ssh","-i",str(HOME/".ssh/minecraft_peers"),"-o","IdentitiesOnly=yes","-o","StrictHostKeyChecking=accept-new","-o","BatchMode=yes","-o","ConnectTimeout=4",address,
                  "mkdir -p ~/minecraft-server/coordination && exec flock -n ~/minecraft-server/coordination/cluster.lock sh -c 'echo LOCKED; cat >/dev/null'"]
         try:
             candidate=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)

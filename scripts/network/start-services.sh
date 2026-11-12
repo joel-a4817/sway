@@ -5,7 +5,7 @@ MINECRAFT="$HOME/.config/sway/scripts/network/minecraft-server.py"
 IPAD="$HOME/.config/sway/scripts/network/start-ipad-webremote.sh"
 VNC_UNIT="camilladsp-wayvnc.service"
 PEERS="$HOME/.config/minecraft-server/peers"
-SSH=(ssh -i "$HOME/.ssh/minecraft_peers" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=4)
+SSH=(ssh -i "$HOME/.ssh/minecraft_peers" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=4)
 
 mapfile -t SERVERS < <("$MINECRAFT" list)
 THIS_DEVICE="$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName // empty' | sed 's/\.$//; s/\..*$//' || true)"
