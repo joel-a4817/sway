@@ -68,20 +68,33 @@ def peer_groups():
 def ssh(address,args):
     return run(["ssh","-o","BatchMode=yes","-o","ConnectTimeout=4",address,"/home/joel/.config/sway/scripts/network/minecraft-server.py",*args],check=False,capture=True,timeout=300)
 def query_group(addresses,args):
+    failures=[]
     for address in addresses:
         try:r=ssh(address,args)
-        except (subprocess.TimeoutExpired,OSError):continue
-        if r.returncode in (0,3):return address,r
-    return None,None
+        except subprocess.TimeoutExpired:
+            failures.append(f"{address}: timed out");continue
+        except OSError as error:
+            failures.append(f"{address}: {error}");continue
+        lines=[line.strip() for line in r.stdout.splitlines() if line.strip()]
+        status=lines[-1] if lines else ""
+        # The peer protocol is the machine-readable status line, not a generic
+        # assumption that every useful remote command must return zero. Accept
+        # both the current zero status and the historical stopped=3 status.
+        if (status=="stopped" or status.startswith("stopped ") or
+                status=="running" or status.startswith("running ")):
+            return address,r,status,failures
+        detail=(r.stderr.strip() or r.stdout.strip() or f"exit {r.returncode}")
+        failures.append(f"{address}: {detail}")
+    return None,None,"",failures
 def remote_state():
-    found=[]; unreachable=[]
+    found=[];unreachable=[]
     for label,addresses in peer_groups():
-        address,r=query_group(addresses,["status","--machine"])
-        if not address:unreachable.append(label);continue
-        text=r.stdout.strip()
-        if text.startswith("running"):
-            names=text.split()[1:]
-            found.append((label,address,names))
+        address,r,text,failures=query_group(addresses,["status","--machine"])
+        if not address:
+            detail="; ".join(failures) if failures else "no address attempted"
+            unreachable.append(f"{label} ({detail})");continue
+        names=text.split()[1:] if text.startswith("running") else []
+        found.append((label,address,names))
     return found,unreachable
 
 def syncthing_config():
