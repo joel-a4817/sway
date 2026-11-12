@@ -353,6 +353,10 @@ def main():
     p=argparse.ArgumentParser();p.add_argument("action",nargs="?",default="toggle",choices=["toggle","start","stop","status","logs","takeover","list"]);p.add_argument("server",nargs="?");p.add_argument("--machine",action="store_true");p.add_argument("--remote",action="store_true");a=p.parse_args()
     for d in (ROOT,RUNTIME_ROOT,BACKUPS,COORD):d.mkdir(parents=True,exist_ok=True)
     for sig in (signal.SIGINT,signal.SIGTERM,signal.SIGHUP):signal.signal(sig,on_signal)
+    # Machine status is a read-only peer probe. It must remain available while
+    # start/stop owns the transition lock; otherwise a normal handover is
+    # misreported as an unreachable peer.
+    if a.action=="status" and a.machine:return status(True)
     with LOCK.open("w") as lock:
         try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         except BlockingIOError:raise RuntimeError("Another Minecraft transition is in progress")
