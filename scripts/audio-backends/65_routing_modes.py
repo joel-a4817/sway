@@ -137,6 +137,10 @@ def apply_mode(name,password=None,restore_camilla=True,output=None,output_resolv
         selected=output if output_resolved else _physical_output_route(output)
         # Even pre-resolved callers are revalidated against the live physical set.
         selected=_physical_output_route(dict(selected,_remembered=True))
+    # In both-output modes, one process reads the processed stereo stream once
+    # and publishes two independent mono ALSA endpoints before either consumer starts.
+    if both:start_both_distributor()
+    else:stop_both_distributor()
     if direct:
         # Laptop -> Laptop with No filter is genuinely direct PipeWire playback.
         # Do not open either Loopback endpoint: there is no CamillaDSP/SonoBus
@@ -158,11 +162,6 @@ def apply_mode(name,password=None,restore_camilla=True,output=None,output_resolv
         if local:start_local_monitor(selected,resolved=True)
         elif alive(rpid(LOCALMONPID)):stop_local_monitor()
     stop_external_delay()
-    if sono and name in ('ipad_both','laptop_both') and both_output_local_delay_ms()<0:
-        start_external_delay()
-        # effective_mode_policy was calculated before the relay existed. Re-read
-        # it now so SonoBus is restarted on the dedicated delayed mono endpoint.
-        policy=effective_mode_policy(name)
     if sono:
         # Negative sync uses a different ALSA capture endpoint. Always restart
         # SonoBus after rebuilding that relay; persisted XML alone does not

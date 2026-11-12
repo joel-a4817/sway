@@ -439,41 +439,32 @@ def stop_external_delay():
     EXTERNALDELAYPID.unlink(missing_ok=True)
 
 
-def start_external_delay():
-    """Delay the single external mono branch for negative sync offsets."""
-    offset=both_output_local_delay_ms()
-    if offset>=0:return None
-    matrix=both_output_matrix();source='c0' if matrix['left']=='external' else 'c1'
-    ffmpeg=shutil.which('ffmpeg')
-    if not ffmpeg:raise RuntimeError('ffmpeg is required to isolate the external mono channel')
-    delay_script=Path(__file__).resolve().parent/'audio-delay-pcm.py'
-    if not delay_script.is_file():raise RuntimeError('Missing PCM delay backend: '+str(delay_script))
-    audio_filter=f'pan=mono|c0={source}'
-    device='hw:Loopback,0,2'
-    command='set -o pipefail; "$1" -q -D camilladsp_output_shared -r 96000 -f S32_LE -c 2 -t raw | "$2" -hide_banner -loglevel error -f s32le -ar 96000 -ac 2 -i pipe:0 -af "$6" -f s32le -ar 96000 -ac 1 pipe:1 | "$3" "$7" --milliseconds "$5" --rate 96000 --channels 1 --bytes-per-sample 4 | "$4" -q -D hw:Loopback,0,2 -r 96000 -f S32_LE -c 1 -t raw'
-    log_path=STATE/'external-delay.log'
-    with log_path.open('ab',buffering=0) as log:
-        process=subprocess.Popen([exe('bash'),'-c',command,'external-delay',exe('arecord'),ffmpeg,exe('python3'),exe('aplay'),str(abs(offset)),audio_filter,str(delay_script)],stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
-    EXTERNALDELAYPID.write_text(str(process.pid)+'\n')
-    time.sleep(.15)
-    if process.poll() is not None:
-        EXTERNALDELAYPID.unlink(missing_ok=True)
-        raise RuntimeError('External delay relay exited: '+log_tail(log_path)[-1500:])
-    return process.pid
+def stop_both_distributor():
+    pid=rpid(SPLITPID)
+    if alive(pid):
+        try:os.killpg(pid,signal.SIGTERM)
+        except OSError:
+            try:os.kill(pid,signal.SIGTERM)
+            except OSError:pass
+        deadline=time.monotonic()+2.0
+        while alive(pid) and time.monotonic()<deadline:time.sleep(.03)
+        if alive(pid):
+            try:os.killpg(pid,signal.SIGKILL)
+            except OSError:pass
+    SPLITPID.unlink(missing_ok=True)
 
-def verify_both_delay_runtime():
-    """Verify the selected branch owns a live relay after mode reapplication."""
-    offset=both_output_local_delay_ms();mode=audio_mode()
-    if mode not in ('ipad_both','laptop_both'):return {'active':False,'reason':'not-both-output'}
-    if offset<0:
-        pid=rpid(EXTERNALDELAYPID)
-        if not alive(pid):raise RuntimeError('Negative sync offset external relay is not running; '+log_tail(STATE/'external-delay.log')[-1000:])
-        return {'active':True,'branch':'external','milliseconds':abs(offset),'pid':pid}
-    if offset>0:
-        pid=rpid(LOCALMONPID)
-        if not alive(pid):raise RuntimeError('Positive sync offset PC relay is not running; '+log_tail(STATE/'local-monitor.log')[-1000:])
-        return {'active':True,'branch':'pc','milliseconds':offset,'pid':pid}
-    return {'active':True,'branch':None,'milliseconds':0.0}
+def start_both_distributor():
+    stop_both_distributor()
+    matrix=both_output_matrix();external='left' if matrix['left']=='external' else 'right'
+    script=Path(__file__).resolve().parent/'audio-split-distributor.py'
+    if not script.is_file():raise RuntimeError('Missing split distributor: '+str(script))
+    logpath=STATE/'both-output-distributor.log';logpath.write_text('',encoding='utf-8')
+    with logpath.open('ab',buffering=0) as log:
+        process=subprocess.Popen([exe('python3'),str(script),'--external-channel',external],stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True,env=media_env())
+    SPLITPID.write_text(str(process.pid)+'\n');time.sleep(.3)
+    if process.poll() is not None:
+        SPLITPID.unlink(missing_ok=True);raise RuntimeError('Both-output distributor exited: '+log_tail(logpath)[-1500:])
+    return process.pid
 
 def start_local_monitor(route=None,resolved=False,persist=True):
     selected=route if resolved else choose_output_route(route)
@@ -489,20 +480,16 @@ def start_local_monitor(route=None,resolved=False,persist=True):
     stop_local_monitor()
     both=audio_mode() in ('ipad_both','laptop_both')
     local_delay=both_output_local_delay_ms() if both else 0.0
-    if both:
+    if local_delay<0:raise RuntimeError('Negative both-output offsets are unsupported; delay the PC branch with 0 to 500 ms')
+    if both and local_delay>0:
         ffmpeg=shutil.which('ffmpeg')
-        if not ffmpeg:raise RuntimeError('ffmpeg is required for isolated mono both-output playback')
-        matrix=both_output_matrix();pc_source='c1' if matrix['right']=='pc' else 'c0'
-        filters=[f'pan=stereo|c0={pc_source}|c1={pc_source}']
-        audio_filter=','.join(filters)
-        if local_delay>0:
-            delay_script=Path(__file__).resolve().parent/'audio-delay-pcm.py'
-            if not delay_script.is_file():raise RuntimeError('Missing PCM delay backend: '+str(delay_script))
-            command='set -o pipefail; "$1" -q -D camilladsp_output_shared -r 96000 -f S32_LE -c 2 -t raw | "$2" -hide_banner -loglevel error -f s32le -ar 96000 -ac 2 -i pipe:0 -af "$6" -f s32le -ar 96000 -ac 2 pipe:1 | "$3" "$7" --milliseconds "$5" --rate 96000 --channels 2 --bytes-per-sample 4 | "$4" --playback --device="$8" --rate=96000 --format=s32le --channels=2'
-            args=[exe('bash'),'-c',command,'monitor',exe('arecord'),ffmpeg,exe('python3'),exe('pacat'),str(local_delay),audio_filter,str(delay_script),sink]
-        else:
-            command='set -o pipefail; "$1" -q -D camilladsp_output_shared -r 96000 -f S32_LE -c 2 -t raw | "$2" -hide_banner -loglevel error -f s32le -ar 96000 -ac 2 -i pipe:0 -af "$4" -f s32le -ar 96000 -ac 2 pipe:1 | "$3" --playback --device="$5" --rate=96000 --format=s32le --channels=2'
-            args=[exe('bash'),'-c',command,'monitor',exe('arecord'),ffmpeg,exe('pacat'),audio_filter,sink]
+        if not ffmpeg:raise RuntimeError('ffmpeg is required for both-output PC delay')
+        samples=int(round(local_delay*96.0))
+        audio_filter=f'adelay={samples}S|{samples}S'
+        # The distributor already extracted the opposite PC mono channel to
+        # camilladsp_pc_mono. Duplicate that one channel to the physical stereo sink.
+        command='set -o pipefail; "$1" -q -D camilladsp_pc_mono -r 96000 -f S32_LE -c 1 -t raw | "$2" -hide_banner -loglevel error -f s32le -ar 96000 -ac 1 -i pipe:0 -af "$5" -f s32le -ar 96000 -ac 2 pipe:1 | "$3" --playback --device="$4" --rate=96000 --format=s32le --channels=2'
+        args=[exe('bash'),'-c',command,'monitor',exe('arecord'),ffmpeg,exe('pacat'),sink,'pan=stereo|c0=c0|c1=c0']
     else:
         command='set -o pipefail; "$1" -q -D camilladsp_output_shared -r 96000 -f S32_LE -c 2 -t raw | "$2" --playback --device="$3" --rate=96000 --format=s32le --channels=2'
         args=[exe('bash'),'-c',command,'monitor',exe('arecord'),exe('pacat'),sink]

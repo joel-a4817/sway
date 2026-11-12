@@ -39,7 +39,7 @@ def atomic(path,text):
         os.replace(temporary,path)
     finally:temporary.unlink(missing_ok=True)
 
-GROUPS=STATE/'sonobus-groups.json'; LOCALMONPID=STATE/'local-monitor.pid'; EXTERNALDELAYPID=STATE/'external-delay.pid'; LOCALSINK=STATE/'local-output-route.json'; OUTPUT_MATRIX=STATE/'both-output-matrix'; BOTH_OUTPUT_DELAY=STATE/'both-output-sync-offset-ms'; LEGACY_BOTH_OUTPUT_DELAY=STATE/'both-output-local-delay-ms'
+GROUPS=STATE/'sonobus-groups.json'; LOCALMONPID=STATE/'local-monitor.pid'; EXTERNALDELAYPID=STATE/'external-delay.pid'; SPLITPID=STATE/'both-output-distributor.pid'; LOCALSINK=STATE/'local-output-route.json'; OUTPUT_MATRIX=STATE/'both-output-matrix'; BOTH_OUTPUT_DELAY=STATE/'both-output-sync-offset-ms'; LEGACY_BOTH_OUTPUT_DELAY=STATE/'both-output-local-delay-ms'
 MODES={
 'ipad_external':('iPad → external','airplay',False,True),
 'laptop_external':('Laptop → external','system',False,True),
@@ -100,7 +100,7 @@ def both_output_local_delay_ms():
     return max(-500.0,min(500.0,value))
 def set_both_output_local_delay_ms(value):
     value=float(value)
-    if not -500.0<=value<=500.0:raise ValueError('Both-output sync offset must be between -500 and 500 ms')
+    if not 0.0<=value<=500.0:raise ValueError('Both-output PC delay must be between 0 and 500 ms')
     atomic(BOTH_OUTPUT_DELAY,('{:.3f}'.format(value).rstrip('0').rstrip('.') or '0')+'\n')
     return {'milliseconds':value}
 
@@ -136,23 +136,29 @@ def configure_both_output_filterless():
     path=PROFILES/BOTH_FILTER
     if not path.is_file():raise RuntimeError(f'Missing both-output profile: {path}')
     data=yaml.safe_load(path.read_text(encoding='utf-8')) or {}
-    filters=data.setdefault('filters',{});pipeline=data.setdefault('pipeline',[])
-    filters.pop('media_control_sync_delay',None)
-    pipeline[:]=[step for step in pipeline if not (isinstance(step,dict) and 'media_control_sync_delay' in step.get('names',[]))]
-    matrix=both_output_matrix()
-    data['title']='Filterless / split mono both-output'
-    data['description']='One mono source channel to SonoBus and the opposite mono source channel to PC; branch delay is applied only in the PC monitor'
+    data['mixers']={'media_control_stereo_identity':{'channels':{'in':2,'out':2},'mapping':[
+        {'dest':0,'sources':[{'channel':0,'gain':0.0}]},
+        {'dest':1,'sources':[{'channel':1,'gain':0.0}]},
+    ]}}
+    data['filters']={};data['pipeline']=[{'type':'Mixer','name':'media_control_stereo_identity'}]
+    offset=both_output_local_delay_ms();matrix=both_output_matrix();delayed=None
+    if offset:
+        delayed='external' if offset<0 else 'pc';channel=0 if matrix['left']==delayed else 1
+        data['filters']['media_control_sync_delay']={'type':'Delay','parameters':{'delay':abs(offset),'unit':'ms','subsample':False}}
+        data['pipeline'].append({'type':'Filter','channels':[channel],'names':['media_control_sync_delay']})
+    data['title']='Filterless / dedicated split distributor'
+    data['description']='Identity stereo processing; separate mono ALSA subdevices for SonoBus and PC playback'
     atomic(path,yaml.safe_dump(data,sort_keys=False,allow_unicode=True,encoding=None))
-    return {'path':str(path),'milliseconds':both_output_local_delay_ms(),'externalChannel':matrix['left'],'pcChannel':matrix['right']}
+    return {'path':str(path),'milliseconds':offset,'delayedBranch':delayed,'externalChannel':matrix['left'],'pcChannel':matrix['right']}
 
 def verify_both_output_sync():
     mode=audio_mode()
     if mode not in ('ipad_both','laptop_both'):return {'active':False,'reason':'not-both-output'}
-    offset=both_output_local_delay_ms();policy=effective_mode_policy(mode);matrix=both_output_matrix()
-    expected_device=('CamillaDSP SonoBus External Delayed' if offset<0 else 'CamillaDSP SonoBus '+('Left' if matrix['left']=='external' else 'Right'))
-    if policy.get('sendChannels')!=1 or policy.get('inputChannelsMask')!='1' or policy.get('inputDevice')!=expected_device:
-        raise RuntimeError('Both-output SonoBus policy is not isolated to exactly one mono channel')
-    return {'active':True,'mode':mode,'externalMono':matrix['left'],'pcMono':matrix['right'],'externalDevice':expected_device,'sendChannels':1,'pcDelayMilliseconds':offset}
+    offset=both_output_local_delay_ms();policy=effective_mode_policy(mode)
+    if offset<0:raise RuntimeError('Negative both-output offsets are unsupported; use 0 to 500 ms to delay the PC branch')
+    if policy.get('sendChannels')!=2 or policy.get('inputChannelsMask')!='11' or policy.get('inputDevice')!='CamillaDSP SonoBus':
+        raise RuntimeError('Both-output SonoBus policy is not full stereo')
+    return {'active':True,'mode':mode,'stereo':True,'externalDevice':'CamillaDSP SonoBus','pcDelayMilliseconds':offset,'externalDelayMilliseconds':0.0}
 
 def both_output_matrix():
     default={'left':'external','right':'pc'}
@@ -175,11 +181,11 @@ def effective_mode_policy(name):
     if name not in ('ipad_both','laptop_both'):return policy
     matrix=both_output_matrix();external_is_left=matrix['left']=='external'
     policy['sendChannels']=1
-    policy['inputDevice']=('CamillaDSP SonoBus External Delayed' if both_output_local_delay_ms()<0 else 'CamillaDSP SonoBus '+('Left' if external_is_left else 'Right'))
+    policy['inputDevice']='CamillaDSP External Mono'
     policy['inputChannelsMask']='1'
     policy['externalChannel']='left' if external_is_left else 'right'
     policy['pcChannel']='right' if external_is_left else 'left'
-    policy['description']=policy['description']+'; exactly one mono channel to SonoBus and the opposite mono channel to PC output'
+    policy['description']=policy['description']+'; dedicated external mono ALSA subdevice; opposite mono on PC-only subdevice'
     return policy
 
 def _read_json(path,default):

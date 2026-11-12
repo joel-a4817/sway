@@ -129,8 +129,13 @@ def restart_sonobus(password=None,policy=None,normalize=False):
                 SONOBUS_PROCESS=None
                 tail=log_tail(logpath)[-2500:]
                 raise RuntimeError('SonoBus failed to start: '+tail)
-            if process.pid in sonopids():break
+            live=sonopids()
+            if live=={process.pid}:break
+            if len(live)>1:
+                stop_sonobus();raise RuntimeError('Duplicate SonoBus instances appeared during restart')
             time.sleep(.05)
+        else:
+            stop_sonobus();raise RuntimeError('Exactly one SonoBus process was not established')
         move_sonobus_to_workspace1(timeout=20.0)
         if normalize and not STOPPED.exists():normalize_with_media()
         return {'pid':process.pid,'profile':state['active'],'group':item['group'],**applied}

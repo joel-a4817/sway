@@ -137,6 +137,7 @@ def stop_audio_services(mark_stopped=True,stop_pipewire=True):
         STOP_ACK.unlink(missing_ok=True)
         try:
             stop_local_monitor()
+            stop_both_distributor()
             stop_external_delay()
             stop_sonobus()
             stop_bypass()
@@ -342,7 +343,6 @@ def topology_cli():
                 stop_camilla(include_stale=True);start_camilla(PROFILES/BOTH_FILTER);ACTIVE.write_text(BOTH_FILTER+'\n')
                 apply_mode(audio_mode(),restore_camilla=False)
                 result['verification']=verify_both_output_sync()
-                result['runtimeDelay']=verify_both_delay_runtime()
             print(json.dumps(result));return
         if len(sys.argv)==2 and sys.argv[1]=='--audio-toggle':
             print(json.dumps(toggle_audio_services()))
