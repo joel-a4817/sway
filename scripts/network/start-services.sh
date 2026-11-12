@@ -7,15 +7,15 @@ VNC_UNIT="camilladsp-wayvnc.service"
 PEERS="$HOME/.config/minecraft-server/peers"
 
 mapfile -t SERVERS < <("$MINECRAFT" list)
+THIS_DEVICE="$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName // empty' | sed 's/\.$//; s/\..*$//' || true)"
+[[ -n "$THIS_DEVICE" ]] || THIS_DEVICE="$(hostname -s)"
 declare -A LOCAL=()
 declare -A REMOTE=()
-declare -A REMOTE_TRANSITION=()
 peer_error=""
 
 # Local truth: systemd on this laptop.
 for server in "${SERVERS[@]}"; do
-    state="$(systemctl is-active "minecraft-server-${server}.service" 2>/dev/null || true)"
-    LOCAL["$server"]="${state:-unknown}"
+    systemctl is-active --quiet "minecraft-server-${server}.service" && LOCAL["$server"]=1 || true
 done
 
 # Remote truth: systemd directly on each configured peer. Do not depend on
@@ -26,56 +26,40 @@ if [[ -s "$PEERS" ]]; then
         read -ra fields <<< "$line"
         ((${#fields[@]} >= 2)) || continue
         label="${fields[0]//[|,;]/}"
-        reply=""
-        errors=()
         verified=0
+        errors=()
         for address in "${fields[@]:1}"; do
             address="${address//[|,;]/}"
             [[ -n "$address" ]] || continue
-            # First verify SSH once. Then query each unit separately so an
-            # inactive unit (systemctl exit 3) cannot make the whole peer look
-            # unreachable and shell quoting cannot corrupt the server list.
-            if ! output="$(ssh -o BatchMode=yes -o ConnectTimeout=4 "$address" true 2>&1)"; then
-                errors+=("$address: ${output:-SSH verification failed}")
+            # One SSH invocation returns an exact ActiveState for every unit.
+            # systemctl show exits successfully for inactive units, unlike
+            # systemctl is-active, so stopped peers cannot be mistaken for SSH failures.
+            remote="$(ssh -o BatchMode=yes -o ConnectTimeout=4 "$address"                 systemctl show --property=ActiveState --value                 "${SERVERS[@]/#/minecraft-server-}" 2>&1)" || {
+                errors+=("$address: $remote")
+                continue
+            }
+            mapfile -t states <<< "$remote"
+            if ((${#states[@]} != ${#SERVERS[@]})); then
+                errors+=("$address: expected ${#SERVERS[@]} unit states, got ${#states[@]}")
                 continue
             fi
             verified=1
-            for server in "${SERVERS[@]}"; do
-                if ssh -o BatchMode=yes -o ConnectTimeout=4 "$address" \
-                    systemctl is-active --quiet "minecraft-server-${server}.service"; then
-                    reply+="${reply:+$'\n'}$server"
-                else
-                    rc=$?
-                    # systemctl returns 3 when the known unit is simply inactive.
-                    if ((rc != 3)); then
-                        errors+=("$address: status check for $server exited $rc")
-                        verified=0
-                        break
-                    fi
-                fi
+            for i in "${!SERVERS[@]}"; do
+                [[ "${states[$i]}" == active ]] || continue
+                name="${SERVERS[$i]}"
+                REMOTE["$name"]="${REMOTE[$name]:+${REMOTE[$name]},}$label"
             done
-            if ((verified)); then
-                machine="$(ssh -o BatchMode=yes -o ConnectTimeout=4 "$address" \
-                    '~/.config/sway/scripts/network/minecraft-server.py status --machine' 2>&1 || true)"
-                protocol="$(printf '%s\n' "$machine" | awk '/^(running|stopped|transitioning)( |$)/ {line=$0} END {print line}')"
-                [[ "$protocol" == transitioning ]] && REMOTE_TRANSITION["$label"]=1
-                break
-            fi
+            break
         done
         if ((! verified)); then
             peer_error+="${peer_error:+; }$label (${errors[*]:-no usable address})"
-            continue
         fi
-        while IFS= read -r server; do
-            [[ -n "$server" ]] || continue
-            REMOTE["$server"]="${REMOTE[$server]:+${REMOTE[$server]},}$label"
-        done <<< "$reply"
     done < "$PEERS"
 else
     peer_error="peers file missing or empty: $PEERS"
 fi
 
-printf '%s\n' 'Toggle services'
+printf 'Toggle services [this device: %s]\n' "$THIS_DEVICE"
 printf '%s\n' 'Enter comma-separated numbers. [0] exits.'
 printf '  [E] Exit\n'
 if "$IPAD" --status >/dev/null 2>&1; then
@@ -92,26 +76,18 @@ fi
 for i in "${!SERVERS[@]}"; do
     server="${SERVERS[$i]}"
     number=$((i + 3))
-    local_state="${LOCAL[$server]:-unknown}"
+    local_running="${LOCAL[$server]:-}"
     remote_running="${REMOTE[$server]:-}"
-    if [[ "$local_state" == active && -n "$remote_running" ]]; then
+    if [[ -n "$local_running" && -n "$remote_running" ]]; then
         printf '  [%d] Minecraft: %s [CONFLICT: local + %s]\n' "$number" "$server" "$remote_running"
-    elif [[ "$local_state" == active ]]; then
+    elif [[ -n "$local_running" ]]; then
         printf '  [%d] Minecraft: %s [running here]\n' "$number" "$server"
     elif [[ -n "$remote_running" ]]; then
         printf '  [%d] Minecraft: %s [running on %s]\n' "$number" "$server" "$remote_running"
-    elif [[ "$local_state" == failed ]]; then
-        printf '  [%d] Minecraft: %s [FAILED here]\n' "$number" "$server"
-    elif [[ "$local_state" == activating || "$local_state" == deactivating ]]; then
-        printf '  [%d] Minecraft: %s [%s here]\n' "$number" "$server" "$local_state"
     else
         printf '  [%d] Minecraft: %s\n' "$number" "$server"
     fi
 done
-if ((${#REMOTE_TRANSITION[@]})); then
-    transitioning="$(IFS=,; echo "${!REMOTE_TRANSITION[*]}")"
-    printf '  [~] Minecraft transition in progress on: %s\n' "$transitioning"
-fi
 [[ -z "$peer_error" ]] || printf '  [!] Peer unavailable: %s\n' "$peer_error"
 
 read -r -p 'Selection: ' input
