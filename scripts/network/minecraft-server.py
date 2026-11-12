@@ -163,11 +163,11 @@ def floating_claim():
     if current and current!=dev:
         run(["sudo","ip","addr","del",f"{FLOATING_IP}/32","dev",current],check=False,capture=True)
     if current!=dev:
-        probe=run(["sudo","arping","-D","-c","2","-w","2","-I",dev,FLOATING_IP],check=False,capture=True)
-        if probe.returncode not in (0,):raise RuntimeError(f"Floating LAN address {FLOATING_IP} is already in use")
-        # Do not add an IPv4 label here. Linux interface labels share IFNAMSIZ
-        # (15 bytes) with the base device name; names such as wlp0s20f3:minecraft
-        # are rejected with "Attribute failed policy validation".
+        # Ownership is coordinated through the authenticated Tailscale peers.
+        # Do not use arping -D as an ownership test: some Wi-Fi access points and
+        # routers proxy-answer ARP probes for a recently used forwarded address,
+        # producing a false conflict on one interface/laptop but not the other.
+        # Gratuitous ARP below still updates the LAN after ownership moves.
         run(["sudo","ip","addr","add",f"{FLOATING_IP}/32","dev",dev])
     run(["sudo","arping","-U","-c","3","-I",dev,FLOATING_IP],check=False,capture=True)
     NETWORK_STATE.parent.mkdir(parents=True,exist_ok=True)
