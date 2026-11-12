@@ -5,6 +5,7 @@ MINECRAFT="$HOME/.config/sway/scripts/network/minecraft-server.py"
 IPAD="$HOME/.config/sway/scripts/network/start-ipad-webremote.sh"
 VNC_UNIT="camilladsp-wayvnc.service"
 PEERS="$HOME/.config/minecraft-server/peers"
+SSH=(ssh -i "$HOME/.ssh/minecraft_peers" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=4)
 
 mapfile -t SERVERS < <("$MINECRAFT" list)
 THIS_DEVICE="$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName // empty' | sed 's/\.$//; s/\..*$//' || true)"
@@ -42,13 +43,13 @@ if [[ -s "$PEERS" ]]; then
             user="${configured%@*}"
             [[ "$configured" == *"@"* ]] || user="${USER:-joel}"
             address="$user@$peer_dns"
-            if ! ssh -o BatchMode=yes -o ConnectTimeout=4 "$address" true >/dev/null 2>&1; then
+            if ! "${SSH[@]}" "$address" true >/dev/null 2>&1; then
                 errors+=("$address: SSH verification failed")
                 continue
             fi
             verified=1
             for name in "${SERVERS[@]}"; do
-                state="$(ssh -o BatchMode=yes -o ConnectTimeout=4 "$address" \
+                state="$("${SSH[@]}" "$address" \
                     systemctl show --property=ActiveState --value \
                     "minecraft-server-${name}.service" 2>&1)" || {
                     errors+=("$address: status check failed for $name: $state")
