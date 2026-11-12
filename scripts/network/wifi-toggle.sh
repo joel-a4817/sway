@@ -6,7 +6,6 @@ ACTION_LOG="$STATE_DIR/action.$$"
 HOTSPOT='AirPlay Direct'
 mkdir -p "$STATE_DIR"
 rm -f "$RESULT_FILE" "$ACTION_LOG"
-finish(){ touch "$RESULT_FILE"; }
 export STATE_DIR RESULT_FILE ACTION_LOG HOTSPOT
 
 swaynag -t warning -y overlay -m 'Network' \

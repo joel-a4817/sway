@@ -132,26 +132,32 @@ def _print_input_row(number,row):
     lines=textwrap.wrap(label,width=width,break_long_words=True,break_on_hyphens=False) or ['']
     print(prefix+lines[0]);padding=' '*len(prefix)
     for line in lines[1:]:print(padding+line)
-def _pick_input(label,rows,current=None):
+class InputBack(Exception):pass
+class InputExit(Exception):pass
+
+def _pick_input(label,rows,current=None,allow_back=False):
     if not rows:raise RuntimeError('No '+label+' choices are exposed')
     selected=next((row for row in rows if str(row.get('index',row.get('name')))==str(current)
                    and _input_selectable_option(row)),None)
-    print('\n'+label)
+    print('\n'+label);print('[E] Exit')
+    if allow_back:print('[B] Back')
     if selected:_print_input_row(0,dict(selected,label='Current ('+_input_label(selected)[1]+')'))
-    else:print('[N/A] [0] Current')
     for number,row in enumerate(rows,1):_print_input_row(number,row)
     while True:
         answer=input('Select: ').strip()
-        if answer.lower() in ('q','quit',''):raise KeyboardInterrupt('Selection cancelled')
+        if answer.lower()=='e':raise InputExit()
+        if answer.lower()=='b':
+            if allow_back:raise InputBack()
+            print('Back is unavailable at this first step.');continue
         if answer.isdecimal():
             number=int(answer)
             if number==0 and selected is not None:return selected
             if 1<=number<=len(rows):
                 choice=rows[number-1]
                 if _input_selectable_option(choice):return choice
-                print('That item cannot be selected.')
-                continue
-        print('Select an available number.')
+                print('That item cannot be selected.');continue
+        print('Select E, B where shown, 0 where shown, or an available number.')
+
 def repair_preserved_output(route):
     """Rebind local playback after an input change recreates shared-card nodes.
 
@@ -378,13 +384,13 @@ def select_input_interactive(finalize=None):
             if stage_original is not None:
                 _input_stage(card)
             live=_input_card(card)
-            profile=(_pick_input('Audio input | Profile',live['profiles'],live['activeProfile'])
+            profile=(_pick_input('Audio input | Profile',live['profiles'],live['activeProfile'],allow_back=True)
                      if live['profiles'] else {'index':live['activeProfile'],'name':'current'})
             if profile['index'] is not None and _input_card(card)['activeProfile']!=profile['index'] and not card.startswith('virtual:'):
                 _input_set_profile(card,profile['index'])
             current=_input_card(card)
             routes=[r for r in current['routes'] if _available_option(r) and (not r['profiles'] or profile['index'] is None or str(profile['index']) in {str(x) for x in r['profiles']})]
-            route=_pick_input('Audio input | Route',routes,current['activeRoutes'][0] if current['activeRoutes'] else None) if routes else None
+            route=_pick_input('Audio input | Route',routes,current['activeRoutes'][0] if current['activeRoutes'] else None,allow_back=True) if routes else None
             if route and route['index'] not in _input_card(card)['activeRoutes']:
                 _input_set_route(card,route['index'])
             current=_input_card(card)

@@ -1,4 +1,3 @@
-HPCF_CONFIG=ADD_AUDIO_DEVICE
 
 def _filter_relative(path):
     path=Path(path).resolve();base=PROFILES.resolve()
@@ -27,7 +26,6 @@ def profiles():
         return sorted(found,key=lambda item:tuple(part.casefold() for part in item.relative_to(PROFILES).parts))
     return cached('profiles',5.0,load)
 
-BRIR_DIR=PROFILES
 
 def profile_id(path):return _filter_relative(path)
 

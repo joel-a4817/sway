@@ -8,7 +8,20 @@ DELAY_JSON="$(python3 "$TOPOLOGY_SCRIPT" --both-delay-status 2>>"$ACTION_LOG" ||
 BOTH_DELAY_MS="$(jq -r '.milliseconds // 0' <<<"$DELAY_JSON" 2>/dev/null)"
 ARGS=(-t warning -y overlay -m 'Media control')
 ARGS+=( -z "$AUDIO_TOGGLE_LABEL" "printf '%s\n' audio-toggle > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
-ARGS+=( -z "Both-output sync delay (${BOTH_DELAY_MS} ms)" "printf '%s\n' both-delay > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
+CURRENT_MODE="$(python3 "$TOPOLOGY_SCRIPT" --mode-state 2>>"$ACTION_LOG" | jq -r '.mode // empty')"
+if [[ "$CURRENT_MODE" == ipad_both || "$CURRENT_MODE" == laptop_both ]]; then
+  ARGS+=( -z "Both-output sync delay (${BOTH_DELAY_MS} ms)" "printf '%s\n' both-delay > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
+else
+  RUNTIME_JSON="$(python3 "$TOPOLOGY_SCRIPT" --profile-runtime-status 2>>"$ACTION_LOG" || true)"
+  runtime_available="$(jq -r '.available // false' <<<"$RUNTIME_JSON" 2>/dev/null)"
+  if [[ "$runtime_available" == true ]]; then
+    runtime_chunk="$(jq -r '.chunksize' <<<"$RUNTIME_JSON")"
+    runtime_limiter="$(jq -r 'if .peakLimiter then "on" else "off" end' <<<"$RUNTIME_JSON")"
+    ARGS+=( -z "CamillaDSP runtime (${runtime_chunk} frames, limiter ${runtime_limiter})" "printf '%s\n' profile-runtime > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
+  else
+    ARGS+=( -z 'CamillaDSP runtime unavailable' "printf '%s\n' profile-runtime > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
+  fi
+fi
 SAFE_JSON="$(python3 "$TOPOLOGY_SCRIPT" --safe-volume-status 2>>"$ACTION_LOG" || true)"
 if [[ "$(jq -r '.available // false' <<<"$SAFE_JSON" 2>/dev/null)" == true ]]; then
   SAFE_PERCENT="$(jq -r '.percent' <<<"$SAFE_JSON")"
@@ -18,6 +31,8 @@ else
   ARGS+=( -z 'Safe max N/A' "printf '%s\n' safe-volume-na > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
 fi
 ARGS+=( -z 'CamillaDSP filters' "printf '%s\n' select-filter > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
+ARGS+=( -z 'Create custom spatial filter' "printf '%s\n' create-custom-filter > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
+ARGS+=( -z 'All Media Control status' "printf '%s\n' all-status > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
 ARGS+=( -z 'Audio input' "printf '%s\n' select-input > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
 ARGS+=( -z 'Camera' "printf '%s\n' select-camera > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
 ARGS+=( -z 'Audio output' "printf '%s\n' select-output > '$CARD_SELECTION_FILE'; touch '$RESULT_FILE'" )
@@ -37,16 +52,78 @@ normalize_menu_step || exit 1
 case "$selected" in
  safe-volume) flock -u 9; python3 "$TOPOLOGY_SCRIPT" --safe-volume-apply || exit $?; wrap_line "Safe max applied: ${SAFE_PERCENT}%"; exit 0 ;;
  safe-volume-na) wrap_line 'Safe max unavailable.'; exit 0 ;;
+ all-status)
+    flock -u 9
+    clear 2>/dev/null || true
+    python3 "$TOPOLOGY_SCRIPT" --media-control-status || { wrap_line 'Unable to read Media Control status.'; exit 0; }
+    exit 0
+    ;;
+ create-custom-filter)
+    current_mode="$(python3 "$TOPOLOGY_SCRIPT" --mode-state 2>/dev/null | jq -r '.mode // empty')"
+    [[ "$current_mode" != ipad_both && "$current_mode" != laptop_both ]] || { wrap_line 'Custom filters are locked while a both-output mode is active.'; exit 0; }
+    flock -u 9; python3 "$TOPOLOGY_SCRIPT" --create-custom-filter; exit $? ;;
+ profile-runtime)
+    runtime_json="$(python3 "$TOPOLOGY_SCRIPT" --profile-runtime-status 2>>"$ACTION_LOG" || true)"
+    if [[ "$(jq -r '.available // false' <<<"$runtime_json" 2>/dev/null)" != true ]]; then
+      reason="$(jq -r '.reason // "unavailable"' <<<"$runtime_json" 2>/dev/null)"
+      case "$reason" in
+        no-filter) wrap_line 'CamillaDSP runtime is unavailable while No filter is selected because CamillaDSP is bypassed.' ;;
+        both-output) wrap_line 'CamillaDSP runtime is unavailable in both-output mode; use Both-output sync delay instead.' ;;
+        *) wrap_line 'Select a CamillaDSP listening filter before changing runtime settings.' ;;
+      esac
+      exit 0
+    fi
+    echo; wrap_line 'CamillaDSP runtime'; echo; printf '[E] Exit\n'
+    wrap_line "Current chunksize: $(jq -r '.chunksize' <<<"$runtime_json") frames"
+    while :; do
+      read -r -p 'Chunksize (any positive whole number; E=Exit): ' runtime_chunk || exit 0
+      [[ "$runtime_chunk" =~ ^[Ee]$ ]] && exit 0
+      [[ "$runtime_chunk" =~ ^[1-9][0-9]*$ ]] && break
+      wrap_line 'Enter any positive whole-number chunksize, or E to exit.'
+    done
+    echo; wrap_line 'Peak limiter'; echo
+    printf '[E] Exit\n[B] Back\n[1] On\n[2] Off\n'
+    while :; do
+      read -r -p 'Select: ' limiter_choice || exit 0
+      case "$limiter_choice" in
+        [Ee]) exit 0 ;;
+        [Bb]) exec "$0" profile-runtime ;;
+        1) limiter_state=on;break ;;
+        2) limiter_state=off;break ;;
+        *) wrap_line 'Enter E, B, 1, or 2.' ;;
+      esac
+    done
+    normalize_menu_step || exit 0; flock -u 9
+    runtime_out="$(mktemp "$STATE_DIR/.runtime.stdout.XXXXXX")"
+    runtime_err="$(mktemp "$STATE_DIR/.runtime.stderr.XXXXXX")"
+    if python3 "$TOPOLOGY_SCRIPT" --profile-runtime-set "$runtime_chunk" "$limiter_state" >"$runtime_out" 2>"$runtime_err"; then
+      runtime_result="$(tail -n 1 "$runtime_out")"
+      cat "$runtime_out" "$runtime_err" >>"$ACTION_LOG"
+      rm -f "$runtime_out" "$runtime_err"
+      if ! jq -e '.chunksize and (.peakLimiter|type=="boolean")' >/dev/null 2>&1 <<<"$runtime_result"; then
+        wrap_line 'Runtime settings were applied, but the backend returned an invalid result. Check the action log.'
+        exit 0
+      fi
+      wrap_line "CamillaDSP runtime applied: $(jq -r '.chunksize' <<<"$runtime_result") frames; peak limiter $(jq -r 'if .peakLimiter then "on" else "off" end' <<<"$runtime_result")"
+    else
+      status=$?;cat "$runtime_out" "$runtime_err" >>"$ACTION_LOG"
+      detail="$(tail -n 1 "$runtime_err")";rm -f "$runtime_out" "$runtime_err"
+      wrap_line "CamillaDSP rejected those runtime settings${detail:+: $detail}"
+      exit 0
+    fi
+    exit 0 ;;
  both-delay)
+    current_mode="$(python3 "$TOPOLOGY_SCRIPT" --mode-state 2>/dev/null | jq -r '.mode // empty')"
+    [[ "$current_mode" == ipad_both || "$current_mode" == laptop_both ]] || { wrap_line 'Both-output sync offset is available only while a both-output mode is active.'; exit 1; }
     echo
     wrap_line 'Both-output sync offset'
     echo
-    printf '[B] Back\n'
+    printf '[E] Exit\n'
     wrap_line "Current sync offset: ${BOTH_DELAY_MS} ms"
     normalize_menu_step || exit 1
     while :; do
-        read -r -p 'Offset in ms (-500 to 500, B=Back): ' delay_value || exit 0
-        [[ "$delay_value" =~ ^[Bb]$ ]] && exit 0
+        read -r -p 'Offset in ms (-500 to 500, E=Exit): ' delay_value || exit 0
+        [[ "$delay_value" =~ ^[Ee]$ ]] && exit 0
         if [[ "$delay_value" =~ ^-?([0-9]{1,3})(\.[0-9]{1,3})?$ ]] &&
            awk -v value="$delay_value" 'BEGIN { exit !(value >= -500 && value <= 500) }'; then
             normalize_menu_step || exit 1
@@ -74,20 +151,10 @@ case "$selected" in
             wrap_line "Both-output sync offset applied: ${applied_delay} ms"
             exit 0
         fi
-        wrap_line 'Enter B for Back, or an offset from -500 through 500 ms. Positive delays PC; negative delays external/iPad.'
+        wrap_line 'Enter E for Exit, or an offset from -500 through 500 ms. Positive delays PC; negative delays external/iPad.'
     done
     ;;
  select-output)
-    select_playback_card() {
-        TOPOLOGY_JSON="$(output_topology)" || { wrap_line 'Output topology unavailable.' >&2; return 1; }
-        mapfile -t CARDS < <(jq -r '.cards[] | [.name,.label] | @tsv' <<<"$TOPOLOGY_JSON")
-        ((${#CARDS[@]})) || { wrap_line 'No playback devices currently exposed.' >&2; return 1; }
-        labels=()
-        for item in "${CARDS[@]}"; do labels+=("${item#*$'\t'}"); done
-        if ! choose_index --back 'Audio outputs | Playback device' "${labels[@]}"; then return 2; fi
-        selected="$number"
-        return 0
-    }
     while :; do
         choose_index --exit 'Audio output' \
           'Play external audio on external output' \
@@ -95,38 +162,28 @@ case "$selected" in
           'Play external audio on both outputs' \
           'Play PC audio on external output' \
           'Play PC audio on PC output' \
-          'Play PC audio on both outputs' || exit 0
+          'Play PC audio on both outputs'
+        status=$?
+        ((status==3)) && exit 0
         modes=(ipad_ipad ipad_laptop ipad_both laptop_ipad laptop_laptop laptop_both)
         selected_mode="${modes[number]}"
         matrix_left=''; matrix_right=''
         case "$selected_mode" in
           ipad_ipad|laptop_ipad)
-            python3 "$TOPOLOGY_SCRIPT" --set-mode "$selected_mode" >>"$ACTION_LOG" 2>&1 || exit 1
+            flock -u 9
+            run_quiet_action python3 "$TOPOLOGY_SCRIPT" --set-mode "$selected_mode" || exit $?
             exit 0 ;;
           ipad_both|laptop_both)
-            while :; do
-                choose_index --back 'Channel destination' \
-                  'Left channel -> external output; Right channel -> PC output' \
-                  'Left channel -> PC output; Right channel -> external output' || break
-                if ((number==0)); then matrix_left=external; matrix_right=pc
-                else matrix_left=pc; matrix_right=external; fi
-                # The playback-device list is the third level. Back returns to
-                # Channel destination rather than closing Media Control.
-                select_playback_card
-                card_status=$?
-                ((card_status==0)) && break 2
-                ((card_status==2)) && continue
-                exit "$card_status"
-            done
-            # Back from Channel destination returns to Audio output.
-            continue ;;
-          *)
-            # For two-level routes, Back from playback device returns here.
-            select_playback_card
-            card_status=$?
-            ((card_status==0)) && break
-            ((card_status==2)) && continue
-            exit "$card_status" ;;
+            choose_index --back 'Channel destination' \
+              'Left channel -> external output; Right channel -> PC output' \
+              'Left channel -> PC output; Right channel -> external output'
+            status=$?
+            ((status==3)) && exit 0
+            ((status==2)) && continue
+            if ((number==0)); then matrix_left=external; matrix_right=pc
+            else matrix_left=pc; matrix_right=external; fi
+            break ;;
+          *) break ;;
         esac
     done
     ;;
@@ -171,10 +228,12 @@ case "$selected" in
     fi
     exit 0 ;;
  select-filter)
+    current_mode="$(python3 "$TOPOLOGY_SCRIPT" --mode-state 2>/dev/null | jq -r '.mode // empty')"
+    [[ "$current_mode" != ipad_both && "$current_mode" != laptop_both ]] || { wrap_line 'Listening filters are locked while a both-output mode is active. Both-output uses 00-filterless.yml.'; exit 0; }
     filter_path=''
     while :; do
         directory="$(python3 "$TOPOLOGY_SCRIPT" --dsp-directory "$filter_path")" || exit 1
-        mapfile -t entry_rows < <(jq -r '.entries[] | [.type,.id,.label] | @tsv' <<<"$directory")
+        mapfile -t entry_rows < <(jq -r '.entries[] | select(.id != "00-filterless.yml") | [.type,.id,.label] | @tsv' <<<"$directory")
         labels=(); ids=(); types=()
         if [[ -z "$filter_path" ]]; then
             : # No filter is reserved as option 0 at the root
@@ -215,114 +274,145 @@ case "$selected" in
     wrap_line "Listening filter applied: $selected_label"
     exit 0 ;;
 esac
-[[ "$selected" =~ ^[0-9]+$ ]] && ((selected < ${#CARDS[@]})) || { echo 'Invalid device selection' >&2; exit 1; }
-card="${CARDS[selected]%%$'\t'*}"
-card_label="${CARDS[selected]#*$'\t'}"
 # Open the transaction before the first mutation so cancel and abandoned-preview
 # recovery can restore the original mode, routes and streams.
 if ! preview_error="$(MEDIA_CONTROL_PICKER_PID=$$ MEDIA_CONTROL_PICKER_START="$(process_start "$$")" python3 "$TOPOLOGY_SCRIPT" --begin-output-preview 2>&1 >/dev/null)"; then
-    printf '%s\n' "$preview_error" >>"$ACTION_LOG"
-    wrap_line "Could not begin output selection: $preview_error" >&2
-    exit 1
+    printf '%s\n' "$preview_error" >&2; exit 1
 fi
 OUTPUT_PREVIEW_ACTIVE=1
-export MEDIA_CONTROL_PICKER_PID=$$
-# Refresh after the Swaynag selection, without changing the live graph.
-TOPOLOGY_JSON="$(output_topology)" || { echo "Start audio services before choosing a playback output." >&2; exit 1; }
-# Device selection is a real output apply, exactly like the web picker.
-# Reuse the active profile if usable, otherwise the remembered usable profile,
-# then the first exposed usable profile. The paired controller owns pause and
-# normalization for this stage, including when the web host is not running.
-TOPOLOGY_JSON="$(python3 "$TOPOLOGY_SCRIPT" --apply-output-device "$card")" || {
-    wrap_line 'Playback device could not be applied.' >&2; exit 1;
-}
-active="$(jq -r --arg n "$card" '.cards[]|select(.name==$n)|.activeProfile // empty' <<<"$TOPOLOGY_JSON")"
-mapfile -t profiles < <(jq -r --arg n "$card" '.cards[]|select(.name==$n)|.profiles[]|.index' <<<"$TOPOLOGY_JSON")
-last_profile="$(jq -r '.stageSelection.profile // empty' <<<"$TOPOLOGY_JSON")"
-printf '%s\n' "${profiles[@]}" | grep -Fqx -- "$last_profile" || last_profile="$active"
-printf '%s\n' "${profiles[@]}" | grep -Fqx -- "$last_profile" || last_profile=''
-last_profile_label="$(jq -r --arg n "$card" --arg p "$last_profile" '.cards[]|select(.name==$n)|.profiles[]|select((.index|tostring)==$p)|.label' <<<"$TOPOLOGY_JSON")"
-labels=()
-for profile in "${profiles[@]}"; do
-    labels+=("$(jq -r --arg n "$card" --arg p "$profile" '.cards[]|select(.name==$n) as $card|$card.profiles[]|select((.index|tostring)==$p)|(if ($card.internal==true or .available=="no" or .available=="false" or ((.name|ascii_downcase)=="off") or (.label|test("^\\[(INT|MON|LOOP|VIRT|N/A)\\]"))) then "[N/A] " else "" end) + (.label|sub("^\\[(N/A|INT|MON|LOOP|VIRT)\\] ";""))' <<<"$TOPOLOGY_JSON")")
-done
-while :; do
-    choose_index "Card: $card_label | Playback profile" "${labels[@]}" || exit 0
-    profile="${profiles[number]}"
-    profile_selectable="$(jq -r --arg n "$card" --arg p "$profile" '.cards[]|select(.name==$n) as $card|$card.profiles[]|select((.index|tostring)==$p)|($card.internal!=true and .available!="no" and .available!="false" and ((.name|ascii_downcase)!="off") and ((.label|test("^\\[(INT|MON|LOOP|VIRT|N/A)\\]"))|not))' <<<"$TOPOLOGY_JSON")"
-    [[ "$profile_selectable" == true ]] && break
-    wrap_line 'That playback profile cannot be used. Select again.'
-done
-# The selected profile is applied now so its actual sinks/routes appear next.
-TOPOLOGY_JSON="$(python3 "$TOPOLOGY_SCRIPT" --apply-output-profile "$card" "$profile")" || { wrap_line 'Playback profile could not be applied.' >&2; exit 1; }
-active="$(jq -r --arg n "$card" '.cards[]|select(.name==$n)|.activeProfile // empty' <<<"$TOPOLOGY_JSON")"
-mapfile -t routes < <(jq -r --arg n "$card" '.cards[]|select(.name==$n)|.routes[].index' <<<"$TOPOLOGY_JSON")
-route=''
-last_route="$(jq -r '.stageSelection.port // empty' <<<"$TOPOLOGY_JSON")"
-printf '%s\n' "${routes[@]}" | grep -Fqx -- "$last_route" || last_route="$(jq -r --arg n "$card" '.cards[]|select(.name==$n)|.activeRoutes[0] // empty' <<<"$TOPOLOGY_JSON")"
-printf '%s\n' "${routes[@]}" | grep -Fqx -- "$last_route" || last_route=''
-last_route_label="$(jq -r --arg n "$card" --arg r "$last_route" '.cards[]|select(.name==$n)|.routes[]|select((.index|tostring)==$r)|.label' <<<"$TOPOLOGY_JSON")"
-labels=()
-if ((${#routes[@]})); then
-    for r in "${routes[@]}"; do
-        labels+=("$(jq -r --arg n "$card" --arg p "$profile" --arg r "$r" '.cards[]|select(.name==$n)|.routes[]|select((.index|tostring)==$r)|(if (.available=="no" or .available=="false" or ((.name|ascii_downcase)=="off") or ((.profiles|length)>0 and ([.profiles[]|tostring]|index($p))==null)) then "[N/A] " else "" end) + (.label|sub("^\\[(N/A|INT|MON|LOOP|VIRT)\\] ";""))' <<<"$TOPOLOGY_JSON")")
+# Return success and set `number` only when exactly one entry is valid.
+# This is intentionally limited to staged topology pickers whose labels carry
+# an explicit [N/A] validity marker; ordinary menus must still be shown.
+select_only_valid_suboption() {
+    local index valid_count=0 valid_index=-1
+    for index in "${!labels[@]}"; do
+        [[ "${labels[index]}" == '[N/A] '* ]] && continue
+        valid_index=$index
+        ((valid_count+=1))
     done
-else
-    labels+=("[N/A] No output routes exposed")
-fi
-if ((${#routes[@]})); then
-while :; do
-    choose_index 'Output route' "${labels[@]}" || exit 0
-    ((number < ${#routes[@]})) || { wrap_line 'That output route is unavailable. Select again.'; continue; }
-    candidate="${routes[number]}"
-    usable="$(jq -r --arg n "$card" --arg p "$profile" --arg r "$candidate" '.cards[]|select(.name==$n)|.routes[]|select((.index|tostring)==$r)|(.available!="no" and .available!="false" and ((.name|ascii_downcase)!="off") and ((.profiles|length)==0 or ([.profiles[]|tostring]|index($p))!=null))' <<<"$TOPOLOGY_JSON")"
-    [[ "$usable" == true ]] && { route="$candidate"; break; }
-    wrap_line 'That output route is unavailable for this profile. Select again.'
-done
-else
-    wrap_line 'No output routes exposed for this device; continuing to playback sinks.'
-fi
+    ((valid_count==1)) || return 1
+    number=$valid_index
+}
 
-if [[ -n "$route" ]]; then
-    TOPOLOGY_JSON="$(python3 "$TOPOLOGY_SCRIPT" --apply-output-route "$card" "$profile" "$route")" || { wrap_line 'Output route could not be applied.' >&2; exit 1; }
-fi
-# 0 keeps the last known still-exposed sink; numbered items are live sinks.
-sink=''
-mapfile -t sinks < <(jq -r --arg n "$card" '.cards[]|select(.name==$n)|.sinks[].name' <<<"$TOPOLOGY_JSON")
-last_sink="$(jq -r '.stageSelection.sink // empty' <<<"$TOPOLOGY_JSON")"
-if [[ -z "$last_sink" && "$(jq -r '.saved.card // empty' <<<"$TOPOLOGY_JSON")" == "$card" ]]; then
-    last_sink="$(jq -r '.saved.sink // empty' <<<"$TOPOLOGY_JSON")"
-fi
-last_sink_label="$(jq -r --arg n "$card" --arg s "$last_sink" '.cards[]|select(.name==$n)|.sinks[]|select(.name==$s)|.label' <<<"$TOPOLOGY_JSON")"
-labels=()
-for x in "${sinks[@]}"; do
-    labels+=("$(jq -r --arg n "$card" --arg s "$x" --arg r "$route" '
-      .cards[]|select(.name==$n) as $card|.sinks[]|select(.name==$s) as $sink|
-      ([$card.routes[]|select((.index|tostring)==$r)|.devices[]|tostring]) as $devices|
-      (if ((($devices|length)>0 and $sink.profileDevice != null and
-            ($devices|index($sink.profileDevice|tostring))==null))
-       then "[N/A] " else "" end)+($sink.label|sub("^\\[(N/A|INT|MON|LOOP|VIRT)\\] ";""))' <<<"$TOPOLOGY_JSON")")
-done
-((${#sinks[@]})) || { wrap_line 'No playback sinks exposed by the selected profile.' >&2; exit 1; }
-while :; do
-    choose_index 'Playback sink' "${labels[@]}" || exit 0
-    ((number < ${#sinks[@]})) || { wrap_line 'Select an exposed sink.'; continue; }
-    idx="$number";candidate="${sinks[number]}"
-    [[ "${labels[idx]}" != '[N/A] '* ]] && { sink="$candidate"; break; }
-    wrap_line 'That sink cannot be selected. Select again.'
-done
+cancel_output_picker() {
+    ((OUTPUT_PREVIEW_ACTIVE)) || return 0
+    MEDIA_CONTROL_PICKER_PID=$$ python3 "$TOPOLOGY_SCRIPT" --cancel-output-preview >>"$ACTION_LOG" 2>&1 || true
+    OUTPUT_PREVIEW_ACTIVE=0
+}
+trap cancel_output_picker EXIT INT TERM HUP
 
-request="$(jq -nc --arg card "$card" --arg profile "$profile" --arg port "$route" --arg sink "$sink" \
-  --arg matrixLeft "${matrix_left:-}" --arg matrixRight "${matrix_right:-}" \
-  '{card:$card,profile:$profile,port:$port,sink:$sink} + (if ($matrixLeft != "" and $matrixRight != "") then {bothMatrix:{left:$matrixLeft,right:$matrixRight}} else {} end)')"
-# The paired controller serializes pause -> output -> normalize; playback stays paused.
-flock -u 9
-if [[ -n "${selected_mode:-}" ]]; then
-    run_quiet_action python3 "$TOPOLOGY_SCRIPT" --set-mode "$selected_mode" "$request" || exit $?
-else
-    run_quiet_action python3 "$TOPOLOGY_SCRIPT" --switch-output "$request" || exit $?
-fi
-OUTPUT_PREVIEW_ACTIVE=0
-result_line="Playback output applied: $card_label"
-[[ -n "${last_sink_label:-}" && "$sink" == "${last_sink:-}" ]] && result_line+=" / $last_sink_label"
-wrap_line "$result_line"
+# The output picker intentionally does not mutate the live graph between menu
+# stages.  It commits only the final complete request, so Back is lossless.
+while :; do
+    TOPOLOGY_JSON="$(output_topology)" || exit 1
+    mapfile -t card_rows < <(jq -r '.cards[] | @base64' <<<"$TOPOLOGY_JSON")
+    cards=(); labels=()
+    for row in "${card_rows[@]}"; do
+        item="$(base64 -d <<<"$row")"
+        value="$(jq -r '.name' <<<"$item")"
+        label="$(jq -r '.label' <<<"$item")"
+        internal="$(jq -r '.internal // false' <<<"$item")"
+        cards+=("$value")
+        [[ "$internal" == true && "$label" != '[INT] '* && "$label" != '[LOOP] '* && "$label" != '[VIRT] '* ]] && label="[INT] $label"
+        labels+=("$label")
+    done
+    choose_index --back 'Audio outputs | Device' "${labels[@]}"
+    choice_status=$?
+    if ((choice_status==3)); then cancel_output_picker; exit 0; fi
+    if ((choice_status==2)); then cancel_output_picker; exec "$0" select-output; fi
+    card="${cards[number]}";card_label="${labels[number]}"
+    [[ "$card_label" != '[INT] '* && "$card_label" != '[LOOP] '* && "$card_label" != '[VIRT] '* ]] || { wrap_line 'That device is informational and cannot be selected.'; continue; }
+
+    while :; do
+        mapfile -t profile_rows < <(jq -r --arg n "$card" '.cards[]|select(.name==$n)|.profiles[]|@base64' <<<"$TOPOLOGY_JSON")
+        profiles=();labels=()
+        for row in "${profile_rows[@]}"; do
+            item="$(base64 -d <<<"$row")"
+            profiles+=("$(jq -r '.index' <<<"$item")")
+            label="$(jq -r '.label // .description // .name // "Unnamed profile"' <<<"$item")"
+            available="$(jq -r '.available // "unknown"' <<<"$item")"
+            [[ "$available" == no || "$available" == false ]] && label="[N/A] $label"
+            labels+=("$label")
+        done
+        if select_only_valid_suboption; then
+            choice_status=0
+        else
+            choose_index --back "Card: $card_label | Profile" "${labels[@]}"
+            choice_status=$?
+        fi
+        ((choice_status==3)) && { cancel_output_picker; exit 0; }
+        ((choice_status==2)) && break
+        profile="${profiles[number]}"
+        [[ "${labels[number]}" != '[N/A] '* ]] || { wrap_line 'That profile is unavailable.'; continue; }
+
+        while :; do
+            mapfile -t route_rows < <(jq -r --arg n "$card" --argjson p "$profile" '
+              .cards[]|select(.name==$n)|.routes[]|
+              select((.profiles // []) | map(tonumber) | index($p|tonumber))|
+              @base64' <<<"$TOPOLOGY_JSON")
+            routes=();labels=()
+            for row in "${route_rows[@]}"; do
+                item="$(base64 -d <<<"$row")"
+                value="$(jq -r '.index' <<<"$item")"
+                label="$(jq -r '.label // .description // .name // "Unnamed route"' <<<"$item")"
+                available="$(jq -r '.available // "unknown"' <<<"$item")"
+                routes+=("$value")
+                [[ "$available" == no || "$available" == false ]] && label="[N/A] $label"
+                labels+=("$label")
+            done
+            ((${#labels[@]})) || { wrap_line 'No routes are compatible with that profile.'; break; }
+            if select_only_valid_suboption; then
+                choice_status=0
+            else
+                choose_index --back 'Output route' "${labels[@]}"
+                choice_status=$?
+            fi
+            ((choice_status==3)) && { cancel_output_picker; exit 0; }
+            ((choice_status==2)) && break
+            route="${routes[number]}"
+            [[ "${labels[number]}" != '[N/A] '* ]] || { wrap_line 'That route is unavailable.'; continue; }
+
+            while :; do
+                mapfile -t sink_rows < <(jq -r --arg n "$card" --argjson route "$route" '
+                  .cards[]|select(.name==$n) as $card|
+                  ($card.routes[]|select((.index|tonumber)==$route)) as $selectedRoute|
+                  $card.sinks[]|
+                  select((.profileDevice // -1) as $device | ($selectedRoute.devices // []) | map(tonumber) | index($device|tonumber))|
+                  @base64' <<<"$TOPOLOGY_JSON")
+                sinks=();labels=()
+                for row in "${sink_rows[@]}"; do
+                    item="$(base64 -d <<<"$row")"
+                    sinks+=("$(jq -r '.name' <<<"$item")")
+                    labels+=("$(jq -r '.label // .name // "Unnamed sink"' <<<"$item")")
+                done
+                ((${#labels[@]})) || { wrap_line 'No playback sinks are compatible with that route.'; break; }
+                if select_only_valid_suboption; then
+                    choice_status=0
+                else
+                    choose_index --back 'Playback sink' "${labels[@]}"
+                    choice_status=$?
+                fi
+                ((choice_status==3)) && { cancel_output_picker; exit 0; }
+                ((choice_status==2)) && break
+                sink="${sinks[number]}"
+                request="$(jq -nc --arg card "$card" --arg profile "$profile" --arg port "$route" --arg sink "$sink" \
+                  --arg matrixLeft "${matrix_left:-}" --arg matrixRight "${matrix_right:-}" \
+                  '{card:$card,profile:$profile,port:$port,sink:$sink} + (if ($matrixLeft!="" and $matrixRight!="") then {bothMatrix:{left:$matrixLeft,right:$matrixRight}} else {} end)')"
+                flock -u 9
+                if [[ -n "${selected_mode:-}" ]]; then
+                    run_quiet_action python3 "$TOPOLOGY_SCRIPT" --set-mode "$selected_mode" "$request" || exit $?
+                else
+                    run_quiet_action python3 "$TOPOLOGY_SCRIPT" --switch-output "$request" || exit $?
+                fi
+                OUTPUT_PREVIEW_ACTIVE=0;trap - EXIT INT TERM HUP
+                wrap_line "Playback output applied: $card_label"
+                exit 0
+            done
+            # Back from Playback sink returns to Output route.
+            continue
+        done
+        # Back from Output route returns to Profile.
+        continue
+    done
+    # Back from Profile returns to Device.
+done

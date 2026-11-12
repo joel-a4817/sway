@@ -209,19 +209,6 @@ def alive(pid,name=None):
         os.kill(pid,0)
         return not name or name.lower() in Path(f'/proc/{pid}/comm').read_text().strip().lower()
     except (OSError,PermissionError):return False
-def killpidfile(path,name=None):
-    pid=rpid(path)
-    if alive(pid,name):
-        try:os.killpg(pid,signal.SIGTERM)
-        except OSError:
-            try:os.kill(pid,signal.SIGTERM)
-            except OSError:pass
-        deadline=time.monotonic()+3
-        while alive(pid) and time.monotonic()<deadline:time.sleep(.05)
-        if alive(pid):
-            try:os.killpg(pid,signal.SIGKILL)
-            except OSError:pass
-    path.unlink(missing_ok=True)
 def media_env():
     env=os.environ.copy(); runtime=f'/run/user/{os.getuid()}'
     env.setdefault('XDG_RUNTIME_DIR',runtime); env.setdefault('DBUS_SESSION_BUS_ADDRESS',f'unix:path={runtime}/bus')

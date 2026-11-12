@@ -59,7 +59,7 @@ fi
 echo
 echo "Playlist Update"
 echo
-echo '[0] Exit'
+echo '[E] Exit'
 for i in "${!folders[@]}"; do
     printf '[%d] %s\n' "$((i + 1))" "$(basename "${folders[$i]}")"
 done

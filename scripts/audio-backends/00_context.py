@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse, unquote
-import base64, fcntl, hashlib, json, math, os, random, re, select, shutil, signal, socket, struct, subprocess, threading, time, uuid
+import base64, fcntl, hashlib, json, math, os, random, re, select, shutil, signal, socket, struct, subprocess, threading, time, uuid, yaml
 from collections import OrderedDict
 from functools import lru_cache, wraps
 from contextlib import contextmanager
@@ -15,14 +15,13 @@ STATE=HOME/'.local/state/sway/audio-runtime'; SWITCH_STATE=HOME/'.local/state/sw
 CAMILLA=Path('/run/current-system/sw/bin/camilladsp'); SONOBUS=Path('/run/current-system/sw/bin/sonobus')
 SONOSET=HOME/'.config/sonobus/SonoBus.settings'
 CAMPID=STATE/'camilladsp.pid'; ACTIVE=STATE/'active-profile'
-NO_FILTER='__no_filter__'; BYPASSPID=STATE/'no-filter-bridge.pid'
+NO_FILTER='__no_filter__'; BOTH_FILTER='00-filterless.yml'; BYPASSPID=STATE/'no-filter-bridge.pid'
 MODE=STATE/'mode'
 MASTER_VOLUME=SWITCH_STATE/'master-volume'; SAFE_VOLUME_INDEX=PROFILES/'safe-volume.json'; CAM_WS_PORT=8767
 LOCK=threading.RLock(); MEDIA_TRANSACTION=threading.local()
 SYSTEM_AUDIO_SERVICE='camilladsp-system-audio.service'
 STOPPED=STATE/'audio-stopped'
 STOP_ACK=STATE/'audio-stop-complete'
-STOP_CAP=STATE/'audio-stop-capable.pid'
 CACHELOCK=threading.RLock()
 CACHE={'profiles':(0.0,[])}
 CAMILLA_PROCESS=None

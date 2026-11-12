@@ -8,7 +8,7 @@ mapfile -t networks < <(
 echo "Available Wi-Fi Networks"
 echo
 
-echo "[0] Exit"
+echo "[E] Exit"
 
 count=${#networks[@]}
 rows=$(((count + 1) / 2))
@@ -30,7 +30,7 @@ done
 echo
 read -rp "Select network: " choice
 
-if [[ "$choice" == "0" ]]; then
+if [[ "$choice" =~ ^[Ee]$ ]]; then
     exit 0
 fi
 

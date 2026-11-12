@@ -18,7 +18,7 @@ pause_all_playback() {
 import glob,json,os,socket
 paths={'/tmp/mpv-socket','/tmp/mpvsocket','/tmp/mpv.sock'}
 runtime=os.environ.get('XDG_RUNTIME_DIR',f'/run/user/{os.getuid()}')
-paths.update(glob.glob(runtime+'/mpv*'))
+paths.update(glob.glob(runtime+'/mpv*'));paths.update(glob.glob(runtime+'/media-control-mpv/*.sock'))
 try:
     for line in open('/proc/net/unix',encoding='utf-8',errors='ignore'):
         fields=line.split()
@@ -26,7 +26,7 @@ try:
             paths.add(fields[-1])
 except OSError:
     pass
-payload=(json.dumps({'command':['set_property','pause',True]})+'\\n').encode()
+payload=(json.dumps({'command':['set_property','pause',True]})+'\n').encode()
 for path in paths:
     try:
         client=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);client.settimeout(.25)

@@ -27,24 +27,7 @@ def _recover_stale_cli_preview():
                 raise
             OUTPUT_PREVIEW.unlink(missing_ok=True)
 
-def watch_output_preview(stop):
-    while not stop.wait(5):
-        try:
-            with LOCK:_recover_stale_cli_preview()
-        except (OSError,ValueError,RuntimeError) as error:
-            print('Output preview recovery: '+str(error),flush=True)
 
-def renew_output_preview(token):
-    with LOCK:
-        snapshot=_read_json(OUTPUT_PREVIEW,None)
-        if not isinstance(snapshot,dict) or snapshot.get('owner')!='web' or snapshot.get('token')!=token:
-            raise RuntimeError('This browser does not own the output selection')
-        if time.time()-float(snapshot.get('renewed',0))>WEB_PREVIEW_LEASE:
-            _recover_stale_cli_preview()
-            raise RuntimeError('Output selection expired; reopen the picker')
-        snapshot['renewed']=time.time()
-        _write_json(OUTPUT_PREVIEW,snapshot)
-        return {'renewed':True}
 
 def _require_output_preview(origin,token=None):
     snapshot=_read_json(OUTPUT_PREVIEW,None)
@@ -455,32 +438,6 @@ def stop_external_delay():
             except OSError:pass
     EXTERNALDELAYPID.unlink(missing_ok=True)
 
-def start_external_delay():
-    stop_external_delay()
-    mode=audio_mode()
-    if mode not in ('ipad_both','laptop_both'):return
-    offset=both_output_local_delay_ms()
-    matrix=both_output_matrix()
-    external_left=matrix['left']=='external'
-    # Positive offset delays only PC. Negative offset delays only external.
-    # The SonoBus branch always traverses this dedicated cable, including at
-    # zero delay, so there is no direct path that can silently bypass tuning.
-    delay_samples=max(0,int(round(-offset*96.0)))
-    pan=('pan=stereo|c0=c0|c1=0*c0' if external_left else 'pan=stereo|c0=0*c1|c1=c1')
-    audio_filter=pan+f',adelay=delays={delay_samples}S:all=1'
-    ffmpeg=shutil.which('ffmpeg')
-    if not ffmpeg:raise RuntimeError('ffmpeg is required for both-output synchronization')
-    command='set -o pipefail; "$1" -q -D camilladsp_output_shared -r 96000 -f S32_LE -c 2 -t raw | "$2" -hide_banner -loglevel error -f s32le -ar 96000 -ac 2 -i pipe:0 -af "$4" -f s32le -ar 96000 -ac 2 pipe:1 | "$3" -q -D hw:Loopback,0,2 -r 96000 -f S32_LE -c 2 -t raw'
-    args=[exe('bash'),'-c',command,'external-delay',exe('arecord'),ffmpeg,exe('aplay'),audio_filter]
-    log_path=STATE/'external-delay.log'
-    with log_path.open('wb',buffering=0) as log:
-        process=subprocess.Popen(args,stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True,env=media_env())
-    deadline=time.monotonic()+1.0
-    while time.monotonic()<deadline:
-        if process.poll() is not None:
-            raise RuntimeError('External sync feeder exited: '+log_tail(log_path)[-2000:])
-        time.sleep(.05)
-    EXTERNALDELAYPID.write_text(str(process.pid)+'\n')
 
 def start_local_monitor(route=None,resolved=False,persist=True):
     selected=route if resolved else choose_output_route(route)

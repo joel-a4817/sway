@@ -100,7 +100,19 @@ def mode_state():
 def apply_mode(name,password=None,restore_camilla=True,output=None,output_resolved=False):
     if name not in MODES:raise ValueError('Invalid audio mode')
     label,source,local,sono=MODES[name];policy=effective_mode_policy(name)
+    both=name in ('ipad_both','laptop_both')
+    previous_mode=audio_mode()
+    leaving_both=previous_mode in ('ipad_both','laptop_both') and not both
     if STOPPED.exists():ensure_pipewire_ready()
+    if leaving_both and selected_filter()==BOTH_FILTER:
+        # 00-filterless is reserved for both-output synchronization. Returning
+        # to a normal mode restores the true No-filter bypass and stops CamillaDSP.
+        stop_local_monitor();stop_camilla(include_stale=True);stop_bypass()
+        ACTIVE.write_text(NO_FILTER+'\n')
+    if both:
+        configure_both_output_filterless()
+        stop_bypass();stop_camilla(include_stale=True)
+        start_camilla(PROFILES/BOTH_FILTER);ACTIVE.write_text(BOTH_FILTER+'\n')
     direct=(selected_filter()==NO_FILTER and source=='system' and not sono and local)
     if selected_filter()==NO_FILTER:
         # Every No-filter entry path uses the same authoritative shutdown.
@@ -145,10 +157,7 @@ def apply_mode(name,password=None,restore_camilla=True,output=None,output_resolv
             start_bypass()
         if local:start_local_monitor(selected,resolved=True)
         elif alive(rpid(LOCALMONPID)):stop_local_monitor()
-    if name in ('ipad_both','laptop_both'):
-        start_external_delay()
-    else:
-        stop_external_delay()
+    stop_external_delay()
     if sono:
         # Negative sync uses a different ALSA capture endpoint. Always restart
         # SonoBus after rebuilding that relay; persisted XML alone does not

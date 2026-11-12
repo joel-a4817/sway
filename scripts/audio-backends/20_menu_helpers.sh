@@ -51,30 +51,40 @@ print_menu_item() {
     wrap_prefixed_line "${tag}[$1] " "$text"
 }
 choose_index() {
-    local zero_label=Back
-    if [[ "${1:-}" == --exit ]]; then zero_label=Exit; shift
-    elif [[ "${1:-}" == --back ]]; then shift
+    local allow_back=0 title answer i=1 choice key last
+    if [[ "${1:-}" == --exit ]]; then shift
+    elif [[ "${1:-}" == --back ]]; then allow_back=1; shift
     fi
-    local title="$1" answer i=1 choice; shift
+    title="$1"; shift
     ((${#@})) || { echo "No choices for $title" >&2; return 1; }
     normalize_menu_step || return 1
+    key="$(printf '%s' "$title" | sha256sum | cut -d' ' -f1)"
+    mkdir -p "$STATE_DIR/menu-last"
+    last="$(cat "$STATE_DIR/menu-last/$key" 2>/dev/null || true)"
     echo; wrap_line "$(compact_menu_label "$title")"; echo
-    print_menu_item 0 "$zero_label"
+    print_menu_item E 'Exit'
+    ((allow_back)) && print_menu_item B 'Back'
+    [[ "$last" =~ ^[0-9]+$ && $last -lt ${#@} ]] && print_menu_item 0 "Use last valid: ${@:$((last+1)):1}"
     for label in "$@"; do print_menu_item "$i" "$label"; i=$((i+1)); done
     while :; do
-        read -r -p 'Select: ' answer || return 2
-        [[ "$answer" =~ ^[0-9]+$ && ${#answer} -le 9 ]] || { wrap_line 'Enter a listed number.'; continue; }
-        number=$((10#$answer))
-        ((number==0)) && return 2
-        if ((number>=1 && number<i)); then
-            choice="${@:$number:1}"
-            case "$(compact_item_label "$choice")" in
-                '[N/A] '*|'[INT] '*|'[MON] '*|'[LOOP] '*|'[VIRT] '*) wrap_line 'That item cannot be selected.'; continue ;;
-            esac
-            number=$((number-1))
-            normalize_menu_step || return 1
-            return 0
-        fi
-        wrap_line 'Enter a listed number.'
+        read -r -p 'Select: ' answer || return 3
+        case "$answer" in
+          [Ee]) return 3 ;;
+          [Bb]) ((allow_back)) && return 2; wrap_line 'Back is unavailable at this first step.'; continue ;;
+          0)
+            [[ "$last" =~ ^[0-9]+$ && $last -lt ${#@} ]] || { wrap_line 'No previous valid selection is saved for this menu.'; continue; }
+            number=$last ;;
+          * )
+            [[ "$answer" =~ ^[0-9]+$ && ${#answer} -le 9 ]] || { wrap_line 'Enter E, B where shown, 0 where shown, or a listed number.'; continue; }
+            number=$((10#$answer-1))
+            ((number>=0 && number<${#@})) || { wrap_line 'Enter a listed option.'; continue; } ;;
+        esac
+        choice="${@:$((number+1)):1}"
+        case "$(compact_item_label "$choice")" in
+          '[N/A] '*|'[INT] '*|'[MON] '*|'[LOOP] '*|'[VIRT] '*) wrap_line 'That item cannot be selected.'; continue ;;
+        esac
+        printf '%s\n' "$number" >"$STATE_DIR/menu-last/$key"
+        normalize_menu_step || return 1
+        return 0
     done
 }

@@ -52,7 +52,16 @@ camera_picker() (
     mapfile -t node_labels < <(jq -r --arg k "$device_key" '.[]|select(.key==$k)|.nodes[].label' <<<"$topo")
     while :; do
       current_node_label=''; for i in "${!node_names[@]}"; do [[ "${node_names[i]}" == "$current" ]] && current_node_label="${node_labels[i]}"; done
-      choose_index "$device_label | Camera endpoint" "${node_labels[@]}" || { [[ "$original_camera_id" =~ ^[0-9]+$ ]] && wpctl set-default "$original_camera_id" >/dev/null 2>&1; camera_picker; return $?; }
+      choose_index --back "$device_label | Camera endpoint" "${node_labels[@]}"
+      endpoint_status=$?
+      if ((endpoint_status==3)); then
+        [[ "$original_camera_id" =~ ^[0-9]+$ ]] && wpctl set-default "$original_camera_id" >/dev/null 2>&1 || true
+        return 0
+      fi
+      if ((endpoint_status==2)); then
+        [[ "$original_camera_id" =~ ^[0-9]+$ ]] && wpctl set-default "$original_camera_id" >/dev/null 2>&1 || true
+        camera_picker; return $?
+      fi
       node_id="${node_ids[number]}"; node_name="${node_names[number]}"; node_label="${node_labels[number]}"
       break
     done

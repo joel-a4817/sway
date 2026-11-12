@@ -203,23 +203,23 @@ def owned_camilla_engine(pid):
         return True
     except (OSError,ValueError,RuntimeError,socket.timeout):return False
 
-def reusable_camilla(pid):
-    """Recognize this engine by executable, websocket and active profile."""
-    try:
-        args=[part.decode('utf-8') for part in Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0') if part]
-        if not args or Path(args[0]).resolve()!=CAMILLA.resolve():return False
-        if f'--port={CAM_WS_PORT}' not in args:return False
-        with socket.create_connection(('127.0.0.1',CAM_WS_PORT),timeout=.5):pass
-        current=camilla_command('GetConfigFilePath')
-        if not isinstance(current,str):return False
-        selected=Path(current).resolve()
-        if PROFILES.resolve() not in selected.parents or not selected.is_file():return False
-        return selected
-    except (OSError,ValueError,RuntimeError,socket.timeout):return False
+
+def repair_stale_playback_capture_device(target):
+    # A previous runtime-settings implementation wrote the capture-only
+    # dsnoop PCM into listening profiles as CamillaDSP's playback device.
+    # Repair only that exact stale value; preserve every legitimate custom
+    # playback target and the optional peak-limiter PCM.
+    data=yaml.safe_load(target.read_text(encoding='utf-8')) or {}
+    playback=((data.get('devices') or {}).get('playback') or {})
+    if playback.get('device')!='camilladsp_output_shared':return False
+    playback['device']='hw:Loopback,0,1'
+    atomic(target,yaml.safe_dump(data,sort_keys=False,allow_unicode=True))
+    return True
 
 def start_camilla(p):
     global CAMILLA_PROCESS
     target=profile(profile_id(p) if isinstance(p,Path) else str(p))
+    repair_stale_playback_capture_device(target)
     validate_camilla_profile(target)
     logpath=STATE/'camilladsp.log'
     transient=('Device or resource busy','Input/output error')
@@ -339,10 +339,7 @@ def reconcile_sonobus_after_engine_transition(password=None):
     # both-output channel masks and the negative-offset delayed ALSA endpoint
     # are computed dynamically from the saved matrix and signed sync offset.
     policy=effective_mode_policy(mode)
-    if mode in ('ipad_both','laptop_both'):
-        start_external_delay()
-    else:
-        stop_external_delay()
+    stop_external_delay()
     state=groups_state();group=state['profiles'][state['active']]
     if group.get('passwordRequired') and not password:
         # Never kill an authenticated connection when it cannot be recreated.

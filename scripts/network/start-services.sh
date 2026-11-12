@@ -8,7 +8,7 @@ mapfile -t SERVERS < <("$MINECRAFT" list)
 
 printf '%s\n' 'Toggle services'
 printf '%s\n' 'Enter comma-separated numbers. [0] exits.'
-printf '  [0] Exit\n'
+printf '  [E] Exit\n'
 if "$IPAD" --status >/dev/null 2>&1; then
   printf '  [1] iPad Web Remote [running]\n'
 else

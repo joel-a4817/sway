@@ -124,8 +124,8 @@ bindsym --locked --no-repeat $mod+Shift+d fullscreen disable; exec bash -c "pyth
 bindsym --no-repeat $mod+shift+e fullscreen disable; exec systemctl suspend
 
 #keybinds app
-bindsym --no-repeat $mod+F2 fullscreen disable; exec $term -T "$popup-tuis" -e clipse
-bindsym --no-repeat $mod+F1 fullscreen disable; exec $term -T "$popup-tuis" -e yazi
+bindsym --no-repeat $mod+F2 fullscreen disable; exec $term -T "$popup-tuis" -e bash -c 'clipse; status=$?; echo; read -n 1 -rsp "Press any key to close..."; exit $status'
+bindsym --no-repeat $mod+F1 fullscreen disable; exec $term -T "$popup-tuis" -e bash -c 'yazi; status=$?; echo; read -n 1 -rsp "Press any key to close..."; exit $status'
 
 bindsym --no-repeat $mod+Mod1+g fullscreen disable; exec glide
 bindsym --no-repeat $mod+Mod1+z fullscreen disable; exec solaar

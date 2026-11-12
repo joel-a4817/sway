@@ -62,10 +62,7 @@ HPCFS = (
 SAMPLE_RATE=96000
 ANALYSIS_LOW_HZ=20.0
 ANALYSIS_HIGH_HZ=20000.0
-JAMESDSP_WAV_CHANNEL_ORDER = ('LL', 'RL', 'LR', 'RR')
 CAMILLA_LIMITED_PLAYBACK_DEVICE='camilladsp_peak_limited'
-CAMILLA_UNLIMITED_PLAYBACK_DEVICE='camilladsp_output_shared'
-CAMILLA_CHUNKSIZES=(64,128,256,512,1024,2048,4096,8192)
 CAMILLA_PLAYBACK_FORMAT='F32_LE'
 CAMILLA_ROOT=AUDIO_FILTERS
 
@@ -623,17 +620,9 @@ def measurement_devices():
     return result
 
 def runtime_profile_variants(path,text):
-    yield path,text
-    path=Path(path)
-    if path.name=='00-filterless.yml' or 'custom' in path.parts:return
-    relative=path.relative_to(CAMILLA_ROOT)
-    for chunksize in CAMILLA_CHUNKSIZES:
-        for limiter in (True,False):
-            playback=CAMILLA_LIMITED_PLAYBACK_DEVICE if limiter else CAMILLA_UNLIMITED_PLAYBACK_DEVICE
-            variant=CAMILLA_ROOT/relative.parts[0]/f'{chunksize}-frames'/('limiter-on' if limiter else 'limiter-off')/Path(*relative.parts[1:])
-            body=re.sub(r'(?m)^  chunksize: \d+$',f'  chunksize: {chunksize}',text)
-            body=re.sub(r'(?m)^    device: "(?:camilladsp_peak_limited|camilladsp_output_shared)"$',f'    device: "{playback}"',body)
-            yield variant,body
+    # Runtime chunksize and peak-limiter selection now edits the selected YAML
+    # in place through Media Control. Keep one file per logical filter.
+    yield Path(path),text
 
 def expand_runtime_profiles(candidates):
     return [variant for path,text in candidates for variant in runtime_profile_variants(path,text)]

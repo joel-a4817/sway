@@ -215,18 +215,6 @@ def camilla_command(command):
     return item.get('value')
 
 
-def watch_master_volume(stop):
-    # Sway volume keys use pipewire directly, even when the web page is closed.
-    while not stop.wait(.6):
-        # The terminal switch holds this marker while a profile can recreate
-        # the default sink at 100%. Do not overwrite the pre-switch master.
-        owner=SWITCH_STATE/'media-control-owner'
-        try:
-            switch_pid=int(owner.read_text().split()[0])
-        except (OSError,ValueError,IndexError):switch_pid=None
-        if alive(switch_pid) or MASTER_RESTORING:continue
-        try:master_volume()
-        except (OSError,RuntimeError,ValueError,subprocess.TimeoutExpired):pass
 
 def apply_master_volume(value,normalize_sinks=True):
     _ensure_no_filter_physical_default()

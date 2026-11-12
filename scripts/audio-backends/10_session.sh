@@ -80,11 +80,17 @@ pause_before_close() {
     flock -u 9 2>/dev/null || true
     exec 9>&-
     echo
-    if [[ -t 0 && -r /dev/tty && -w /dev/tty ]]; then
-        read -n 1 -r -s -p "Press any key to close..." </dev/tty || true
-        echo >/dev/tty
+    # Media Control is often launched with stdin redirected even though its
+    # terminal still exists. Testing `-t 0` made completed actions skip this
+    # acknowledgement and let foot close immediately. Read from the controlling
+    # terminal directly for every completed action, whether it succeeded or not.
+    if [[ -r /dev/tty && -w /dev/tty ]]; then
+        printf '%s' "Press any key to close..." >/dev/tty
+        IFS= read -n 1 -r -s </dev/tty || true
+        printf '\n' >/dev/tty
     else
-        echo "No controlling terminal is available."
+        printf '%s\n' "Press Enter to close..."
+        IFS= read -r || true
     fi
 }
 handle_script_exit() {
@@ -126,14 +132,14 @@ if ! declare -F pause_all_playback >/dev/null 2>&1; then
 import glob,json,os,socket
 paths={'/tmp/mpv-socket','/tmp/mpvsocket','/tmp/mpv.sock'}
 runtime=os.environ.get('XDG_RUNTIME_DIR',f'/run/user/{os.getuid()}')
-paths.update(glob.glob(runtime+'/mpv*'))
+paths.update(glob.glob(runtime+'/mpv*'));paths.update(glob.glob(runtime+'/media-control-mpv/*.sock'))
 try:
     for line in open('/proc/net/unix',encoding='utf-8',errors='ignore'):
         fields=line.split()
         if len(fields)>=8 and 'mpv' in fields[-1].lower() and fields[-1].startswith('/'):
             paths.add(fields[-1])
 except OSError: pass
-payload=(json.dumps({'command':['set_property','pause',True]})+'\\n').encode()
+payload=(json.dumps({'command':['set_property','pause',True]})+'\n').encode()
 for path in paths:
     try:
         client=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);client.settimeout(.25)

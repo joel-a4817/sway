@@ -194,6 +194,24 @@ def port_busy(port):
         s.settimeout(.3)
         return s.connect_ex(("127.0.0.1",port))==0
 
+
+def public_port_map(port, add=True):
+    """Create/remove the router TCP mapping through UPnP IGD when available."""
+    upnpc=shutil.which("upnpc")
+    if not upnpc:return False,"miniupnpc/upnpc is not installed"
+    if add:
+        route=run(["ip","-4","route","get","1.1.1.1"],check=False,capture=True)
+        match=re.search(r"\bsrc\s+(\d+\.\d+\.\d+\.\d+)",route.stdout)
+        if not match:return False,"cannot determine the active LAN IPv4"
+        address=match.group(1)
+        result=run([upnpc,"-e",f"Minecraft {socket.gethostname()} {port}","-a",address,str(port),str(port),"TCP"],check=False,capture=True,timeout=20)
+        if result.returncode:return False,result.stdout.strip() or "UPnP mapping failed"
+        status=run([upnpc,"-s"],check=False,capture=True,timeout=20).stdout
+        external=re.search(r"ExternalIPAddress\s*=\s*(\d+\.\d+\.\d+\.\d+)",status)
+        return True,f"{external.group(1) if external else 'public address'}:{port} -> {address}:{port}"
+    result=run([upnpc,"-d",str(port),"TCP"],check=False,capture=True,timeout=20)
+    return result.returncode==0,result.stdout.strip()
+
 def unit_failure(name):
     state=run(["systemctl","show",unit(name),"-p","ActiveState","-p","SubState","-p","Result","--value"],check=False,capture=True).stdout.splitlines()
     active_state=state[0].strip() if len(state)>0 else "unknown"
@@ -230,8 +248,11 @@ def start(name=None,force=False):
             failure=unit_failure(name)
             if failure:raise RuntimeError(failure)
             if active(name) and port_busy(port):
+                mapped,detail=public_port_map(port,True)
                 CRITICAL=False
                 print(f"Minecraft server '{name}' started on port {port}")
+                if mapped:print(f"Public TCP mapping active: {detail}")
+                else:print(f"Public TCP mapping unavailable: {detail}",file=sys.stderr)
                 return
             if elapsed and elapsed%15==0:
                 print(f"Still starting '{name}' ({elapsed}s); follow with: journalctl -u {unit(name)} -f")
@@ -248,7 +269,9 @@ def stop(name=None,remote=False):
     name=select_server(name,"stop")
     if not active(name):print(f"{name} is already stopped locally.");return
     ensure_dependencies(name);runtime,snapshot,_,owner=server_paths(name);CRITICAL=True
+    port=port_for(name)
     print(f"Stopping '{name}' cleanly...");run(["sudo","systemctl","stop",unit(name)])
+    public_port_map(port,False)
     end=time.time()+180
     while active(name) and time.time()<end:time.sleep(1)
     if active(name):raise RuntimeError(f"{name} did not stop within 180 seconds")

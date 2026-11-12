@@ -3,11 +3,6 @@ def groups_state():
     data=_read_json(GROUPS,default); profiles=data.get('profiles') if isinstance(data,dict) else None
     if not isinstance(profiles,dict) or not profiles:return default
     active=data.get('active');return {'active':active if active in profiles else next(iter(profiles)),'profiles':profiles}
-def save_group(data):
-    key=re.sub(r'[^A-Za-z0-9_.-]+','-',str(data.get('key','')).strip()).strip('-')
-    group=str(data.get('group','')).strip();user=str(data.get('username','')).strip();server=str(data.get('server','aoo.sonobus.net:10998')).strip()
-    if not key or not group or not user or not server:raise ValueError('Profile, group, username and server are required')
-    state=groups_state();state['profiles'][key]={'group':group,'username':user,'server':server,'passwordRequired':bool(data.get('passwordRequired'))};state['active']=key;_write_json(GROUPS,state);return state
 def audio_mode():
     try:value=MODE.read_text().strip()
     except OSError:value='laptop_laptop'

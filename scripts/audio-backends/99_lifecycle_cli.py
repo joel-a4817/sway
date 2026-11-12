@@ -148,20 +148,6 @@ def stop_audio_services(mark_stopped=True,stop_pipewire=True):
                     user_service('stop',unit)
         finally:
             if mark_stopped:STOP_ACK.touch()
-def release_audio_for_output_switch():
-    # Transfer ownership without stopping PipeWire or marking the whole system stopped.
-    with LOCK:
-        STOP_ACK.unlink(missing_ok=True)
-        try:
-            stop_local_monitor()
-            stop_external_delay()
-            stop_sonobus()
-            stop_bypass()
-            stop_camilla(include_stale=True)
-            airplay(False)
-        except Exception as error:
-            (STATE/'audio-start-error').write_text(str(error)+'\n')
-        finally:STOP_ACK.touch()
 def toggle_audio_services():
     with LOCK:
         if STOPPED.exists():
@@ -187,22 +173,6 @@ def cleanup():
             normalize_audio_volumes(saved_master)
         except Exception as error:
             print('Could not restore laptop audio during host shutdown: '+str(error),flush=True)
-def sonobus_sway_windows(tree):
-    # The live Sway tree reports title="SonoBus", X11 class="SonoBus", app_id=null.
-    stack=[(tree,None)]
-    while stack:
-        node,workspace=stack.pop()
-        if not isinstance(node,dict):continue
-        if node.get('type')=='workspace':workspace=node.get('name')
-        for child in (node.get('nodes') or [])+(node.get('floating_nodes') or []):
-            stack.append((child,workspace))
-        if (node.get('type')!='con' or not isinstance(node.get('id'),int)
-                or node.get('name')!='SonoBus'
-                or (node.get('window_properties') or {}).get('class')!='SonoBus'):
-            continue
-        rect=node.get('rect') or {}
-        if rect.get('width',0)>0 and rect.get('height',0)>0:
-            yield node['id'],workspace
 
 def move_sonobus_to_workspace1(timeout=20.0):
     """Wait for SonoBus, then move every visible SonoBus container to workspace 1."""
@@ -243,29 +213,6 @@ def move_sonobus_to_workspace1(timeout=20.0):
     raise RuntimeError(f'Could not move SonoBus to workspace 1: {last_error}')
 
 
-def watch_sonobus_workspace(stop):
-    if not os.environ.get('SWAYSOCK'):return
-    seen={}
-    moved=set()
-    while not stop.is_set():
-        try:
-            result=run([exe('swaymsg'),'-r','-t','get_tree'],False,4)
-            if result.returncode:raise RuntimeError(result.stderr.strip() or 'Sway tree unavailable')
-            windows=dict(sonobus_sway_windows(json.loads(result.stdout)))
-            seen={wid:seen.get(wid,0)+1 for wid in windows}
-            moved.intersection_update(windows)
-            for wid,workspace in windows.items():
-                if wid in moved or seen[wid]<2:continue
-                if workspace=='1':moved.add(wid);continue
-                reply=run([exe('swaymsg'),'-r',f'[con_id={wid}] move container to workspace number 1'],False,4)
-                answers=json.loads(reply.stdout)
-                if reply.returncode or not isinstance(answers,list) or not answers or not all(x.get('success') for x in answers):
-                    raise RuntimeError(reply.stderr.strip() or f'Sway move failed: {answers}')
-                moved.add(wid)
-                print(f'Moved SonoBus window {wid} to workspace 1',flush=True)
-        except (OSError,ValueError,TypeError,RuntimeError,subprocess.TimeoutExpired) as error:
-            print(f'SonoBus workspace watcher: {error}',flush=True)
-        stop.wait(.5)
 
 def topology_cli():
     import sys
@@ -276,14 +223,136 @@ def topology_cli():
         if len(sys.argv) in (3,4) and sys.argv[1]=='--set-mode':
             output=json.loads(sys.argv[3]) if len(sys.argv)==4 else None
             print(json.dumps(set_mode(sys.argv[2],output=output),ensure_ascii=False));return 0
+        if len(sys.argv)==2 and sys.argv[1]=='--media-control-status':
+            try:mode=mode_state()
+            except Exception:
+                name=audio_mode();label,source,local,sono=MODES.get(name,('Unknown','unknown',False,False))
+                mode={'mode':name,'label':label,'source':source,'localWanted':local,'sonobusWanted':sono,
+                      'engineRunning':camilla_running(),'camilla':camilla_running(),'localMonitor':alive(rpid(LOCALMONPID)),
+                      'sonobus':bool(sonopids()),'airplay':airplay_active()}
+            mode_name=mode.get('mode');runtime=active_profile_runtime_status()
+            try:master=master_volume()
+            except Exception:master=25.0
+            try:safe=safe_volume_state()
+            except Exception:safe={'available':False,'percent':100.0,'profile':selected_filter()}
+            try:topology=audio_topology()
+            except Exception:topology={'cards':[],'saved':read_output_state() or {}}
+            output=topology.get('saved') or {}
+            matrix=both_output_matrix();both=mode_name in ('ipad_both','laptop_both')
+            yesno=lambda value:'Yes' if value else 'No'
+            line=lambda label,value:print(f'{label}: {value}')
+            def find_label(rows,value,field='index'):
+                match=next((row for row in rows if str(row.get(field))==str(value)),None)
+                return (match or {}).get('label') or value or 'Not selected'
+            print('MEDIA CONTROL STATUS')
+            print()
+            # Audio stop/start button.
+            if STOPPED.exists():audio_services='Off'
+            else:
+                wanted=[bool(mode.get('engineRunning')) if mode.get('camilla') else True,
+                        bool(mode.get('localMonitor')) if mode.get('localWanted') else True,
+                        bool(mode.get('sonobus')) if mode.get('sonobusWanted') else True]
+                audio_services='Running' if all(wanted) else 'Partial'
+            line('Audio services',audio_services)
+            # Dynamic runtime or delay card.
+            if both:
+                line('Both-output sync delay',f'{both_output_local_delay_ms():.1f} ms')
+            elif runtime.get('available'):
+                line('CamillaDSP chunksize',f"{runtime.get('chunksize')} frames")
+                line('Peak limiter','On' if runtime.get('peakLimiter') else 'Off')
+            else:
+                line('CamillaDSP runtime','Unavailable (No filter)')
+            # Safe max, filter and custom-filter button.
+            if safe.get('available'):
+                limit=float(safe.get('percent',100));line('Safe volume',f"{master:.1f}% / {limit:.3f}% ({'safe' if master<=limit else 'above safe maximum'})")
+            else:line('Safe volume',f'{master:.1f}% / unavailable')
+            line('Listening filter',selected_filter())
+            line('Custom filter creation','Locked in both-output mode' if both else 'Available')
+            # Audio output button, exactly one line per menu stage.
+            card=next((row for row in topology.get('cards',[]) if row.get('name')==output.get('card')),None) or {}
+            line('Audio output mode',mode.get('label') or mode_name or 'Unknown')
+            if both:line('Audio output channel destination',f"Left -> {matrix.get('left')}; Right -> {matrix.get('right')}")
+            line('Audio output device',card.get('label') or 'Not selected')
+            line('Audio output profile',find_label(card.get('profiles',[]),output.get('profile')))
+            line('Audio output route',find_label(card.get('routes',[]),output.get('port')))
+            line('Audio output sink',find_label(card.get('sinks',[]),output.get('sink'),'name'))
+            # Audio input button, one line per menu stage.
+            try:input_saved=_read_json(SWITCH_STATE/'input-last-choices.json',{})
+            except Exception:input_saved={}
+            input_device='Not selected';input_profile='Not selected';input_route='Not selected';input_source='Not selected';input_port='Not selected'
+            if isinstance(input_saved,dict) and input_saved:
+                input_device,choice=next(reversed(input_saved.items()))
+                try:topology_rows=input_topology()
+                except Exception:topology_rows=[]
+                input_card=next((row for row in topology_rows if row.get('name')==input_device),None) or {}
+                input_device=input_card.get('label') or input_device
+                input_profile=find_label(input_card.get('profiles',[]),choice.get('profile'))
+                input_route=find_label(input_card.get('routes',[]),choice.get('route'))
+                input_source=find_label(input_card.get('sources',[]),choice.get('source'),'name')
+                input_port=choice.get('port') or 'Not selected'
+            line('Audio input device',input_device)
+            line('Audio input profile',input_profile)
+            line('Audio input route',input_route)
+            line('Audio input source',input_source)
+            line('Audio input port',input_port)
+            # Camera button, one line per menu stage.
+            cameras=_read_json(STATE/'camera-last-endpoints.json',{})
+            camera_device='Not selected';camera_endpoint='Not selected'
+            if isinstance(cameras,dict) and cameras:
+                camera_key,camera_endpoint=next(reversed(cameras.items()))
+                graph=pw_graph();node=next((item for item in pw_objects('Node',graph)
+                    if pw_props(item).get('media.class')=='Video/Source' and
+                    str(pw_props(item).get('node.name') or '')==str(camera_endpoint)),None)
+                if node is not None:
+                    props=pw_props(node);device_id=props.get('device.id')
+                    device=next((item for item in pw_objects('Device',graph) if item.get('id')==device_id),None)
+                    device_props=pw_props(device) if device is not None else {}
+                    camera_device=str(device_props.get('device.description') or device_props.get('device.nick') or camera_key)
+                    camera_endpoint=str(props.get('node.description') or props.get('node.nick') or camera_endpoint)
+                else:camera_device=camera_key
+            line('Camera device',camera_device)
+            line('Camera endpoint',camera_endpoint)
+            return
+        if len(sys.argv)==2 and sys.argv[1]=='--mode-state':
+            print(json.dumps(mode_state(),ensure_ascii=False));return
+        if len(sys.argv)==2 and sys.argv[1]=='--profile-runtime-status':
+            print(json.dumps(active_profile_runtime_status(),ensure_ascii=False));return
+        if len(sys.argv)==4 and sys.argv[1]=='--profile-runtime-set':
+            limiter=sys.argv[3].strip().lower()
+            if limiter not in ('on','off'):raise ValueError('Peak limiter must be on or off')
+            target=profile(selected_filter())
+            original=target.read_bytes()
+            try:
+                with media_change():
+                    result=configure_active_profile_runtime(sys.argv[2],limiter=='on')
+                    target=profile(result['profile'])
+                    stop_camilla(include_stale=True)
+                    start_camilla(target)
+                    wait_for_camilla_config(target)
+                    apply_mode(audio_mode(),restore_camilla=False)
+            except Exception:
+                atomic(target,original)
+                try:
+                    stop_camilla(include_stale=True)
+                    start_camilla(target)
+                    wait_for_camilla_config(target)
+                    apply_mode(audio_mode(),restore_camilla=False)
+                except Exception:
+                    pass
+                raise
+            print(json.dumps(result,ensure_ascii=False));return
+        if len(sys.argv)==2 and sys.argv[1]=='--verify-both-sync':
+            print(json.dumps(verify_both_output_sync(),ensure_ascii=False));return
         if len(sys.argv)==2 and sys.argv[1]=='--both-delay-status':
             print(json.dumps({'milliseconds':both_output_local_delay_ms()}));return
         if len(sys.argv)==3 and sys.argv[1]=='--both-delay-set':
-            result=set_both_output_local_delay_ms(sys.argv[2])
-            if audio_mode() in ('ipad_both','laptop_both'):
-                # Reapply the complete mode because crossing zero changes both
-                # the active feeder and the SonoBus ALSA input device.
-                set_mode(audio_mode())
+            if audio_mode() not in ('ipad_both','laptop_both'):
+                raise RuntimeError('Both-output sync offset is available only while a both-output mode is active')
+            with media_change():
+                result=set_both_output_local_delay_ms(sys.argv[2]);result.update(configure_both_output_filterless())
+                stop_camilla(include_stale=True);start_camilla(PROFILES/BOTH_FILTER);ACTIVE.write_text(BOTH_FILTER+'\n')
+                apply_mode(audio_mode(),restore_camilla=False)
+                result['verification']=verify_both_output_sync()
             print(json.dumps(result));return
         if len(sys.argv)==2 and sys.argv[1]=='--audio-toggle':
             print(json.dumps(toggle_audio_services()))
@@ -311,6 +380,10 @@ def topology_cli():
             custom_filter_cli();return
         if len(sys.argv)==3 and sys.argv[1]=='--select-filter':
             requested=sys.argv[2]
+            if audio_mode() in ('ipad_both','laptop_both'):
+                raise RuntimeError('Listening filters are locked while a both-output mode is active; both-output uses 00-filterless.yml')
+            if requested==BOTH_FILTER or Path(requested).name=='00-filterless.yml':
+                raise RuntimeError('00-filterless.yml is reserved for both-output synchronization')
             if requested!=NO_FILTER:profile(requested)
             if STOPPED.exists():
                 ACTIVE.write_text(requested+'\n')
@@ -387,7 +460,9 @@ def topology_cli():
         if len(sys.argv)==2 and sys.argv[1]=='--interactive-input':
             # Input routing owns capture topology only; it must not pause media
             # or enter the playback/capture gain-normalization transaction.
-            result=select_input_interactive()
+            try:result=select_input_interactive()
+            except (InputExit,InputBack):
+                print(json.dumps({'cancelled':True},ensure_ascii=False));return
             print(json.dumps(result,ensure_ascii=False));return
         if len(sys.argv)==3 and sys.argv[1]=='--camera-restore-clients':
             print(json.dumps(restore_camera_clients(json.loads(sys.argv[2])),ensure_ascii=False));return
