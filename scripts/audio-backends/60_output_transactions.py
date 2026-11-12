@@ -445,14 +445,15 @@ def start_external_delay():
     if offset>=0:return None
     matrix=both_output_matrix();source='c0' if matrix['left']=='external' else 'c1'
     ffmpeg=shutil.which('ffmpeg')
-    if not ffmpeg:raise RuntimeError('ffmpeg is required for negative external/iPad sync offsets')
-    samples=int(round(abs(offset)*96.0))
-    audio_filter=f'pan=mono|c0={source},adelay={samples}S'
+    if not ffmpeg:raise RuntimeError('ffmpeg is required to isolate the external mono channel')
+    delay_script=BACKEND_DIR/'audio-delay-pcm.py'
+    if not delay_script.is_file():raise RuntimeError('Missing PCM delay backend: '+str(delay_script))
+    audio_filter=f'pan=mono|c0={source}'
     device='hw:Loopback,0,2'
-    command='set -o pipefail; "$1" -q -D camilladsp_output_shared -r 96000 -f S32_LE -c 2 -t raw | "$2" -hide_banner -loglevel error -f s32le -ar 96000 -ac 2 -i pipe:0 -af "$5" -f s32le -ar 96000 -ac 1 pipe:1 | "$3" -q -D "$4" -r 96000 -f S32_LE -c 1 -t raw'
+    command='set -o pipefail; "$1" -q -D camilladsp_output_shared -r 96000 -f S32_LE -c 2 -t raw | "$2" -hide_banner -loglevel error -f s32le -ar 96000 -ac 2 -i pipe:0 -af "$6" -f s32le -ar 96000 -ac 1 pipe:1 | "$3" "$7" --milliseconds "$5" --rate 96000 --channels 1 --bytes-per-sample 4 | "$4" -q -D hw:Loopback,0,2 -r 96000 -f S32_LE -c 1 -t raw'
     log_path=STATE/'external-delay.log'
     with log_path.open('ab',buffering=0) as log:
-        process=subprocess.Popen([exe('bash'),'-c',command,'external-delay',exe('arecord'),ffmpeg,exe('aplay'),device,audio_filter],stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
+        process=subprocess.Popen([exe('bash'),'-c',command,'external-delay',exe('arecord'),ffmpeg,exe('python3'),exe('aplay'),str(abs(offset)),audio_filter,str(delay_script)],stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True)
     EXTERNALDELAYPID.write_text(str(process.pid)+'\n')
     time.sleep(.15)
     if process.poll() is not None:
@@ -479,11 +480,15 @@ def start_local_monitor(route=None,resolved=False,persist=True):
         if not ffmpeg:raise RuntimeError('ffmpeg is required for isolated mono both-output playback')
         matrix=both_output_matrix();pc_source='c1' if matrix['right']=='pc' else 'c0'
         filters=[f'pan=stereo|c0={pc_source}|c1={pc_source}']
-        if local_delay>0:
-            samples=int(round(local_delay*96.0));filters.append(f'adelay={samples}S|{samples}S')
         audio_filter=','.join(filters)
-        command='set -o pipefail; "$1" -q -D camilladsp_output_shared -r 96000 -f S32_LE -c 2 -t raw | "$2" -hide_banner -loglevel error -f s32le -ar 96000 -ac 2 -i pipe:0 -af "$5" -f s32le -ar 96000 -ac 2 pipe:1 | "$3" --playback --device="$4" --rate=96000 --format=s32le --channels=2'
-        args=[exe('bash'),'-c',command,'monitor',exe('arecord'),ffmpeg,exe('pacat'),sink,audio_filter]
+        if local_delay>0:
+            delay_script=BACKEND_DIR/'audio-delay-pcm.py'
+            if not delay_script.is_file():raise RuntimeError('Missing PCM delay backend: '+str(delay_script))
+            command='set -o pipefail; "$1" -q -D camilladsp_output_shared -r 96000 -f S32_LE -c 2 -t raw | "$2" -hide_banner -loglevel error -f s32le -ar 96000 -ac 2 -i pipe:0 -af "$6" -f s32le -ar 96000 -ac 2 pipe:1 | "$3" "$7" --milliseconds "$5" --rate 96000 --channels 2 --bytes-per-sample 4 | "$4" --playback --device="$8" --rate=96000 --format=s32le --channels=2'
+            args=[exe('bash'),'-c',command,'monitor',exe('arecord'),ffmpeg,exe('python3'),exe('pacat'),str(local_delay),audio_filter,str(delay_script),sink]
+        else:
+            command='set -o pipefail; "$1" -q -D camilladsp_output_shared -r 96000 -f S32_LE -c 2 -t raw | "$2" -hide_banner -loglevel error -f s32le -ar 96000 -ac 2 -i pipe:0 -af "$4" -f s32le -ar 96000 -ac 2 pipe:1 | "$3" --playback --device="$5" --rate=96000 --format=s32le --channels=2'
+            args=[exe('bash'),'-c',command,'monitor',exe('arecord'),ffmpeg,exe('pacat'),audio_filter,sink]
     else:
         command='set -o pipefail; "$1" -q -D camilladsp_output_shared -r 96000 -f S32_LE -c 2 -t raw | "$2" --playback --device="$3" --rate=96000 --format=s32le --channels=2'
         args=[exe('bash'),'-c',command,'monitor',exe('arecord'),exe('pacat'),sink]
