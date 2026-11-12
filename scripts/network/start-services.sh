@@ -39,12 +39,15 @@ for i in "${!SERVERS[@]}"; do
   number=$((i + 3))
   state="${MC_STATUS[$name]:-}"
   case "$state" in
-    local) printf '  [%d] Minecraft: %s [running locally]\n' "$number" "$name" ;;
-    peer:*) printf '  [%d] Minecraft: %s [running on %s]\n' "$number" "$name" "${state#peer:}" ;;
+    # Test combined states before the broad peer:* pattern. Previously a state
+    # ordered as peer:<host>,local was swallowed by peer:* and falsely displayed
+    # only "running on <host>" instead of reporting the real dual-run conflict.
     *local,*peer:*|*peer:*,*local*)
       peer="${state#*peer:}"; peer="${peer%%,*}"
       printf '  [%d] Minecraft: %s [CONFLICT: running locally and on %s]\n' "$number" "$name" "$peer"
       ;;
+    local) printf '  [%d] Minecraft: %s [running locally]\n' "$number" "$name" ;;
+    peer:*) printf '  [%d] Minecraft: %s [running on %s]\n' "$number" "$name" "${state#peer:}" ;;
     *) printf '  [%d] Minecraft: %s\n' "$number" "$name" ;;
   esac
 done
