@@ -1,114 +1,135 @@
 #!/usr/bin/env bash
 set -euo pipefail
-MINECRAFT="/home/joel/.config/sway/scripts/network/minecraft-server.py"
-IPAD="/home/joel/.config/sway/scripts/network/start-ipad-webremote.sh"
+
+MINECRAFT="$HOME/.config/sway/scripts/network/minecraft-server.py"
+IPAD="$HOME/.config/sway/scripts/network/start-ipad-webremote.sh"
 VNC_UNIT="camilladsp-wayvnc.service"
 PEERS="$HOME/.config/minecraft-server/peers"
 
 mapfile -t SERVERS < <("$MINECRAFT" list)
-declare -A LOCAL_RUNNING=()
-declare -A PEER_RUNNING=()
-peer_errors=()
+declare -A LOCAL=()
+declare -A REMOTE=()
+declare -A REMOTE_TRANSITION=()
+peer_error=""
 
-# Local state comes straight from systemd, not from cached manager output.
-for name in "${SERVERS[@]}"; do
-  if systemctl is-active --quiet "minecraft-server-${name}.service"; then
-    LOCAL_RUNNING["$name"]=1
-  fi
+# Local truth: systemd on this laptop.
+for server in "${SERVERS[@]}"; do
+    systemctl is-active --quiet "minecraft-server-${server}.service" && LOCAL["$server"]=1 || true
 done
 
-# Remote state comes directly from each peer listed in the peers file.
-if [[ -r "$PEERS" ]]; then
-  while IFS= read -r raw || [[ -n "$raw" ]]; do
-    raw="${raw%%#*}"
-    read -ra fields <<< "$raw"
-    ((${#fields[@]} >= 2)) || continue
-    label="${fields[0]//[|,;]/}"
-    status=""
-    detail=""
-    for address in "${fields[@]:1}"; do
-      address="${address//[|,;]/}"
-      [[ -n "$address" ]] || continue
-      output="$(ssh -o BatchMode=yes -o ConnectTimeout=4 "$address" \
-        '~/.config/sway/scripts/network/minecraft-server.py status --machine' 2>&1)" || rc=$?
-      rc="${rc:-0}"
-      # Select only a real machine-protocol line. Ignore login banners/noise.
-      status="$(printf '%s\n' "$output" | awk '/^(running|stopped|transitioning)( |$)/ {line=$0} END {print line}')"
-      if [[ -n "$status" ]]; then
-        break
-      fi
-      detail="${address}: ${output:-exit $rc}"
-      rc=0
-    done
-    if [[ -z "$status" ]]; then
-      peer_errors+=("$label (${detail:-no usable address})")
-      continue
-    fi
-    if [[ "$status" == running* ]]; then
-      read -ra words <<< "$status"
-      for word in "${words[@]:1}"; do
-        [[ "$word" == floating=* ]] && continue
-        PEER_RUNNING["$word"]="${PEER_RUNNING[$word]:+${PEER_RUNNING[$word]},}$label"
-      done
-    fi
-  done < "$PEERS"
+# Remote truth: systemd directly on each configured peer. Do not depend on
+# minecraft-server.py status parsing, floating-IP state, caches, or host prompts.
+if [[ -s "$PEERS" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%%#*}"
+        read -ra fields <<< "$line"
+        ((${#fields[@]} >= 2)) || continue
+        label="${fields[0]//[|,;]/}"
+        reply=""
+        errors=()
+        verified=0
+        for address in "${fields[@]:1}"; do
+            address="${address//[|,;]/}"
+            [[ -n "$address" ]] || continue
+            # First verify SSH once. Then query each unit separately so an
+            # inactive unit (systemctl exit 3) cannot make the whole peer look
+            # unreachable and shell quoting cannot corrupt the server list.
+            if ! output="$(ssh -o BatchMode=yes -o ConnectTimeout=4 "$address" true 2>&1)"; then
+                errors+=("$address: ${output:-SSH verification failed}")
+                continue
+            fi
+            verified=1
+            for server in "${SERVERS[@]}"; do
+                if ssh -o BatchMode=yes -o ConnectTimeout=4 "$address" \
+                    systemctl is-active --quiet "minecraft-server-${server}.service"; then
+                    reply+="${reply:+$'\n'}$server"
+                else
+                    rc=$?
+                    # systemctl returns 3 when the known unit is simply inactive.
+                    if ((rc != 3)); then
+                        errors+=("$address: status check for $server exited $rc")
+                        verified=0
+                        break
+                    fi
+                fi
+            done
+            if ((verified)); then
+                machine="$(ssh -o BatchMode=yes -o ConnectTimeout=4 "$address" \
+                    '~/.config/sway/scripts/network/minecraft-server.py status --machine' 2>&1 || true)"
+                protocol="$(printf '%s\n' "$machine" | awk '/^(running|stopped|transitioning)( |$)/ {line=$0} END {print line}')"
+                [[ "$protocol" == transitioning ]] && REMOTE_TRANSITION["$label"]=1
+                break
+            fi
+        done
+        if ((! verified)); then
+            peer_error+="${peer_error:+; }$label (${errors[*]:-no usable address})"
+            continue
+        fi
+        while IFS= read -r server; do
+            [[ -n "$server" ]] || continue
+            REMOTE["$server"]="${REMOTE[$server]:+${REMOTE[$server]},}$label"
+        done <<< "$reply"
+    done < "$PEERS"
+else
+    peer_error="peers file missing or empty: $PEERS"
 fi
 
 printf '%s\n' 'Toggle services'
 printf '%s\n' 'Enter comma-separated numbers. [0] exits.'
 printf '  [E] Exit\n'
 if "$IPAD" --status >/dev/null 2>&1; then
-  printf '  [1] iPad Web Remote [running]\n'
+    printf '  [1] iPad Web Remote [running]\n'
 else
-  printf '  [1] iPad Web Remote\n'
+    printf '  [1] iPad Web Remote\n'
 fi
 if systemctl --user is-active --quiet "$VNC_UNIT"; then
-  printf '  [2] VNC [running]\n'
+    printf '  [2] VNC [running]\n'
 else
-  printf '  [2] VNC\n'
+    printf '  [2] VNC\n'
 fi
+
 for i in "${!SERVERS[@]}"; do
-  name="${SERVERS[$i]}"
-  number=$((i + 3))
-  local_running="${LOCAL_RUNNING[$name]:-}"
-  peer_running="${PEER_RUNNING[$name]:-}"
-  if [[ -n "$local_running" && -n "$peer_running" ]]; then
-    printf '  [%d] Minecraft: %s [CONFLICT: running locally and on %s]\n' "$number" "$name" "$peer_running"
-  elif [[ -n "$local_running" ]]; then
-    printf '  [%d] Minecraft: %s [running locally]\n' "$number" "$name"
-  elif [[ -n "$peer_running" ]]; then
-    printf '  [%d] Minecraft: %s [running on %s]\n' "$number" "$name" "$peer_running"
-  else
-    printf '  [%d] Minecraft: %s\n' "$number" "$name"
-  fi
+    server="${SERVERS[$i]}"
+    number=$((i + 3))
+    local_running="${LOCAL[$server]:-}"
+    remote_running="${REMOTE[$server]:-}"
+    if [[ -n "$local_running" && -n "$remote_running" ]]; then
+        printf '  [%d] Minecraft: %s [CONFLICT: local + %s]\n' "$number" "$server" "$remote_running"
+    elif [[ -n "$local_running" ]]; then
+        printf '  [%d] Minecraft: %s [running here]\n' "$number" "$server"
+    elif [[ -n "$remote_running" ]]; then
+        printf '  [%d] Minecraft: %s [running on %s]\n' "$number" "$server" "$remote_running"
+    else
+        printf '  [%d] Minecraft: %s\n' "$number" "$server"
+    fi
 done
-if ((${#peer_errors[@]})); then
-  printf '  [!] Minecraft peer status unavailable: %s\n' "$(IFS='; '; echo "${peer_errors[*]}")"
+if ((${#REMOTE_TRANSITION[@]})); then
+    transitioning="$(IFS=,; echo "${!REMOTE_TRANSITION[*]}")"
+    printf '  [~] Minecraft transition in progress on: %s\n' "$transitioning"
 fi
+[[ -z "$peer_error" ]] || printf '  [!] Peer unavailable: %s\n' "$peer_error"
 
 read -r -p 'Selection: ' input
 [[ -n "${input//[[:space:]]/}" ]] || exit 0
 [[ "$input" =~ ^[Ee]$ ]] && exit 0
 IFS=',' read -ra tokens <<< "$input"
-selected=()
+declare -A SEEN=()
 for token in "${tokens[@]}"; do
-  token="${token//[[:space:]]/}"
-  [[ "$token" =~ ^[0-9]+$ ]] || { printf 'Invalid selection: %s\n' "$token" >&2; exit 2; }
-  (( token == 0 )) && exit 0
-  (( token >= 1 && token <= ${#SERVERS[@]} + 2 )) || { printf 'Selection out of range: %s\n' "$token" >&2; exit 2; }
-  for seen in "${selected[@]:-}"; do [[ "$seen" == "$token" ]] && continue 2; done
-  selected+=("$token")
-done
-for token in "${selected[@]}"; do
-  case "$token" in
-    1) "$IPAD" toggle ;;
-    2)
-      if systemctl --user is-active --quiet "$VNC_UNIT"; then
-        systemctl --user stop "$VNC_UNIT"
-      else
-        systemctl --user start "$VNC_UNIT"
-      fi
-      ;;
-    *) "$MINECRAFT" toggle "${SERVERS[$((token - 3))]}" ;;
-  esac
+    token="${token//[[:space:]]/}"
+    [[ "$token" =~ ^[0-9]+$ ]] || { printf 'Invalid selection: %s\n' "$token" >&2; exit 2; }
+    ((token == 0)) && exit 0
+    ((token >= 1 && token <= ${#SERVERS[@]} + 2)) || { printf 'Selection out of range: %s\n' "$token" >&2; exit 2; }
+    [[ -z "${SEEN[$token]:-}" ]] || continue
+    SEEN[$token]=1
+    case "$token" in
+        1) "$IPAD" toggle ;;
+        2)
+            if systemctl --user is-active --quiet "$VNC_UNIT"; then
+                systemctl --user stop "$VNC_UNIT"
+            else
+                systemctl --user start "$VNC_UNIT"
+            fi
+            ;;
+        *) "$MINECRAFT" toggle "${SERVERS[$((token - 3))]}" ;;
+    esac
 done

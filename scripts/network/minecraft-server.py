@@ -91,6 +91,33 @@ def query_group(addresses,args):
         detail=((r.stderr or "").strip() or (r.stdout or "").strip() or f"exit {r.returncode}")
         failures.append(f"{address}: {detail}")
     return None,None,"",failures
+def validate_peer_identities():
+    local=local_node_name()
+    for label,addresses in peer_groups():
+        verified=False;failures=[]
+        for address in addresses:
+            try:
+                result=run(["ssh","-o","BatchMode=yes","-o","ConnectTimeout=4",address,
+                            "tailscale status --json"],check=False,capture=True,timeout=15)
+            except (subprocess.TimeoutExpired,OSError) as error:
+                failures.append(f"{address}: {error}");continue
+            if result.returncode:
+                failures.append(f"{address}: {(result.stdout or '').strip() or 'identity query failed'}");continue
+            try:
+                data=json.loads(result.stdout or "{}")
+                dns=((data.get("Self") or {}).get("DNSName") or "").rstrip(".")
+                remote=dns.split(".",1)[0] if dns else ""
+            except (ValueError,TypeError):remote=""
+            if not remote:
+                failures.append(f"{address}: peer MagicDNS identity unavailable");continue
+            if label!=remote:
+                raise RuntimeError(f"Peer label {label!r} does not match live MagicDNS identity {remote!r}")
+            if remote==local:
+                raise RuntimeError(f"Peer {label!r} resolves to this laptop instead of the other device")
+            verified=True;break
+        if not verified:
+            raise RuntimeError(f"Cannot validate peer {label}: "+"; ".join(failures))
+
 def remote_state():
     found=[];unreachable=[]
     for label,addresses in peer_groups():
@@ -318,6 +345,7 @@ def cluster_transition_lock(remote_action=False):
     if remote_action:
         yield
         return
+    validate_peer_identities()
     local=local_node_name()
     groups=peer_groups()
     labels=[label for label,addresses in groups]
@@ -355,24 +383,14 @@ def cluster_transition_lock(remote_action=False):
 def start(name=None,force=False):
     global CRITICAL
     name=select_server(name,"start");ensure_dependencies(name)
+    if not peer_groups() and not force:
+        raise RuntimeError(f"No peers configured in {PEERS}; refusing an uncoordinated start")
     if active(name):print(f"{name} is already running locally.");return
-    # Give a concurrently initiated peer enough time to acquire its own lock.
-    # Both sides then observe "transitioning" and use the same deterministic
-    # MagicDNS-name election, so exactly one side can continue.
-    time.sleep(1.0)
     found,unreachable=remote_state()
     if unreachable and not force:raise RuntimeError("Cannot verify peer(s): "+", ".join(unreachable))
     transitioning=[label for label,address,names in found if "transitioning" in names]
     if transitioning:
-        local=local_node_name()
-        winner=min([local]+transitioning)
-        if local!=winner:
-            raise RuntimeError(f"Concurrent Minecraft request won by {winner}; this request on {local} was cancelled safely")
-        print(f"Concurrent request detected; {local} won deterministic handover arbitration.")
-        # A transitioning peer has not established an authoritative running
-        # state yet. It will observe losing the same election and release its
-        # local lock without touching services or the floating address.
-        found=[item for item in found if "transitioning" not in item[2]]
+        raise RuntimeError("Peer transition already in progress on: "+", ".join(transitioning)+". Retry after it finishes.")
     for label,address,names in found:
         remote_servers=[item for item in names if not item.startswith("floating=")]
         owns_floating=any(item==f"floating={FLOATING_IP}" for item in names)
@@ -435,7 +453,8 @@ def stop(name=None,remote=False):
     end=time.time()+180
     while active(name) and time.time()<end:time.sleep(1)
     if active(name):raise RuntimeError(f"{name} did not stop within 180 seconds")
-    backup(name,runtime);atomic_mirror(runtime,snapshot);network_restore()
+    backup(name,runtime);atomic_mirror(runtime,snapshot)
+    if not running_servers():network_restore()
     try:owner.unlink()
     except FileNotFoundError:pass
     print("Publishing stopped snapshot through Syncthing...");syncthing_wait();CRITICAL=False;print(f"'{name}' stopped, backed up, and published.")
