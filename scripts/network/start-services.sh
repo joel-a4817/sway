@@ -13,7 +13,12 @@ while IFS=$'\t' read -r server location; do
     MC_PEER_ERROR="$location"
     continue
   fi
-  MC_STATUS["$server"]="$location"
+  current="${MC_STATUS[$server]:-}"
+  if [[ -z "$current" ]]; then
+    MC_STATUS["$server"]="$location"
+  elif [[ ",$current," != *",$location,"* ]]; then
+    MC_STATUS["$server"]="$current,$location"
+  fi
 done < <("$MINECRAFT" menu-status 2>&1 || true)
 
 printf '%s\n' 'Toggle services'
@@ -32,9 +37,14 @@ fi
 for i in "${!SERVERS[@]}"; do
   name="${SERVERS[$i]}"
   number=$((i + 3))
-  case "${MC_STATUS[$name]:-}" in
+  state="${MC_STATUS[$name]:-}"
+  case "$state" in
     local) printf '  [%d] Minecraft: %s [running locally]\n' "$number" "$name" ;;
-    peer:*) printf '  [%d] Minecraft: %s [running on %s]\n' "$number" "$name" "${MC_STATUS[$name]#peer:}" ;;
+    peer:*) printf '  [%d] Minecraft: %s [running on %s]\n' "$number" "$name" "${state#peer:}" ;;
+    *local,*peer:*|*peer:*,*local*)
+      peer="${state#*peer:}"; peer="${peer%%,*}"
+      printf '  [%d] Minecraft: %s [CONFLICT: running locally and on %s]\n' "$number" "$name" "$peer"
+      ;;
     *) printf '  [%d] Minecraft: %s\n' "$number" "$name" ;;
   esac
 done
