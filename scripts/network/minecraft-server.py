@@ -4,10 +4,13 @@ from __future__ import annotations
 import argparse, datetime as dt, fcntl, json, os, re, shutil, signal, socket, subprocess, sys, tarfile, time
 from pathlib import Path
 from urllib import request, parse
+import ipaddress
 
 HOME=Path.home(); ROOT=HOME/"minecraft-server"; RUNTIME_ROOT=Path("/srv/minecraft")
 BACKUPS=ROOT/"backups"; COORD=ROOT/"coordination"; LOCK=COORD/"local.lock"
 PEERS=HOME/".config/minecraft-server/peers"; NETWORK_STATE=Path("/run/user")/str(os.getuid())/"minecraft-server-network.json"
+FLOATING_IP=os.environ.get("MINECRAFT_FLOATING_IP","192.168.0.240")
+DDNS_ENV=HOME/".config/minecraft-server/ddns.env"
 CRITICAL=False
 
 def run(cmd,check=True,capture=False,timeout=None):
@@ -109,28 +112,80 @@ def ensure_dependencies(name=None):
         try:request.urlopen("http://127.0.0.1:8384/rest/noauth/health",timeout=2).read();return
         except Exception:time.sleep(1)
     raise RuntimeError("Syncthing API did not become available")
-def network_prepare():
-    usable=[]
-    r=run(["nmcli","-t","-f","DEVICE,TYPE","device","status"],check=False,capture=True)
-    for line in r.stdout.splitlines():
-        fields=line.split(":",1)
-        if len(fields)!=2 or fields[1]!="ethernet":continue
-        dev=fields[0]
-        try:linked=(Path(f"/sys/class/net/{dev}/carrier").read_text().strip()=="1")
-        except OSError:linked=False
-        if not linked:continue
-        print(f"Ethernet carrier detected on {dev}; requesting a connection...")
-        run(["nmcli","device","connect",dev],check=False,capture=True,timeout=30)
-        for _ in range(30):
-            st=run(["nmcli","-g","GENERAL.STATE","device","show",dev],check=False,capture=True).stdout
-            ip=run(["nmcli","-g","IP4.ADDRESS","device","show",dev],check=False,capture=True).stdout
-            if st.startswith("100") and ip.strip():usable.append(dev);break
-            time.sleep(1)
-    print(f"Using connected Ethernet with IPv4: {usable[0]}" if usable else "No usable Ethernet; keeping the existing connection.")
-    NETWORK_STATE.parent.mkdir(parents=True,exist_ok=True); NETWORK_STATE.write_text(json.dumps({"ethernet_device":usable[0] if usable else None})+"\n")
-def network_restore():
+def active_lan_route():
+    routes=json.loads(run(["ip","-j","-4","route","show","default"],capture=True).stdout or "[]")
+    candidates=[]
+    for route in routes:
+        dev=route.get("dev");gateway=route.get("gateway")
+        if not dev or dev in ("lo","tailscale0") or not gateway:continue
+        addr_data=json.loads(run(["ip","-j","-4","addr","show","dev",dev],capture=True).stdout or "[]")
+        addresses=[]
+        for item in addr_data:
+            for info in item.get("addr_info",[]):
+                if info.get("family")=="inet" and info.get("scope")=="global":addresses.append(info.get("local"))
+        if not addresses:continue
+        kind=Path(f"/sys/class/net/{dev}/wireless").exists()
+        metric=int(route.get("metric",0));candidates.append((1 if kind else 0,metric,dev,gateway,addresses[0]))
+    if not candidates:raise RuntimeError("No usable Ethernet or Wi-Fi route to the home LAN")
+    _,_,dev,gateway,address=sorted(candidates)[0]
+    network=ipaddress.ip_network(f"{address}/24",strict=False)
+    if ipaddress.ip_address(FLOATING_IP) not in network:
+        raise RuntimeError(f"Floating address {FLOATING_IP} is not on active LAN {network}")
+    return dev,gateway,address
+
+def floating_present():
+    result=run(["ip","-j","-4","addr","show"],check=False,capture=True)
+    if result.returncode:return None
+    for item in json.loads(result.stdout or "[]"):
+        for info in item.get("addr_info",[]):
+            if info.get("local")==FLOATING_IP:return item.get("ifname")
+    return None
+
+def floating_claim():
+    current=floating_present()
+    dev,gateway,address=active_lan_route()
+    if current and current!=dev:
+        run(["sudo","ip","addr","del",f"{FLOATING_IP}/32","dev",current],check=False,capture=True)
+    if current!=dev:
+        probe=run(["sudo","arping","-D","-c","2","-w","2","-I",dev,FLOATING_IP],check=False,capture=True)
+        if probe.returncode not in (0,):raise RuntimeError(f"Floating LAN address {FLOATING_IP} is already in use")
+        run(["sudo","ip","addr","add",f"{FLOATING_IP}/32","dev",dev,"label",f"{dev}:minecraft"])
+    run(["sudo","arping","-U","-c","3","-I",dev,FLOATING_IP],check=False,capture=True)
+    NETWORK_STATE.parent.mkdir(parents=True,exist_ok=True)
+    NETWORK_STATE.write_text(json.dumps({"device":dev,"gateway":gateway,"primary":address,"floating":FLOATING_IP})+"\n")
+    print(f"Minecraft service address {FLOATING_IP} claimed on {dev} ({address})")
+    return dev
+
+def floating_release():
+    dev=floating_present()
+    if dev:run(["sudo","ip","addr","del",f"{FLOATING_IP}/32","dev",dev],check=False,capture=True)
     try:NETWORK_STATE.unlink()
     except FileNotFoundError:pass
+
+def network_prepare():
+    floating_claim()
+
+def network_restore():
+    floating_release()
+
+def ddns_update():
+    if not DDNS_ENV.exists():return None
+    env={}
+    for raw in DDNS_ENV.read_text().splitlines():
+        raw=raw.strip()
+        if raw and not raw.startswith("#") and "=" in raw:
+            key,value=raw.split("=",1);env[key.strip()]=value.strip()
+    domain=env.get("DUCKDNS_DOMAIN");token=env.get("DUCKDNS_TOKEN")
+    if not domain or not token:return None
+    url="https://www.duckdns.org/update?"+parse.urlencode({"domains":domain,"token":token,"ip":""})
+    try:
+        result=request.urlopen(url,timeout=15).read().decode().strip()
+    except Exception as error:
+        print(f"DuckDNS update unavailable: {error}",file=sys.stderr);return None
+    if result!="OK":
+        print("DuckDNS update rejected: "+result,file=sys.stderr);return None
+    return domain
+
 def atomic_mirror(src: Path, dst: Path):
     dst.parent.mkdir(parents=True, exist_ok=True)
 
@@ -195,23 +250,6 @@ def port_busy(port):
         return s.connect_ex(("127.0.0.1",port))==0
 
 
-def public_port_map(port, add=True):
-    """Create/remove the router TCP mapping through UPnP IGD when available."""
-    upnpc=shutil.which("upnpc")
-    if not upnpc:return False,"miniupnpc/upnpc is not installed"
-    if add:
-        route=run(["ip","-4","route","get","1.1.1.1"],check=False,capture=True)
-        match=re.search(r"\bsrc\s+(\d+\.\d+\.\d+\.\d+)",route.stdout)
-        if not match:return False,"cannot determine the active LAN IPv4"
-        address=match.group(1)
-        result=run([upnpc,"-e",f"Minecraft {socket.gethostname()} {port}","-a",address,str(port),str(port),"TCP"],check=False,capture=True,timeout=20)
-        if result.returncode:return False,result.stdout.strip() or "UPnP mapping failed"
-        status=run([upnpc,"-s"],check=False,capture=True,timeout=20).stdout
-        external=re.search(r"ExternalIPAddress\s*=\s*(\d+\.\d+\.\d+\.\d+)",status)
-        return True,f"{external.group(1) if external else 'public address'}:{port} -> {address}:{port}"
-    result=run([upnpc,"-d",str(port),"TCP"],check=False,capture=True,timeout=20)
-    return result.returncode==0,result.stdout.strip()
-
 def unit_failure(name):
     state=run(["systemctl","show",unit(name),"-p","ActiveState","-p","SubState","-p","Result","--value"],check=False,capture=True).stdout.splitlines()
     active_state=state[0].strip() if len(state)>0 else "unknown"
@@ -229,6 +267,8 @@ def start(name=None,force=False):
     found,unreachable=remote_state()
     if unreachable and not force:raise RuntimeError("Cannot verify peer(s): "+", ".join(unreachable))
     for label,address,names in found:
+        if any(item==f"floating={FLOATING_IP}" for item in names):
+            raise RuntimeError(f"Peer {label} already owns Minecraft service address {FLOATING_IP}")
         if name in names:
             print(f"Stopping remote server {name} on {label} through {address}...")
             r=ssh(address,["stop",name,"--remote"])
@@ -248,11 +288,11 @@ def start(name=None,force=False):
             failure=unit_failure(name)
             if failure:raise RuntimeError(failure)
             if active(name) and port_busy(port):
-                mapped,detail=public_port_map(port,True)
+                domain=ddns_update()
                 CRITICAL=False
                 print(f"Minecraft server '{name}' started on port {port}")
-                if mapped:print(f"Public TCP mapping active: {detail}")
-                else:print(f"Public TCP mapping unavailable: {detail}",file=sys.stderr)
+                print(f"Router target: {FLOATING_IP}:{port}")
+                if domain:print(f"Friend address: {domain}.duckdns.org:{port}")
                 return
             if elapsed and elapsed%15==0:
                 print(f"Still starting '{name}' ({elapsed}s); follow with: journalctl -u {unit(name)} -f")
@@ -269,9 +309,7 @@ def stop(name=None,remote=False):
     name=select_server(name,"stop")
     if not active(name):print(f"{name} is already stopped locally.");return
     ensure_dependencies(name);runtime,snapshot,_,owner=server_paths(name);CRITICAL=True
-    port=port_for(name)
     print(f"Stopping '{name}' cleanly...");run(["sudo","systemctl","stop",unit(name)])
-    public_port_map(port,False)
     end=time.time()+180
     while active(name) and time.time()<end:time.sleep(1)
     if active(name):raise RuntimeError(f"{name} did not stop within 180 seconds")
@@ -282,7 +320,8 @@ def stop(name=None,remote=False):
 def status(machine=False):
     running=running_servers()
     if machine:
-        print("running "+" ".join(running) if running else "stopped");return 0 if running else 3
+        suffix=f" floating={FLOATING_IP}" if floating_present() else ""
+        print(("running "+" ".join(running) if running else "stopped")+suffix);return 0 if running else 3
     names=available_servers();print("Available servers: "+(", ".join(names) or "none"));print("Running locally: "+(", ".join(running) or "none"))
     found,unreachable=remote_state()
     for label,address,servers in found:print(f"Remote {label} via {address}: {', '.join(servers)}")
