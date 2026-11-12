@@ -187,6 +187,26 @@ def network_prepare():
 def network_restore():
     floating_release()
 
+def public_ipv4():
+    for url in ("https://api.ipify.org", "https://ifconfig.co/ip"):
+        try:
+            value=request.urlopen(url,timeout=8).read().decode().strip()
+            address=ipaddress.ip_address(value)
+            if address.version==4 and address.is_global:return value
+        except Exception:pass
+    return None
+
+def menu_status():
+    for name in available_servers():
+        if active(name):print(f"{name}\tlocal")
+    found,unreachable=remote_state()
+    for label,address,names in found:
+        for name in names:
+            if name.startswith("floating="):continue
+            print(f"{name}\tpeer:{label}")
+    for detail in unreachable:print(f"!peer\tunreachable:{detail}")
+    return 0
+
 def ddns_update():
     if not DDNS_ENV.exists():return None
     env={}
@@ -320,10 +340,12 @@ def start(name=None,force=False):
             failure=unit_failure(name)
             if failure:raise RuntimeError(failure)
             if active(name) and port_busy(port):
-                domain=ddns_update()
+                domain=ddns_update();public=public_ipv4()
                 CRITICAL=False
                 print(f"Minecraft server '{name}' started on port {port}")
                 print(f"Router target: {FLOATING_IP}:{port}")
+                if public:print(f"Public address: {public}:{port}")
+                else:print("Public address: unavailable",file=sys.stderr)
                 if domain:print(f"Friend address: {domain}.duckdns.org:{port}")
                 return
             if elapsed and elapsed%15==0:
@@ -363,13 +385,14 @@ def on_signal(sig,frame):
     if CRITICAL:print("\nCritical save/transfer continues; interrupt ignored.",file=sys.stderr);return
     raise KeyboardInterrupt
 def main():
-    p=argparse.ArgumentParser();p.add_argument("action",nargs="?",default="toggle",choices=["toggle","start","stop","status","logs","takeover","list","release-network"]);p.add_argument("server",nargs="?");p.add_argument("--machine",action="store_true");p.add_argument("--remote",action="store_true");a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument("action",nargs="?",default="toggle",choices=["toggle","start","stop","status","logs","takeover","list","release-network","menu-status"]);p.add_argument("server",nargs="?");p.add_argument("--machine",action="store_true");p.add_argument("--remote",action="store_true");a=p.parse_args()
     for d in (ROOT,RUNTIME_ROOT,BACKUPS,COORD):d.mkdir(parents=True,exist_ok=True)
     for sig in (signal.SIGINT,signal.SIGTERM,signal.SIGHUP):signal.signal(sig,on_signal)
     # Machine status is a read-only peer probe. It must remain available while
     # start/stop owns the transition lock; otherwise a normal handover is
     # misreported as an unreachable peer.
     if a.action=="status" and a.machine:return status(True)
+    if a.action=="menu-status":return menu_status()
     with LOCK.open("w") as lock:
         try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         except BlockingIOError:raise RuntimeError("Another Minecraft transition is in progress")

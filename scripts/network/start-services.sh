@@ -5,6 +5,11 @@ IPAD="/home/joel/.config/sway/scripts/network/start-ipad-webremote.sh"
 VNC_UNIT="camilladsp-wayvnc.service"
 
 mapfile -t SERVERS < <("$MINECRAFT" list)
+declare -A MC_STATUS=()
+while IFS=$'\t' read -r server location; do
+  [[ -n "$server" && "$server" != "!peer" ]] || continue
+  MC_STATUS["$server"]="$location"
+done < <("$MINECRAFT" menu-status 2>/dev/null || true)
 
 printf '%s\n' 'Toggle services'
 printf '%s\n' 'Enter comma-separated numbers. [0] exits.'
@@ -22,11 +27,11 @@ fi
 for i in "${!SERVERS[@]}"; do
   name="${SERVERS[$i]}"
   number=$((i + 3))
-  if systemctl is-active --quiet "minecraft-server-${name}.service"; then
-    printf '  [%d] Minecraft: %s [running]\n' "$number" "$name"
-  else
-    printf '  [%d] Minecraft: %s\n' "$number" "$name"
-  fi
+  case "${MC_STATUS[$name]:-}" in
+    local) printf '  [%d] Minecraft: %s [running locally]\n' "$number" "$name" ;;
+    peer:*) printf '  [%d] Minecraft: %s [running on %s]\n' "$number" "$name" "${MC_STATUS[$name]#peer:}" ;;
+    *) printf '  [%d] Minecraft: %s\n' "$number" "$name" ;;
+  esac
 done
 
 read -r -p 'Selection: ' input
