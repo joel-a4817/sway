@@ -160,6 +160,9 @@ def apply_mode(name,password=None,restore_camilla=True,output=None,output_resolv
     stop_external_delay()
     if sono and name in ('ipad_both','laptop_both') and both_output_local_delay_ms()<0:
         start_external_delay()
+        # effective_mode_policy was calculated before the relay existed. Re-read
+        # it now so SonoBus is restarted on the dedicated delayed mono endpoint.
+        policy=effective_mode_policy(name)
     if sono:
         # Negative sync uses a different ALSA capture endpoint. Always restart
         # SonoBus after rebuilding that relay; persisted XML alone does not

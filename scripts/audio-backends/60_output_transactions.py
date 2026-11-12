@@ -446,7 +446,7 @@ def start_external_delay():
     matrix=both_output_matrix();source='c0' if matrix['left']=='external' else 'c1'
     ffmpeg=shutil.which('ffmpeg')
     if not ffmpeg:raise RuntimeError('ffmpeg is required to isolate the external mono channel')
-    delay_script=BACKEND_DIR/'audio-delay-pcm.py'
+    delay_script=Path(__file__).resolve().parent/'audio-delay-pcm.py'
     if not delay_script.is_file():raise RuntimeError('Missing PCM delay backend: '+str(delay_script))
     audio_filter=f'pan=mono|c0={source}'
     device='hw:Loopback,0,2'
@@ -460,6 +460,20 @@ def start_external_delay():
         EXTERNALDELAYPID.unlink(missing_ok=True)
         raise RuntimeError('External delay relay exited: '+log_tail(log_path)[-1500:])
     return process.pid
+
+def verify_both_delay_runtime():
+    """Verify the selected branch owns a live relay after mode reapplication."""
+    offset=both_output_local_delay_ms();mode=audio_mode()
+    if mode not in ('ipad_both','laptop_both'):return {'active':False,'reason':'not-both-output'}
+    if offset<0:
+        pid=rpid(EXTERNALDELAYPID)
+        if not alive(pid):raise RuntimeError('Negative sync offset external relay is not running; '+log_tail(STATE/'external-delay.log')[-1000:])
+        return {'active':True,'branch':'external','milliseconds':abs(offset),'pid':pid}
+    if offset>0:
+        pid=rpid(LOCALMONPID)
+        if not alive(pid):raise RuntimeError('Positive sync offset PC relay is not running; '+log_tail(STATE/'local-monitor.log')[-1000:])
+        return {'active':True,'branch':'pc','milliseconds':offset,'pid':pid}
+    return {'active':True,'branch':None,'milliseconds':0.0}
 
 def start_local_monitor(route=None,resolved=False,persist=True):
     selected=route if resolved else choose_output_route(route)
@@ -482,7 +496,7 @@ def start_local_monitor(route=None,resolved=False,persist=True):
         filters=[f'pan=stereo|c0={pc_source}|c1={pc_source}']
         audio_filter=','.join(filters)
         if local_delay>0:
-            delay_script=BACKEND_DIR/'audio-delay-pcm.py'
+            delay_script=Path(__file__).resolve().parent/'audio-delay-pcm.py'
             if not delay_script.is_file():raise RuntimeError('Missing PCM delay backend: '+str(delay_script))
             command='set -o pipefail; "$1" -q -D camilladsp_output_shared -r 96000 -f S32_LE -c 2 -t raw | "$2" -hide_banner -loglevel error -f s32le -ar 96000 -ac 2 -i pipe:0 -af "$6" -f s32le -ar 96000 -ac 2 pipe:1 | "$3" "$7" --milliseconds "$5" --rate 96000 --channels 2 --bytes-per-sample 4 | "$4" --playback --device="$8" --rate=96000 --format=s32le --channels=2'
             args=[exe('bash'),'-c',command,'monitor',exe('arecord'),ffmpeg,exe('python3'),exe('pacat'),str(local_delay),audio_filter,str(delay_script),sink]
