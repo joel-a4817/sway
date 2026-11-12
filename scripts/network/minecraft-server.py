@@ -426,9 +426,19 @@ def start(name=None,force=False):
             failure=unit_failure(name)
             if failure:raise RuntimeError(failure)
             if active(name) and port_busy(port):
+                # A listener can appear briefly and then die. Do not report a
+                # successful start until both systemd and TCP remain healthy.
+                stable_until=time.monotonic()+10
+                while time.monotonic()<stable_until:
+                    failure=unit_failure(name)
+                    if failure:raise RuntimeError(failure)
+                    if not active(name) or not port_busy(port):
+                        log=run(["journalctl","-u",unit(name),"-n","120","--no-pager"],check=False,capture=True).stdout.strip()
+                        raise RuntimeError(f"{name} stopped during startup stability check\n{log}".strip())
+                    time.sleep(1)
                 domain=ddns_update();public=public_ipv4()
                 CRITICAL=False
-                print(f"Minecraft server '{name}' started on port {port}")
+                print(f"Minecraft server '{name}' started and remained stable on port {port}")
                 print(f"Router target: {FLOATING_IP}:{port}")
                 if public:print(f"Public address: {public}:{port}")
                 else:print("Public address: unavailable",file=sys.stderr)

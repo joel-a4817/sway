@@ -14,7 +14,8 @@ peer_error=""
 
 # Local truth: systemd on this laptop.
 for server in "${SERVERS[@]}"; do
-    systemctl is-active --quiet "minecraft-server-${server}.service" && LOCAL["$server"]=1 || true
+    state="$(systemctl is-active "minecraft-server-${server}.service" 2>/dev/null || true)"
+    LOCAL["$server"]="${state:-unknown}"
 done
 
 # Remote truth: systemd directly on each configured peer. Do not depend on
@@ -91,14 +92,18 @@ fi
 for i in "${!SERVERS[@]}"; do
     server="${SERVERS[$i]}"
     number=$((i + 3))
-    local_running="${LOCAL[$server]:-}"
+    local_state="${LOCAL[$server]:-unknown}"
     remote_running="${REMOTE[$server]:-}"
-    if [[ -n "$local_running" && -n "$remote_running" ]]; then
+    if [[ "$local_state" == active && -n "$remote_running" ]]; then
         printf '  [%d] Minecraft: %s [CONFLICT: local + %s]\n' "$number" "$server" "$remote_running"
-    elif [[ -n "$local_running" ]]; then
+    elif [[ "$local_state" == active ]]; then
         printf '  [%d] Minecraft: %s [running here]\n' "$number" "$server"
     elif [[ -n "$remote_running" ]]; then
         printf '  [%d] Minecraft: %s [running on %s]\n' "$number" "$server" "$remote_running"
+    elif [[ "$local_state" == failed ]]; then
+        printf '  [%d] Minecraft: %s [FAILED here]\n' "$number" "$server"
+    elif [[ "$local_state" == activating || "$local_state" == deactivating ]]; then
+        printf '  [%d] Minecraft: %s [%s here]\n' "$number" "$server" "$local_state"
     else
         printf '  [%d] Minecraft: %s\n' "$number" "$server"
     fi
