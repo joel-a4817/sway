@@ -141,10 +141,17 @@ def configure_both_output_filterless():
         {'dest':1,'sources':[{'channel':1,'gain':0.0}]},
     ]}}
     data['filters']={};data['pipeline']=[{'type':'Mixer','name':'media_control_stereo_identity'}]
-    offset=both_output_local_delay_ms();matrix=both_output_matrix()
-    delayed='external' if offset<0 else ('pc' if offset>0 else None)
+    offset=both_output_local_delay_ms();matrix=both_output_matrix();delayed=None
+    if offset>0:
+        # Preserve the already-working positive behaviour: delay PC in CamillaDSP.
+        delayed='pc';channel=0 if matrix['left']=='pc' else 1
+        data['filters']['media_control_sync_delay']={'type':'Delay','parameters':{'delay':offset,'unit':'ms','subsample':False}}
+        data['pipeline'].append({'type':'Filter','channels':[channel],'names':['media_control_sync_delay']})
+    elif offset<0:
+        # Negative is applied only after splitting, inside the external writer.
+        delayed='external'
     data['title']='Filterless / dedicated split distributor'
-    data['description']='Identity stereo processing; signed branch delay is applied after channel separation by audio-split-distributor.py'
+    data['description']='Identity stereo processing; separate mono ALSA subdevices for SonoBus and PC playback'
     atomic(path,yaml.safe_dump(data,sort_keys=False,allow_unicode=True,encoding=None))
     return {'path':str(path),'milliseconds':offset,'delayedBranch':delayed,'externalChannel':matrix['left'],'pcChannel':matrix['right']}
 

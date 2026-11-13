@@ -460,7 +460,8 @@ def start_both_distributor():
     if not script.is_file():raise RuntimeError('Missing split distributor: '+str(script))
     logpath=STATE/'both-output-distributor.log';logpath.write_text('',encoding='utf-8')
     with logpath.open('ab',buffering=0) as log:
-        process=subprocess.Popen([exe('python3'),str(script),'--external-channel',external,'--offset-ms',str(both_output_local_delay_ms())],stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True,env=media_env())
+        offset=both_output_local_delay_ms();external_delay=abs(offset) if offset<0 else 0.0
+        process=subprocess.Popen([exe('python3'),str(script),'--external-channel',external,'--external-delay-ms',str(external_delay)],stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True,env=media_env())
     SPLITPID.write_text(str(process.pid)+'\n');time.sleep(.3)
     if process.poll() is not None:
         SPLITPID.unlink(missing_ok=True);raise RuntimeError('Both-output distributor exited: '+log_tail(logpath)[-1500:])
@@ -479,13 +480,14 @@ def start_local_monitor(route=None,resolved=False,persist=True):
         sink=selected['sink'];pw_sink(sink)
     stop_local_monitor()
     both=audio_mode() in ('ipad_both','laptop_both')
-    if both:
-        # Both-output PC playback must always consume only the distributor's
-        # dedicated PC mono endpoint. The previous zero/negative-offset branch
-        # reopened camilladsp_output_shared and played the entire stereo stream,
-        # causing the PC to sound doubled and bypassing branch-only delay.
+    local_delay=both_output_local_delay_ms() if both else 0.0
+    if both and local_delay>0:
         ffmpeg=shutil.which('ffmpeg')
-        if not ffmpeg:raise RuntimeError('ffmpeg is required for PC mono duplication')
+        if not ffmpeg:raise RuntimeError('ffmpeg is required for both-output PC delay')
+        samples=int(round(local_delay*96.0))
+        audio_filter=f'adelay={samples}S|{samples}S'
+        # The distributor already extracted the opposite PC mono channel to
+        # camilladsp_pc_mono. Duplicate that one channel to the physical stereo sink.
         command='set -o pipefail; "$1" -q -D camilladsp_pc_mono -r 96000 -f S32_LE -c 1 -t raw | "$2" -hide_banner -loglevel error -f s32le -ar 96000 -ac 1 -i pipe:0 -af "$5" -f s32le -ar 96000 -ac 2 pipe:1 | "$3" --playback --device="$4" --rate=96000 --format=s32le --channels=2'
         args=[exe('bash'),'-c',command,'monitor',exe('arecord'),ffmpeg,exe('pacat'),sink,'pan=stereo|c0=c0|c1=c0']
     else:
