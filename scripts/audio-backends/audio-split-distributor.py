@@ -20,8 +20,9 @@ def writer(pipe,q,failed):
         failed.append(exc);stop()
 
 def main():
-    ap=argparse.ArgumentParser();ap.add_argument('--external-channel',choices=('left','right'),required=True);ap.add_argument('--external-delay-ms',type=float,default=0.0);a=ap.parse_args()
+    ap=argparse.ArgumentParser();ap.add_argument('--external-channel',choices=('left','right'),required=True);ap.add_argument('--external-delay-ms',type=float,default=0.0);ap.add_argument('--pc-delay-ms',type=float,default=0.0);a=ap.parse_args()
     if not 0.0<=a.external_delay_ms<=500.0:raise SystemExit('external delay must be 0..500 ms')
+    if not 0.0<=a.pc_delay_ms<=500.0:raise SystemExit('PC delay must be 0..500 ms')
     for sig in (signal.SIGTERM,signal.SIGINT):signal.signal(sig,stop)
     external=['aplay','-q','-D','hw:Loopback,0,2','-r','96000','-f','S32_LE','-c','1','-t','raw']
     local=['aplay','-q','-D','hw:Loopback,0,3','-r','96000','-f','S32_LE','-c','1','-t','raw']
@@ -34,7 +35,8 @@ def main():
         threads=[threading.Thread(target=writer,args=(ext.stdin,eq,failed),daemon=True),threading.Thread(target=writer,args=(pc.stdin,pq,failed),daemon=True)]
         for t in threads:t.start()
         remainder=b'';external_index=0 if a.external_channel=='left' else 1;pc_index=1-external_index
-        pending=array.array('i',[0])*round(a.external_delay_ms*96.0)
+        external_pending=array.array('i',[0])*round(a.external_delay_ms*96.0)
+        pc_pending=array.array('i',[0])*round(a.pc_delay_ms*96.0)
         while RUN and not failed:
             block=src.stdout.read(262144)
             if not block:break
@@ -42,12 +44,15 @@ def main():
             if not usable:continue
             samples=array.array('i');samples.frombytes(block[:usable])
             external_samples=array.array('i',samples[external_index::2]);pc_samples=array.array('i',samples[pc_index::2])
-            if pending:
-                pending.extend(external_samples);count=len(external_samples);external_data=pending[:count].tobytes();del pending[:count]
+            if external_pending:
+                external_pending.extend(external_samples);count=len(external_samples);external_data=external_pending[:count].tobytes();del external_pending[:count]
             else:external_data=external_samples.tobytes()
+            if pc_pending:
+                pc_pending.extend(pc_samples);count=len(pc_samples);pc_data=pc_pending[:count].tobytes();del pc_pending[:count]
+            else:pc_data=pc_samples.tobytes()
             # Independent queues are essential: external/SonoBus backpressure can
             # never hold the PC branch behind its delay or network scheduling.
-            eq.put(external_data);pq.put(pc_samples.tobytes())
+            eq.put(external_data);pq.put(pc_data)
         return 0 if not failed else 1
     finally:
         for q in (eq,pq):

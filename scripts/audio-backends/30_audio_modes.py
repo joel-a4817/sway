@@ -143,12 +143,11 @@ def configure_both_output_filterless():
     data['filters']={};data['pipeline']=[{'type':'Mixer','name':'media_control_stereo_identity'}]
     offset=both_output_local_delay_ms();matrix=both_output_matrix();delayed=None
     if offset>0:
-        # Preserve the already-working positive behaviour: delay PC in CamillaDSP.
-        delayed='pc';channel=0 if matrix['left']=='pc' else 1
-        data['filters']['media_control_sync_delay']={'type':'Delay','parameters':{'delay':offset,'unit':'ms','subsample':False}}
-        data['pipeline'].append({'type':'Filter','channels':[channel],'names':['media_control_sync_delay']})
+        # Keep one identical graph at zero and nonzero offsets. The distributor
+        # applies the PC-only delay after splitting, exactly once.
+        delayed='pc'
     elif offset<0:
-        # Negative is applied only after splitting, inside the external writer.
+        # The distributor applies the external-only delay after splitting.
         delayed='external'
     data['title']='Filterless / dedicated split distributor'
     data['description']='Identity stereo processing; separate mono ALSA subdevices for SonoBus and PC playback'
