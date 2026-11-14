@@ -2,6 +2,7 @@
 set -euo pipefail
 
 MINECRAFT="$HOME/.config/sway/scripts/network/minecraft-server.py"
+RESTORE_MINECRAFT="$HOME/.config/sway/scripts/network/restore-minecraft-server.py"
 IPAD="$HOME/.config/sway/scripts/network/start-ipad-webremote.sh"
 VNC_UNIT="camilladsp-wayvnc.service"
 PEERS="$HOME/.config/minecraft-server/peers"
@@ -77,6 +78,7 @@ fi
 printf 'Toggle services [this device: %s]\n' "$THIS_DEVICE"
 printf '%s\n' 'Enter comma-separated numbers. [0] exits.'
 printf '  [E] Exit\n'
+printf '  [R] Restore Minecraft backup\n'
 if "$IPAD" --status >/dev/null 2>&1; then
     printf '  [1] iPad Web Remote [running]\n'
 else
@@ -108,6 +110,7 @@ done
 read -r -p 'Selection: ' input
 [[ -n "${input//[[:space:]]/}" ]] || exit 0
 [[ "$input" =~ ^[Ee]$ ]] && exit 0
+[[ "$input" =~ ^[Rr]$ ]] && { "$RESTORE_MINECRAFT"; exit $?; }
 IFS=',' read -ra tokens <<< "$input"
 declare -A SEEN=()
 for token in "${tokens[@]}"; do
@@ -126,6 +129,10 @@ for token in "${tokens[@]}"; do
                 systemctl --user start "$VNC_UNIT"
             fi
             ;;
-        *) "$MINECRAFT" toggle "${SERVERS[$((token - 3))]}" ;;
+        *)
+            printf 'Waiting for Minecraft transition and full Syncthing barriers...\n'
+            "$MINECRAFT" toggle "${SERVERS[$((token - 3))]}"
+            printf 'Minecraft transition and required synchronization completed.\n'
+            ;;
     esac
 done

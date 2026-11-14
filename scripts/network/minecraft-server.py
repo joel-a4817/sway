@@ -3,6 +3,7 @@
 from __future__ import annotations
 import argparse, contextlib, datetime as dt, fcntl, json, os, re, shutil, signal, socket, subprocess, sys, tarfile, time
 from pathlib import Path
+sys.dont_write_bytecode=True
 from urllib import request, parse
 import ipaddress
 
@@ -161,19 +162,37 @@ def syncthing_config():
     for folder in root.findall("folder"):
         try:path=Path(os.path.expandvars(os.path.expanduser(folder.get("path","")))).resolve()
         except OSError:continue
-        if path==ROOT.resolve():return key,folder.get("id")
+        if path==ROOT.resolve():
+            devices=[item.get("id") for item in folder.findall("device") if item.get("id")]
+            return key,folder.get("id"),devices
     return None
-def syncthing_wait(timeout=300):
+def syncthing_request(path,params=None,method="GET"):
     item=syncthing_config()
     if not item:raise RuntimeError("Configure ~/minecraft-server as its own Syncthing folder")
-    key,folder=item; headers={"X-API-Key":key}
-    request.urlopen(request.Request("http://127.0.0.1:8384/rest/db/scan?"+parse.urlencode({"folder":folder}),method="POST",headers=headers),timeout=10).read()
+    key,folder,_=item;headers={"X-API-Key":key};query=dict(params or {})
+    query.setdefault("folder",folder)
+    url="http://127.0.0.1:8384"+path
+    if query:url+="?"+parse.urlencode(query)
+    return request.urlopen(request.Request(url,method=method,headers=headers),timeout=10)
+
+def syncthing_pause():
+    syncthing_request("/rest/db/pause",method="POST").read()
+    print("Syncthing folder paused for atomic restore.")
+
+def syncthing_resume():
+    syncthing_request("/rest/db/resume",method="POST").read()
+    print("Syncthing folder resumed.")
+
+def syncthing_wait(timeout=300):
+    syncthing_request("/rest/db/scan",method="POST").read()
     end=time.time()+timeout
     while time.time()<end:
-        data=json.load(request.urlopen(request.Request("http://127.0.0.1:8384/rest/db/status?"+parse.urlencode({"folder":folder}),headers=headers),timeout=10))
-        if data.get("state")=="idle" and int(data.get("needTotalItems",0))==0 and int(data.get("needBytes",0))==0 and int(data.get("pullErrors",0))==0:return
+        data=json.load(syncthing_request("/rest/db/status"))
+        if (data.get("state")=="idle" and int(data.get("needTotalItems",0))==0 and
+                int(data.get("needBytes",0))==0 and int(data.get("pullErrors",0))==0):return
         time.sleep(2)
-    raise RuntimeError("Syncthing folder did not become idle and fully local within 5 minutes")
+    raise RuntimeError("Syncthing folder did not become idle and fully synchronized within 5 minutes")
+
 def ensure_dependencies(name=None):
     if name and run(["systemctl","cat",unit(name)],check=False,capture=True).returncode!=0:raise RuntimeError(f"{unit(name)} is not installed; rebuild NixOS")
     if run(["systemctl","is-active","--quiet","NetworkManager.service"],check=False).returncode!=0:raise RuntimeError("NetworkManager is not active")
@@ -435,7 +454,8 @@ def start(name=None,force=False):
                 if check_address and check_text=="stopped":break
                 time.sleep(1)
             else:raise RuntimeError(f"Peer {label} did not complete Minecraft handover within 240 seconds")
-    print("Waiting for the synced snapshot...");syncthing_wait();network_prepare()
+    print("Synchronizing the stopped snapshot before start...");syncthing_wait()
+    print("Snapshot is fully synchronized; preparing the network and runtime...");network_prepare()
     runtime,snapshot,_,owner=server_paths(name); CRITICAL=True;atomic_mirror(snapshot,runtime)
     owner.parent.mkdir(parents=True,exist_ok=True);owner.write_text(json.dumps({"server":name,"host":socket.gethostname(),"started":dt.datetime.now(dt.timezone.utc).isoformat()})+"\n")
     try:
@@ -472,7 +492,10 @@ def stop(name=None,remote=False):
     global CRITICAL
     name=select_server(name,"stop")
     if not active(name):print(f"{name} is already stopped locally.");return
-    ensure_dependencies(name);runtime,snapshot,_,owner=server_paths(name);CRITICAL=True
+    ensure_dependencies(name);runtime,snapshot,_,owner=server_paths(name)
+    print("Synchronizing the existing stopped snapshot before stop...");syncthing_wait()
+    print("Pre-stop synchronization is complete; stopping the live server cleanly...")
+    CRITICAL=True
     print(f"Stopping '{name}' cleanly...");run(["sudo","systemctl","stop",unit(name)])
     end=time.time()+180
     while active(name) and time.time()<end:time.sleep(1)
@@ -481,7 +504,107 @@ def stop(name=None,remote=False):
     if not running_servers():network_restore()
     try:owner.unlink()
     except FileNotFoundError:pass
-    print("Publishing stopped snapshot through Syncthing...");syncthing_wait();CRITICAL=False;print(f"'{name}' stopped, backed up, and published.")
+    print("Publishing the new stopped snapshot through Syncthing...");syncthing_wait()
+    CRITICAL=False;print(f"'{name}' stopped only after the pre-stop barrier, then backed up and fully synchronized.")
+def backup_choices(name):
+    folder=BACKUPS/name
+    if not folder.is_dir():return []
+    return sorted(folder.glob(f"{name}-*.tar.gz"),key=lambda item:item.stat().st_mtime,reverse=True)
+
+def select_backup(name,requested=None):
+    choices=backup_choices(name)
+    if requested:
+        candidate=Path(requested).expanduser().resolve()
+        if candidate not in [item.resolve() for item in choices]:
+            raise RuntimeError(f"Backup is not in {BACKUPS/name}: {candidate}")
+        return candidate
+    if not choices:raise RuntimeError(f"No backups exist for {name} in {BACKUPS/name}")
+    if not sys.stdin.isatty():raise RuntimeError("Specify --backup when restore is non-interactive")
+    print(f"Choose a backup to restore for {name}:")
+    print("  [E] Exit")
+    for index,item in enumerate(choices,1):
+        stamp=dt.datetime.fromtimestamp(item.stat().st_mtime).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+        print(f"  [{index}] {item.name}  ({stamp}, {item.stat().st_size/1024/1024:.1f} MiB)")
+    while True:
+        answer=input("Selection: ").strip()
+        if answer.casefold()=="e":raise SystemExit(0)
+        if answer.isdigit() and 1<=int(answer)<=len(choices):return choices[int(answer)-1]
+        print("Invalid selection.")
+
+def safe_extract_backup(archive,destination,name):
+    destination.mkdir(parents=True,exist_ok=False)
+    root=destination.resolve()
+    with tarfile.open(archive,"r:gz") as handle:
+        members=handle.getmembers()
+        if not members:raise RuntimeError(f"Backup is empty: {archive}")
+        for member in members:
+            target=(destination/member.name).resolve()
+            if target!=root and root not in target.parents:
+                raise RuntimeError(f"Unsafe path in backup: {member.name}")
+            if member.issym() or member.islnk():
+                link=(target.parent/member.linkname).resolve()
+                if link!=root and root not in link.parents:
+                    raise RuntimeError(f"Unsafe link in backup: {member.name} -> {member.linkname}")
+        handle.extractall(destination,filter="data")
+    preferred=destination/name
+    if preferred.is_dir():return preferred
+    top=[item for item in destination.iterdir() if item.is_dir()]
+    if len(top)==1:return top[0]
+    raise RuntimeError(f"Backup does not contain one {name} server directory")
+
+def restore_backup(name=None,requested=None):
+    global CRITICAL
+    name=select_server(name,"restore");archive=select_backup(name,requested)
+    if sys.stdin.isatty():
+        answer=input(f"Restore {name} from {archive.name} and leave it stopped? [y/N]: ").strip().casefold()
+        if answer not in ("y","yes"):raise SystemExit(0)
+    ensure_dependencies(name)
+    found,unreachable=remote_state()
+    if unreachable:raise RuntimeError("Cannot verify peer(s) before restore: "+", ".join(unreachable))
+    for label,address,names in found:
+        if name in names:
+            print(f"Stopping remote '{name}' on {label} before restore...")
+            result=ssh(address,["stop",name,"--remote"])
+            if result.returncode:raise RuntimeError((result.stdout or "").strip() or "remote stop failed")
+    if active(name):stop(name)
+    else:
+        print("Synchronizing the stopped snapshot before restore...");syncthing_wait()
+    runtime,snapshot,_,owner=server_paths(name)
+    stage=snapshot.parent/f".{name}.restore-{os.getpid()}"
+    shutil.rmtree(stage,ignore_errors=True)
+    CRITICAL=True;paused=False;restored_ok=False
+    try:
+        # Match the server lifecycle: no synchronization may occur while the
+        # authoritative stopped snapshot is being replaced.
+        syncthing_pause();paused=True
+        restored=safe_extract_backup(archive,stage,name)
+        print(f"Restoring {archive.name} to stopped snapshot and runtime...")
+        atomic_mirror(restored,snapshot)
+        atomic_mirror(restored,runtime)
+        # Historical backup mtimes must become a new local version when the
+        # folder resumes, otherwise a newer wrong peer copy can win.
+        now=time.time()
+        for path in sorted(snapshot.rglob("*"),key=lambda item:len(item.parts),reverse=True):
+            try:os.utime(path,(now,now),follow_symlinks=False)
+            except (FileNotFoundError,PermissionError):pass
+        os.utime(snapshot,(now,now),follow_symlinks=False)
+        try:owner.unlink()
+        except FileNotFoundError:pass
+        if not running_servers():network_restore()
+        restored_ok=True
+    finally:
+        shutil.rmtree(stage,ignore_errors=True)
+        if paused:
+            try:syncthing_resume()
+            except Exception as error:
+                CRITICAL=False
+                raise RuntimeError(f"Restore completed locally but Syncthing could not resume: {error}") from error
+        CRITICAL=False
+    if restored_ok:
+        print("Scanning and synchronizing the restored snapshot through Syncthing...")
+        syncthing_wait()
+        print(f"Restored '{name}' from {archive.name}, synchronized it through Syncthing, and left it stopped.")
+
 def status(machine=False):
     running=running_servers()
     if machine:
@@ -506,7 +629,7 @@ def on_signal(sig,frame):
     if CRITICAL:print("\nCritical save/transfer continues; interrupt ignored.",file=sys.stderr);return
     raise KeyboardInterrupt
 def main():
-    p=argparse.ArgumentParser();p.add_argument("action",nargs="?",default="toggle",choices=["toggle","start","stop","status","logs","takeover","list","release-network","menu-status"]);p.add_argument("server",nargs="?");p.add_argument("--machine",action="store_true");p.add_argument("--remote",action="store_true");a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument("action",nargs="?",default="toggle",choices=["toggle","start","stop","restore","status","logs","takeover","list","release-network","menu-status"]);p.add_argument("server",nargs="?");p.add_argument("--machine",action="store_true");p.add_argument("--remote",action="store_true");p.add_argument("--backup");a=p.parse_args()
     for d in (ROOT,RUNTIME_ROOT,BACKUPS,COORD):d.mkdir(parents=True,exist_ok=True)
     for sig in (signal.SIGINT,signal.SIGTERM,signal.SIGHUP):signal.signal(sig,on_signal)
     # Machine status is a read-only peer probe. It must remain available while
@@ -514,7 +637,7 @@ def main():
     # misreported as an unreachable peer.
     if a.action=="status" and a.machine:return machine_status()
     if a.action=="menu-status":return menu_status()
-    mutating=a.action in ("toggle","start","stop","takeover","release-network")
+    mutating=a.action in ("toggle","start","stop","restore","takeover","release-network")
     cluster=contextlib.nullcontext() if not mutating else cluster_transition_lock(a.remote)
     with cluster:
       with LOCK.open("w") as lock:
@@ -538,6 +661,9 @@ def main():
             if not requested: requested=running_servers()
             for name in requested:
                 if active(name): stop(name,a.remote)
+        elif a.action=="restore":
+            if len(requested)>1:raise RuntimeError("Restore accepts exactly one server")
+            restore_backup(requested[0] if requested else None,a.backup)
         elif a.action=="toggle":
             if requested:
                 for name in requested:
