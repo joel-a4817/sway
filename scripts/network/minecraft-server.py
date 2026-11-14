@@ -197,15 +197,40 @@ def syncthing_resume():
     syncthing_set_paused(False)
     print("Syncthing folder resumed.")
 
-def syncthing_wait(timeout=300):
+def syncthing_wait(timeout=300,stable_seconds=4):
+    """Require a clean local index and 100% completion on every folder device."""
+    item=syncthing_config()
+    if not item:raise RuntimeError("Configure ~/minecraft-server as its own Syncthing folder")
+    _,_,devices=item
     syncthing_request("/rest/db/scan",method="POST").read()
-    end=time.time()+timeout
-    while time.time()<end:
+    end=time.monotonic()+timeout;stable_since=None;last_reason="waiting for initial status"
+    while time.monotonic()<end:
         data=json.load(syncthing_request("/rest/db/status"))
-        if (data.get("state")=="idle" and int(data.get("needTotalItems",0))==0 and
-                int(data.get("needBytes",0))==0 and int(data.get("pullErrors",0))==0):return
+        clean=(data.get("state")=="idle" and int(data.get("needTotalItems",0))==0 and
+               int(data.get("needBytes",0))==0 and int(data.get("pullErrors",0))==0)
+        incomplete=[]
+        for device in devices:
+            completion=json.load(syncthing_request("/rest/db/completion",{"device":device}))
+            value=float(completion.get("completion",0.0))
+            need=int(completion.get("needItems",completion.get("needTotalItems",0)) or 0)
+            if value<100.0 or need:
+                incomplete.append(f"{device[:7]}={value:.2f}%/{need} items")
+        if clean and not incomplete:
+            if stable_since is None:stable_since=time.monotonic()
+            if time.monotonic()-stable_since>=stable_seconds:
+                # A second scan closes the race between the first scan and peer convergence.
+                syncthing_request("/rest/db/scan",method="POST").read()
+                confirm=json.load(syncthing_request("/rest/db/status"))
+                if (confirm.get("state")=="idle" and int(confirm.get("needTotalItems",0))==0 and
+                        int(confirm.get("needBytes",0))==0 and int(confirm.get("pullErrors",0))==0):return
+                stable_since=None
+        else:
+            stable_since=None
+            last_reason=(f"state={data.get('state')}, needItems={data.get('needTotalItems',0)}, "
+                         f"needBytes={data.get('needBytes',0)}, pullErrors={data.get('pullErrors',0)}")
+            if incomplete:last_reason+=", devices="+", ".join(incomplete)
         time.sleep(2)
-    raise RuntimeError("Syncthing folder did not become idle and fully synchronized within 5 minutes")
+    raise RuntimeError(f"Syncthing did not reach stable full-cluster convergence within {timeout}s ({last_reason})")
 
 def ensure_dependencies(name=None):
     if name and run(["systemctl","cat",unit(name)],check=False,capture=True).returncode!=0:raise RuntimeError(f"{unit(name)} is not installed; rebuild NixOS")
@@ -458,6 +483,49 @@ def verify_identical(source,destination,label):
         changed=sorted(k for k in set(left)&set(right) if left[k]!=right[k])[:5]
         raise RuntimeError(f"{label} verification failed; missing={missing}, extra={extra}, changed={changed}")
 
+def manifest_digest(root):
+    payload=json.dumps(tree_manifest(root),sort_keys=True,separators=(",",":"),ensure_ascii=True).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+def handover_path(name):return ROOT/"servers"/name/"handover.json"
+
+def write_handover(name,snapshot,reason):
+    marker=handover_path(name);marker.parent.mkdir(parents=True,exist_ok=True)
+    record={"schema":1,"server":name,"generation":os.urandom(16).hex(),
+            "publisher":local_node_name(),"reason":reason,
+            "created":dt.datetime.now(dt.timezone.utc).isoformat(),
+            "snapshot_sha256":manifest_digest(snapshot)}
+    temporary=marker.with_suffix(".json.tmp")
+    with temporary.open("w") as handle:
+        json.dump(record,handle,sort_keys=True);handle.write("\n");handle.flush();os.fsync(handle.fileno())
+    os.replace(temporary,marker)
+    return record
+
+def validate_handover(name,snapshot):
+    marker=handover_path(name)
+    if not marker.is_file():raise RuntimeError(f"Missing synchronized handover marker: {marker}")
+    try:record=json.loads(marker.read_text())
+    except (OSError,ValueError) as error:raise RuntimeError(f"Invalid handover marker {marker}: {error}")
+    if record.get("schema")!=1 or record.get("server")!=name:
+        raise RuntimeError(f"Handover marker does not describe server {name}")
+    actual=manifest_digest(snapshot)
+    if record.get("snapshot_sha256")!=actual:
+        raise RuntimeError("Snapshot does not match its synchronized handover marker; refusing to start")
+    return record
+
+def replace_snapshot_from_backup(restored,snapshot):
+    """Atomically replace the stopped snapshot with an extracted backup tree."""
+    incoming=snapshot.with_name(snapshot.name+".restore-incoming")
+    old=snapshot.with_name(snapshot.name+".restore-old")
+    shutil.rmtree(incoming,ignore_errors=True);shutil.rmtree(old,ignore_errors=True)
+    shutil.copytree(restored,incoming,symlinks=True)
+    if snapshot.exists():snapshot.rename(old)
+    try:incoming.rename(snapshot)
+    except Exception:
+        if old.exists() and not snapshot.exists():old.rename(snapshot)
+        raise
+    shutil.rmtree(old,ignore_errors=True)
+
 def safety_backup(name,source,kind):
     if not source.is_dir() or not any(source.iterdir()):return None
     folder=BACKUPS/name;folder.mkdir(parents=True,exist_ok=True)
@@ -493,13 +561,25 @@ def start(name=None,force=False):
                 if text=="stopped":break
                 time.sleep(1)
             else:raise RuntimeError(f"Peer {label} did not finish stop/sync handover")
-    print("Resuming Syncthing and waiting for the authoritative snapshot...")
+    print("Resuming Syncthing and waiting for full-cluster snapshot convergence...")
     ensure_syncthing_resumed_and_current()
     runtime,snapshot,_,owner=server_paths(name)
     if not snapshot.is_dir() or not any(snapshot.iterdir()):raise RuntimeError(f"Snapshot is missing or empty: {snapshot}")
+    if not handover_path(name).is_file():
+        # One-time migration for snapshots created by the previous manager. At this
+        # point every peer is stopped and the snapshot has fully converged.
+        safety_backup(name,snapshot,"pre-handover-migration")
+        print("Creating and synchronizing the initial verified handover marker...")
+        write_handover(name,snapshot,"format-migration")
+        syncthing_wait()
+    record=validate_handover(name,snapshot)
     safety_backup(name,snapshot,"pre-start-snapshot")
-    print("Pausing Syncthing for the full server runtime...");syncthing_pause();CRITICAL=True
+    print("Pausing Syncthing before acquiring runtime ownership...");syncthing_pause();CRITICAL=True
     try:
+        # Revalidate after pause so no file can change between convergence and copy.
+        paused_record=validate_handover(name,snapshot)
+        if paused_record.get("generation")!=record.get("generation"):
+            raise RuntimeError("Handover generation changed while start was acquiring ownership")
         atomic_mirror(snapshot,runtime);verify_identical(snapshot,runtime,"pre-start runtime")
         network_prepare();owner.parent.mkdir(parents=True,exist_ok=True)
         owner.write_text(json.dumps({"server":name,"host":socket.gethostname(),"started":dt.datetime.now(dt.timezone.utc).isoformat()})+"\n")
@@ -542,6 +622,7 @@ def stop(name=None,remote=False):
         if active(name):raise RuntimeError(f"{name} did not stop within 180 seconds")
         backup(name,runtime);safety_backup(name,snapshot,"pre-stop-snapshot")
         atomic_mirror(runtime,snapshot);verify_identical(runtime,snapshot,"stopped snapshot")
+        write_handover(name,snapshot,"clean-stop")
         if not running_servers():network_restore()
         try:owner.unlink()
         except FileNotFoundError:pass
@@ -626,6 +707,7 @@ def restore_backup(name=None,requested=None):
         if not (restored/'level.dat').exists() and not any(restored.glob('world*/level.dat')):raise RuntimeError("Backup contains no level.dat")
         replace_snapshot_from_backup(restored,snapshot);mutated=True
         atomic_mirror(snapshot,runtime);verify_identical(snapshot,runtime,"restored runtime")
+        write_handover(name,snapshot,"backup-restore")
         now=time.time()
         for path in snapshot.rglob("*"):
             try:os.utime(path,(now,now),follow_symlinks=False)
