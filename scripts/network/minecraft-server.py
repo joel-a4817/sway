@@ -344,6 +344,14 @@ def atomic_mirror(src: Path, dst: Path):
     temp.rename(dst)
     shutil.rmtree(old, ignore_errors=True)
 
+def replace_snapshot_from_backup(restored,snapshot):
+    expected=ROOT/'servers'/snapshot.parent.name/'snapshot'
+    if snapshot.resolve()!=expected.resolve():raise RuntimeError(f"Refusing unexpected snapshot destination: {snapshot}")
+    print(f"Replacing authoritative server snapshot: {snapshot}")
+    atomic_mirror(restored,snapshot)
+    if not snapshot.is_dir() or not any(snapshot.iterdir()):raise RuntimeError(f"Restored snapshot is missing or empty: {snapshot}")
+
+
 def server_paths(name):return unit_workdir(name),ROOT/"servers"/name/"snapshot",BACKUPS/name,COORD/f"{name}.owner.json"
 def backup(name,runtime):
     folder=BACKUPS/name;folder.mkdir(parents=True,exist_ok=True); path=folder/dt.datetime.now().strftime(f"{name}-%Y%m%d-%H%M%S.tar.gz")
@@ -593,8 +601,8 @@ def restore_backup(name=None,requested=None):
         syncthing_pause();paused=True
         restored=safe_extract_backup(archive,stage,name)
         print(f"Restoring {archive.name} to stopped snapshot and runtime...")
-        atomic_mirror(restored,snapshot)
-        atomic_mirror(restored,runtime)
+        replace_snapshot_from_backup(restored,snapshot)
+        atomic_mirror(snapshot,runtime)
         # Historical backup mtimes must become a new local version when the
         # folder resumes, otherwise a newer wrong peer copy can win.
         now=time.time()
