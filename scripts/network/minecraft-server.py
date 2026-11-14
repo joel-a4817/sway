@@ -247,7 +247,10 @@ def syncthing_wait_cluster(timeout=300,stable_seconds=4):
     raise RuntimeError(f"Syncthing cluster did not converge within {timeout}s ({last_reason})")
 
 def syncthing_wait(timeout=300):
-    return syncthing_wait_cluster(timeout)
+    # Lifecycle correctness is established by the exact handover generation and
+    # snapshot digest. Waiting for every configured Syncthing device can block on
+    # an unrelated offline/paused/stale device and adds no integrity guarantee.
+    return syncthing_wait_local(timeout)
 
 def ensure_dependencies(name=None):
     if name and run(["systemctl","cat",unit(name)],check=False,capture=True).returncode!=0:raise RuntimeError(f"{unit(name)} is not installed; rebuild NixOS")
@@ -574,7 +577,7 @@ def safety_backup(name,source,kind):
     with tarfile.open(target,"w:gz") as archive:archive.add(source,arcname=name,recursive=True)
     print(f"Safety backup created: {target}");return target
 
-def ensure_syncthing_resumed_and_current(cluster=True):
+def ensure_syncthing_resumed_and_current(cluster=False):
     if running_servers():raise RuntimeError("Refusing to resume Syncthing while Minecraft is running")
     syncthing_resume()
     (syncthing_wait_cluster if cluster else syncthing_wait_local)()
@@ -611,15 +614,15 @@ def start(name=None,force=False):
                 if text=="stopped":break
                 time.sleep(1)
             else:raise RuntimeError(f"Peer {label} did not finish stop/sync handover")
-    print("Waiting for the published handover and full cluster convergence...")
+    print("Waiting for the verified handover snapshot to settle locally...")
     old,wanted=expected.get(name,((read_handover(name) or {}).get("generation"),None))
     if name in expected:wait_for_handover(name,old,wanted)
-    (syncthing_wait_local if force else syncthing_wait_cluster)()
+    syncthing_wait_local()
     runtime,snapshot,_,owner=server_paths(name)
     if not snapshot.is_dir() or not any(snapshot.iterdir()):raise RuntimeError(f"Snapshot is missing or empty: {snapshot}")
     if not handover_path(name).is_file():
         safety_backup(name,snapshot,"pre-handover-migration");write_handover(name,snapshot,"format-migration")
-        (syncthing_wait_local if force else syncthing_wait_cluster)()
+        syncthing_wait_local()
     record=validate_handover(name,snapshot,wanted)
     safety_backup(name,snapshot,"pre-start-snapshot")
     print("Pausing Syncthing before acquiring runtime ownership...");syncthing_pause();CRITICAL=True
@@ -677,7 +680,7 @@ def stop(name=None,remote=False):
         if remote:
             syncthing_wait_local()
         else:
-            prepare_peers_for_sync();syncthing_wait_cluster()
+            prepare_peers_for_sync();syncthing_wait_local()
         CRITICAL=False
         print(f"HANDOVER {record['generation']}")
         print(f"'{name}' stopped, backed up, verified, and synchronized.")
@@ -747,7 +750,7 @@ def restore_backup(name=None,requested=None):
             r=ssh(address,["stop",remote_name,"--remote"])
             if r.returncode:raise RuntimeError((r.stdout or "").strip() or "remote stop failed")
     for running in list(running_servers()):stop(running)
-    ensure_syncthing_resumed_and_current()
+    ensure_syncthing_resumed_and_current(cluster=False)
     runtime,snapshot,_,owner=server_paths(name)
     safety_backup(name,snapshot,"pre-restore-snapshot");safety_backup(name,runtime,"pre-restore-runtime")
     stage=snapshot.parent/f".{name}.restore-{os.getpid()}";rollback=snapshot.parent/f".{name}.rollback-{os.getpid()}"
@@ -777,7 +780,7 @@ def restore_backup(name=None,requested=None):
     finally:
         shutil.rmtree(stage,ignore_errors=True);shutil.rmtree(rollback,ignore_errors=True)
         syncthing_resume();CRITICAL=False
-    print("Scanning and synchronizing restored snapshot...");prepare_peers_for_sync();syncthing_wait_cluster()
+    print("Publishing and verifying the restored snapshot locally...");prepare_peers_for_sync();syncthing_wait_local()
     print(f"Restored '{name}' from {archive.name}; runtime verified; server remains stopped.")
 
 def status(machine=False):
