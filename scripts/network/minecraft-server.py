@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Safe multi-server Fabric lifecycle manager for NixOS/nix-minecraft."""
 from __future__ import annotations
-import argparse, contextlib, datetime as dt, fcntl, json, os, re, shutil, signal, socket, subprocess, sys, tarfile, time
+import argparse, contextlib, datetime as dt, fcntl, hashlib, json, os, re, shutil, signal, socket, subprocess, sys, tarfile, time
 from pathlib import Path
 sys.dont_write_bytecode=True
 from urllib import request, parse
@@ -344,14 +344,6 @@ def atomic_mirror(src: Path, dst: Path):
     temp.rename(dst)
     shutil.rmtree(old, ignore_errors=True)
 
-def replace_snapshot_from_backup(restored,snapshot):
-    expected=ROOT/'servers'/snapshot.parent.name/'snapshot'
-    if snapshot.resolve()!=expected.resolve():raise RuntimeError(f"Refusing unexpected snapshot destination: {snapshot}")
-    print(f"Replacing authoritative server snapshot: {snapshot}")
-    atomic_mirror(restored,snapshot)
-    if not snapshot.is_dir() or not any(snapshot.iterdir()):raise RuntimeError(f"Restored snapshot is missing or empty: {snapshot}")
-
-
 def server_paths(name):return unit_workdir(name),ROOT/"servers"/name/"snapshot",BACKUPS/name,COORD/f"{name}.owner.json"
 def backup(name,runtime):
     folder=BACKUPS/name;folder.mkdir(parents=True,exist_ok=True); path=folder/dt.datetime.now().strftime(f"{name}-%Y%m%d-%H%M%S.tar.gz")
@@ -445,89 +437,124 @@ def cluster_transition_lock(remote_action=False):
         try:process.wait(timeout=5)
         except subprocess.TimeoutExpired:process.terminate()
 
+def tree_manifest(root):
+    root=Path(root)
+    if not root.is_dir():raise RuntimeError(f"Missing tree: {root}")
+    result={}
+    for path in sorted(root.rglob("*"),key=lambda item:item.as_posix()):
+        rel=path.relative_to(root).as_posix()
+        if path.is_symlink():result[rel]=("link",os.readlink(path));continue
+        if path.is_dir():continue
+        h=hashlib.sha256()
+        with path.open("rb") as f:
+            for block in iter(lambda:f.read(1024*1024),b""):h.update(block)
+        result[rel]=("file",path.stat().st_size,h.hexdigest())
+    return result
+
+def verify_identical(source,destination,label):
+    left=tree_manifest(source);right=tree_manifest(destination)
+    if left!=right:
+        missing=sorted(set(left)-set(right))[:5];extra=sorted(set(right)-set(left))[:5]
+        changed=sorted(k for k in set(left)&set(right) if left[k]!=right[k])[:5]
+        raise RuntimeError(f"{label} verification failed; missing={missing}, extra={extra}, changed={changed}")
+
+def safety_backup(name,source,kind):
+    if not source.is_dir() or not any(source.iterdir()):return None
+    folder=BACKUPS/name;folder.mkdir(parents=True,exist_ok=True)
+    target=folder/f"{name}-{kind}-{dt.datetime.now().strftime('%Y%m%d-%H%M%S')}.tar.gz"
+    with tarfile.open(target,"w:gz") as archive:archive.add(source,arcname=name,recursive=True)
+    print(f"Safety backup created: {target}");return target
+
+def ensure_syncthing_resumed_and_current():
+    if running_servers():raise RuntimeError("Refusing to resume Syncthing while Minecraft is running")
+    syncthing_resume();syncthing_wait()
+
 def start(name=None,force=False):
     global CRITICAL
     name=select_server(name,"start");ensure_dependencies(name)
-    if not peer_groups() and not force:
-        raise RuntimeError(f"No peers configured in {PEERS}; refusing an uncoordinated start")
-    if active(name):print(f"{name} is already running locally.");return
+    local=running_servers()
+    if local:
+        if name in local:print(f"{name} is already running locally.");return
+        raise RuntimeError("Another local Minecraft server is already running: "+", ".join(local))
+    if not peer_groups() and not force:raise RuntimeError(f"No peers configured in {PEERS}; refusing an uncoordinated start")
     found,unreachable=remote_state()
     if unreachable and not force:raise RuntimeError("Cannot verify peer(s): "+", ".join(unreachable))
-    transitioning=[label for label,address,names in found if "transitioning" in names]
-    if transitioning:
-        raise RuntimeError("Peer transition already in progress on: "+", ".join(transitioning)+". Retry after it finishes.")
     for label,address,names in found:
-        remote_servers=[item for item in names if not item.startswith("floating=")]
-        owns_floating=any(item==f"floating={FLOATING_IP}" for item in names)
-        # The floating address belongs to the Minecraft host, not to one server.
-        # A handover must stop every remote Minecraft service before moving it.
+        remote_servers=[item for item in names if not item.startswith("floating=") and item!="transitioning"]
+        if "transitioning" in names:raise RuntimeError(f"Peer transition already in progress on {label}")
         for remote_name in remote_servers:
-            print(f"Stopping remote server {remote_name} on {label} through {address}...")
+            print(f"Stopping remote server {remote_name} on {label}...")
             r=ssh(address,["stop",remote_name,"--remote"])
             if r.returncode:raise RuntimeError((r.stdout or "").strip() or "remote stop failed")
-        if owns_floating and not remote_servers:
-            print(f"Releasing stale Minecraft service address on {label} through {address}...")
-            r=ssh(address,["release-network","--remote"])
-            if r.returncode:raise RuntimeError((r.stdout or "").strip() or "remote network release failed")
-        if remote_servers or owns_floating:
+        if remote_servers:
             deadline=time.time()+240
             while time.time()<deadline:
-                check_address,check_result,check_text,_=query_group([address],["status","--machine"])
-                if check_address and check_text=="stopped":break
+                _,_,text,_=query_group([address],["status","--machine"])
+                if text=="stopped":break
                 time.sleep(1)
-            else:raise RuntimeError(f"Peer {label} did not complete Minecraft handover within 240 seconds")
-    print("Synchronizing the stopped snapshot before start...");syncthing_wait()
-    print("Snapshot is fully synchronized; preparing the network and runtime...");network_prepare()
-    runtime,snapshot,_,owner=server_paths(name); CRITICAL=True;atomic_mirror(snapshot,runtime)
-    owner.parent.mkdir(parents=True,exist_ok=True);owner.write_text(json.dumps({"server":name,"host":socket.gethostname(),"started":dt.datetime.now(dt.timezone.utc).isoformat()})+"\n")
+            else:raise RuntimeError(f"Peer {label} did not finish stop/sync handover")
+    print("Resuming Syncthing and waiting for the authoritative snapshot...")
+    ensure_syncthing_resumed_and_current()
+    runtime,snapshot,_,owner=server_paths(name)
+    if not snapshot.is_dir() or not any(snapshot.iterdir()):raise RuntimeError(f"Snapshot is missing or empty: {snapshot}")
+    safety_backup(name,snapshot,"pre-start-snapshot")
+    print("Pausing Syncthing for the full server runtime...");syncthing_pause();CRITICAL=True
     try:
+        atomic_mirror(snapshot,runtime);verify_identical(snapshot,runtime,"pre-start runtime")
+        network_prepare();owner.parent.mkdir(parents=True,exist_ok=True)
+        owner.write_text(json.dumps({"server":name,"host":socket.gethostname(),"started":dt.datetime.now(dt.timezone.utc).isoformat()})+"\n")
         run(["sudo","systemctl","reset-failed",unit(name)],check=False,capture=True)
-        result=run(["sudo","systemctl","start",unit(name)],check=False,capture=True)
-        if result.returncode:
-            log=run(["journalctl","-u",unit(name),"-n","80","--no-pager"],check=False,capture=True).stdout.strip()
-            raise RuntimeError((result.stdout.strip()+"\n"+log).strip())
-        port=port_for(name)
-        print(f"Waiting for '{name}' to listen on TCP {port}...")
+        r=run(["sudo","systemctl","start",unit(name)],check=False,capture=True)
+        if r.returncode:raise RuntimeError(r.stdout.strip() or f"Failed to start {unit(name)}")
+        port=port_for(name);print(f"Waiting for '{name}' to listen on TCP {port}...")
         for elapsed in range(180):
             failure=unit_failure(name)
             if failure:raise RuntimeError(failure)
             if active(name) and port_busy(port):
-                domain=ddns_update();public=public_ipv4()
-                CRITICAL=False
+                domain=ddns_update();public=public_ipv4();CRITICAL=False
                 print(f"Minecraft server '{name}' started on port {port}")
                 print(f"Router target: {FLOATING_IP}:{port}")
                 if public:print(f"Public address: {public}:{port}")
-                else:print("Public address: unavailable",file=sys.stderr)
                 if domain:print(f"Friend address: {domain}.duckdns.org:{port}")
-                return
-            if elapsed and elapsed%15==0:
-                print(f"Still starting '{name}' ({elapsed}s); follow with: journalctl -u {unit(name)} -f")
+                print("Syncthing is paused until the server is stopped and snapshotted.");return
             time.sleep(1)
-        log=run(["journalctl","-u",unit(name),"-n","120","--no-pager"],check=False,capture=True).stdout.strip()
-        run(["sudo","systemctl","stop",unit(name)],check=False)
-        raise RuntimeError(f"{name} did not listen on TCP {port} within 180 seconds\n{log}".strip())
+        raise RuntimeError(f"{name} did not listen on TCP {port} within 180 seconds")
     except Exception:
+        run(["sudo","systemctl","stop",unit(name)],check=False)
         try:owner.unlink()
         except FileNotFoundError:pass
-        network_restore();CRITICAL=False;raise
+        network_restore();CRITICAL=False
+        if not running_servers():
+            try:ensure_syncthing_resumed_and_current()
+            except Exception as error:print(f"Could not restore Syncthing after failed start: {error}",file=sys.stderr)
+        raise
+
 def stop(name=None,remote=False):
     global CRITICAL
     name=select_server(name,"stop")
     if not active(name):print(f"{name} is already stopped locally.");return
-    ensure_dependencies(name);runtime,snapshot,_,owner=server_paths(name)
-    print("Synchronizing the existing stopped snapshot before stop...");syncthing_wait()
-    print("Pre-stop synchronization is complete; stopping the live server cleanly...")
-    CRITICAL=True
-    print(f"Stopping '{name}' cleanly...");run(["sudo","systemctl","stop",unit(name)])
-    end=time.time()+180
-    while active(name) and time.time()<end:time.sleep(1)
-    if active(name):raise RuntimeError(f"{name} did not stop within 180 seconds")
-    backup(name,runtime);atomic_mirror(runtime,snapshot)
-    if not running_servers():network_restore()
-    try:owner.unlink()
-    except FileNotFoundError:pass
-    print("Publishing the new stopped snapshot through Syncthing...");syncthing_wait()
-    CRITICAL=False;print(f"'{name}' stopped only after the pre-stop barrier, then backed up and fully synchronized.")
+    ensure_dependencies(name);runtime,snapshot,_,owner=server_paths(name);CRITICAL=True
+    print("Keeping Syncthing paused while stopping and snapshotting...");syncthing_pause()
+    try:
+        run(["sudo","systemctl","stop",unit(name)])
+        deadline=time.time()+180
+        while active(name) and time.time()<deadline:time.sleep(1)
+        if active(name):raise RuntimeError(f"{name} did not stop within 180 seconds")
+        backup(name,runtime);safety_backup(name,snapshot,"pre-stop-snapshot")
+        atomic_mirror(runtime,snapshot);verify_identical(runtime,snapshot,"stopped snapshot")
+        if not running_servers():network_restore()
+        try:owner.unlink()
+        except FileNotFoundError:pass
+        print("Resuming Syncthing and publishing the verified snapshot...")
+        ensure_syncthing_resumed_and_current();CRITICAL=False
+        print(f"'{name}' stopped, backed up, verified, and synchronized.")
+    except Exception:
+        CRITICAL=False
+        if not running_servers():
+            try:syncthing_resume()
+            except Exception:pass
+        raise
+
 def backup_choices(name):
     folder=BACKUPS/name
     if not folder.is_dir():return []
@@ -577,55 +604,46 @@ def safe_extract_backup(archive,destination,name):
 def restore_backup(name=None,requested=None):
     global CRITICAL
     name=select_server(name,"restore");archive=select_backup(name,requested)
-    if sys.stdin.isatty():
-        answer=input(f"Restore {name} from {archive.name} and leave it stopped? [y/N]: ").strip().casefold()
-        if answer not in ("y","yes"):raise SystemExit(0)
+    if sys.stdin.isatty() and input(f"Restore {name} from {archive.name}? [y/N]: ").strip().casefold() not in ("y","yes"):raise SystemExit(0)
     ensure_dependencies(name)
     found,unreachable=remote_state()
-    if unreachable:raise RuntimeError("Cannot verify peer(s) before restore: "+", ".join(unreachable))
+    if unreachable:raise RuntimeError("Cannot verify peer(s): "+", ".join(unreachable))
     for label,address,names in found:
-        if name in names:
-            print(f"Stopping remote '{name}' on {label} before restore...")
-            result=ssh(address,["stop",name,"--remote"])
-            if result.returncode:raise RuntimeError((result.stdout or "").strip() or "remote stop failed")
-    if active(name):stop(name)
-    else:
-        print("Synchronizing the stopped snapshot before restore...");syncthing_wait()
+        for remote_name in [x for x in names if not x.startswith("floating=") and x!="transitioning"]:
+            r=ssh(address,["stop",remote_name,"--remote"])
+            if r.returncode:raise RuntimeError((r.stdout or "").strip() or "remote stop failed")
+    for running in list(running_servers()):stop(running)
+    ensure_syncthing_resumed_and_current()
     runtime,snapshot,_,owner=server_paths(name)
-    stage=snapshot.parent/f".{name}.restore-{os.getpid()}"
-    shutil.rmtree(stage,ignore_errors=True)
-    CRITICAL=True;paused=False;restored_ok=False
+    safety_backup(name,snapshot,"pre-restore-snapshot");safety_backup(name,runtime,"pre-restore-runtime")
+    stage=snapshot.parent/f".{name}.restore-{os.getpid()}";rollback=snapshot.parent/f".{name}.rollback-{os.getpid()}"
+    shutil.rmtree(stage,ignore_errors=True);shutil.rmtree(rollback,ignore_errors=True)
+    if snapshot.is_dir():shutil.copytree(snapshot,rollback,symlinks=True)
+    CRITICAL=True;mutated=False
     try:
-        # Match the server lifecycle: no synchronization may occur while the
-        # authoritative stopped snapshot is being replaced.
-        syncthing_pause();paused=True
+        print("Pausing Syncthing for atomic restore...");syncthing_pause()
         restored=safe_extract_backup(archive,stage,name)
-        print(f"Restoring {archive.name} to stopped snapshot and runtime...")
-        replace_snapshot_from_backup(restored,snapshot)
-        atomic_mirror(snapshot,runtime)
-        # Historical backup mtimes must become a new local version when the
-        # folder resumes, otherwise a newer wrong peer copy can win.
+        if not (restored/'level.dat').exists() and not any(restored.glob('world*/level.dat')):raise RuntimeError("Backup contains no level.dat")
+        replace_snapshot_from_backup(restored,snapshot);mutated=True
+        atomic_mirror(snapshot,runtime);verify_identical(snapshot,runtime,"restored runtime")
         now=time.time()
-        for path in sorted(snapshot.rglob("*"),key=lambda item:len(item.parts),reverse=True):
+        for path in snapshot.rglob("*"):
             try:os.utime(path,(now,now),follow_symlinks=False)
-            except (FileNotFoundError,PermissionError):pass
+            except OSError:pass
         os.utime(snapshot,(now,now),follow_symlinks=False)
         try:owner.unlink()
         except FileNotFoundError:pass
-        if not running_servers():network_restore()
-        restored_ok=True
+        network_restore()
+    except Exception:
+        if mutated and rollback.is_dir():
+            print("Restore failed; restoring the pre-restore snapshot...",file=sys.stderr)
+            atomic_mirror(rollback,snapshot);atomic_mirror(snapshot,runtime)
+        raise
     finally:
-        shutil.rmtree(stage,ignore_errors=True)
-        if paused:
-            try:syncthing_resume()
-            except Exception as error:
-                CRITICAL=False
-                raise RuntimeError(f"Restore completed locally but Syncthing could not resume: {error}") from error
-        CRITICAL=False
-    if restored_ok:
-        print("Scanning and synchronizing the restored snapshot through Syncthing...")
-        syncthing_wait()
-        print(f"Restored '{name}' from {archive.name}, synchronized it through Syncthing, and left it stopped.")
+        shutil.rmtree(stage,ignore_errors=True);shutil.rmtree(rollback,ignore_errors=True)
+        syncthing_resume();CRITICAL=False
+    print("Scanning and synchronizing restored snapshot...");syncthing_wait()
+    print(f"Restored '{name}' from {archive.name}; runtime verified; server remains stopped.")
 
 def status(machine=False):
     running=running_servers()
