@@ -197,40 +197,57 @@ def syncthing_resume():
     syncthing_set_paused(False)
     print("Syncthing folder resumed.")
 
-def syncthing_wait(timeout=300,stable_seconds=4):
-    """Require a clean local index and 100% completion on every folder device."""
+def syncthing_status_clean():
+    data=json.load(syncthing_request("/rest/db/status"))
+    clean=(data.get("state")=="idle" and int(data.get("needTotalItems",0))==0 and
+           int(data.get("needBytes",0))==0 and int(data.get("pullErrors",0))==0)
+    return clean,data
+
+def syncthing_wait_local(timeout=300,stable_seconds=4):
+    """Wait until this device has scanned and applied everything it currently knows."""
+    syncthing_request("/rest/db/scan",method="POST").read()
+    end=time.monotonic()+timeout;stable=None;last={}
+    while time.monotonic()<end:
+        clean,last=syncthing_status_clean()
+        if clean:
+            if stable is None:stable=time.monotonic()
+            if time.monotonic()-stable>=stable_seconds:return
+        else:stable=None
+        time.sleep(2)
+    raise RuntimeError(f"Local Syncthing index did not settle within {timeout}s: {last}")
+
+def syncthing_wait_cluster(timeout=300,stable_seconds=4):
+    """Require local cleanliness and 100% completion on every configured peer."""
     item=syncthing_config()
     if not item:raise RuntimeError("Configure ~/minecraft-server as its own Syncthing folder")
     _,_,devices=item
     syncthing_request("/rest/db/scan",method="POST").read()
-    end=time.monotonic()+timeout;stable_since=None;last_reason="waiting for initial status"
+    end=time.monotonic()+timeout;stable=None;last_reason="waiting for status"
     while time.monotonic()<end:
-        data=json.load(syncthing_request("/rest/db/status"))
-        clean=(data.get("state")=="idle" and int(data.get("needTotalItems",0))==0 and
-               int(data.get("needBytes",0))==0 and int(data.get("pullErrors",0))==0)
-        incomplete=[]
+        clean,data=syncthing_status_clean();incomplete=[]
         for device in devices:
             completion=json.load(syncthing_request("/rest/db/completion",{"device":device}))
-            value=float(completion.get("completion",0.0))
-            need=int(completion.get("needItems",completion.get("needTotalItems",0)) or 0)
-            if value<100.0 or need:
-                incomplete.append(f"{device[:7]}={value:.2f}%/{need} items")
+            value=float(completion.get("completion",0.0));need=int(completion.get("needItems",0) or 0)
+            state=completion.get("remoteState","unknown")
+            if value<100.0 or need or state not in ("valid",""):
+                incomplete.append(f"{device[:7]}={value:.2f}%/{need} items/{state}")
         if clean and not incomplete:
-            if stable_since is None:stable_since=time.monotonic()
-            if time.monotonic()-stable_since>=stable_seconds:
-                # A second scan closes the race between the first scan and peer convergence.
+            if stable is None:stable=time.monotonic()
+            if time.monotonic()-stable>=stable_seconds:
                 syncthing_request("/rest/db/scan",method="POST").read()
-                confirm=json.load(syncthing_request("/rest/db/status"))
-                if (confirm.get("state")=="idle" and int(confirm.get("needTotalItems",0))==0 and
-                        int(confirm.get("needBytes",0))==0 and int(confirm.get("pullErrors",0))==0):return
-                stable_since=None
+                confirm,_=syncthing_status_clean()
+                if confirm:return
+                stable=None
         else:
-            stable_since=None
-            last_reason=(f"state={data.get('state')}, needItems={data.get('needTotalItems',0)}, "
-                         f"needBytes={data.get('needBytes',0)}, pullErrors={data.get('pullErrors',0)}")
-            if incomplete:last_reason+=", devices="+", ".join(incomplete)
+            stable=None
+            last_reason=(f"local={data.get('state')} needItems={data.get('needTotalItems',0)} "
+                         f"needBytes={data.get('needBytes',0)} pullErrors={data.get('pullErrors',0)}")
+            if incomplete:last_reason+=", peers="+", ".join(incomplete)
         time.sleep(2)
-    raise RuntimeError(f"Syncthing did not reach stable full-cluster convergence within {timeout}s ({last_reason})")
+    raise RuntimeError(f"Syncthing cluster did not converge within {timeout}s ({last_reason})")
+
+def syncthing_wait(timeout=300):
+    return syncthing_wait_cluster(timeout)
 
 def ensure_dependencies(name=None):
     if name and run(["systemctl","cat",unit(name)],check=False,capture=True).returncode!=0:raise RuntimeError(f"{unit(name)} is not installed; rebuild NixOS")
@@ -489,6 +506,12 @@ def manifest_digest(root):
 
 def handover_path(name):return ROOT/"servers"/name/"handover.json"
 
+def read_handover(name):
+    marker=handover_path(name)
+    if not marker.is_file():return None
+    try:return json.loads(marker.read_text())
+    except (OSError,ValueError) as error:raise RuntimeError(f"Invalid handover marker {marker}: {error}")
+
 def write_handover(name,snapshot,reason):
     marker=handover_path(name);marker.parent.mkdir(parents=True,exist_ok=True)
     record={"schema":1,"server":name,"generation":os.urandom(16).hex(),
@@ -498,25 +521,30 @@ def write_handover(name,snapshot,reason):
     temporary=marker.with_suffix(".json.tmp")
     with temporary.open("w") as handle:
         json.dump(record,handle,sort_keys=True);handle.write("\n");handle.flush();os.fsync(handle.fileno())
-    os.replace(temporary,marker)
+    os.replace(temporary,marker);return record
+
+def validate_handover(name,snapshot,expected_generation=None):
+    record=read_handover(name)
+    if not record:raise RuntimeError(f"Missing synchronized handover marker for {name}")
+    if record.get("schema")!=1 or record.get("server")!=name:raise RuntimeError("Invalid handover identity")
+    if expected_generation and record.get("generation")!=expected_generation:
+        raise RuntimeError("Received a different handover generation than the remote stop published")
+    if record.get("snapshot_sha256")!=manifest_digest(snapshot):
+        raise RuntimeError("Snapshot content does not match its handover digest")
     return record
 
-def validate_handover(name,snapshot):
-    marker=handover_path(name)
-    if not marker.is_file():raise RuntimeError(f"Missing synchronized handover marker: {marker}")
-    try:record=json.loads(marker.read_text())
-    except (OSError,ValueError) as error:raise RuntimeError(f"Invalid handover marker {marker}: {error}")
-    if record.get("schema")!=1 or record.get("server")!=name:
-        raise RuntimeError(f"Handover marker does not describe server {name}")
-    actual=manifest_digest(snapshot)
-    if record.get("snapshot_sha256")!=actual:
-        raise RuntimeError("Snapshot does not match its synchronized handover marker; refusing to start")
-    return record
+def wait_for_handover(name,previous_generation=None,expected_generation=None,timeout=300):
+    end=time.monotonic()+timeout;last=None
+    while time.monotonic()<end:
+        syncthing_wait_local(timeout=min(60,max(5,int(end-time.monotonic()))),stable_seconds=2)
+        record=read_handover(name);last=record
+        if record and record.get("generation")!=previous_generation:
+            if not expected_generation or record.get("generation")==expected_generation:return record
+        time.sleep(2)
+    raise RuntimeError(f"Timed out waiting for new handover generation for {name}; last={last}")
 
 def replace_snapshot_from_backup(restored,snapshot):
-    """Atomically replace the stopped snapshot with an extracted backup tree."""
-    incoming=snapshot.with_name(snapshot.name+".restore-incoming")
-    old=snapshot.with_name(snapshot.name+".restore-old")
+    incoming=snapshot.with_name(snapshot.name+".restore-incoming");old=snapshot.with_name(snapshot.name+".restore-old")
     shutil.rmtree(incoming,ignore_errors=True);shutil.rmtree(old,ignore_errors=True)
     shutil.copytree(restored,incoming,symlinks=True)
     if snapshot.exists():snapshot.rename(old)
@@ -526,6 +554,19 @@ def replace_snapshot_from_backup(restored,snapshot):
         raise
     shutil.rmtree(old,ignore_errors=True)
 
+def prepare_peers_for_sync():
+    failures=[]
+    for label,addresses in resolved_peer_groups():
+        address,r,_,attempts=query_group(addresses,["prepare-sync","--remote"])
+        if not address or r.returncode:
+            failures.append(f"{label}: "+("; ".join(attempts) if attempts else (r.stdout or "failed")))
+    if failures:raise RuntimeError("Could not resume peer Syncthing folders: "+"; ".join(failures))
+
+def prepare_sync_receiver():
+    if running_servers():raise RuntimeError("Refusing to resume Syncthing while Minecraft is running")
+    syncthing_resume();syncthing_wait_local()
+    print("stopped sync-ready")
+
 def safety_backup(name,source,kind):
     if not source.is_dir() or not any(source.iterdir()):return None
     folder=BACKUPS/name;folder.mkdir(parents=True,exist_ok=True)
@@ -533,9 +574,10 @@ def safety_backup(name,source,kind):
     with tarfile.open(target,"w:gz") as archive:archive.add(source,arcname=name,recursive=True)
     print(f"Safety backup created: {target}");return target
 
-def ensure_syncthing_resumed_and_current():
+def ensure_syncthing_resumed_and_current(cluster=True):
     if running_servers():raise RuntimeError("Refusing to resume Syncthing while Minecraft is running")
-    syncthing_resume();syncthing_wait()
+    syncthing_resume()
+    (syncthing_wait_cluster if cluster else syncthing_wait_local)()
 
 def start(name=None,force=False):
     global CRITICAL
@@ -545,15 +587,23 @@ def start(name=None,force=False):
         if name in local:print(f"{name} is already running locally.");return
         raise RuntimeError("Another local Minecraft server is already running: "+", ".join(local))
     if not peer_groups() and not force:raise RuntimeError(f"No peers configured in {PEERS}; refusing an uncoordinated start")
+    # Resume the receiving folder before requesting a remote stop. Otherwise the
+    # publisher and receiver can wait on one another forever.
+    ensure_syncthing_resumed_and_current(cluster=False)
     found,unreachable=remote_state()
     if unreachable and not force:raise RuntimeError("Cannot verify peer(s): "+", ".join(unreachable))
+    expected={}
     for label,address,names in found:
         remote_servers=[item for item in names if not item.startswith("floating=") and item!="transitioning"]
         if "transitioning" in names:raise RuntimeError(f"Peer transition already in progress on {label}")
         for remote_name in remote_servers:
+            old=(read_handover(remote_name) or {}).get("generation")
             print(f"Stopping remote server {remote_name} on {label}...")
             r=ssh(address,["stop",remote_name,"--remote"])
             if r.returncode:raise RuntimeError((r.stdout or "").strip() or "remote stop failed")
+            match=re.search(r"HANDOVER ([0-9a-f]{32})",r.stdout or "")
+            generation=match.group(1) if match else None
+            expected[remote_name]=(old,generation)
         if remote_servers:
             deadline=time.time()+240
             while time.time()<deadline:
@@ -561,25 +611,21 @@ def start(name=None,force=False):
                 if text=="stopped":break
                 time.sleep(1)
             else:raise RuntimeError(f"Peer {label} did not finish stop/sync handover")
-    print("Resuming Syncthing and waiting for full-cluster snapshot convergence...")
-    ensure_syncthing_resumed_and_current()
+    print("Waiting for the published handover and full cluster convergence...")
+    old,wanted=expected.get(name,((read_handover(name) or {}).get("generation"),None))
+    if name in expected:wait_for_handover(name,old,wanted)
+    (syncthing_wait_local if force else syncthing_wait_cluster)()
     runtime,snapshot,_,owner=server_paths(name)
     if not snapshot.is_dir() or not any(snapshot.iterdir()):raise RuntimeError(f"Snapshot is missing or empty: {snapshot}")
     if not handover_path(name).is_file():
-        # One-time migration for snapshots created by the previous manager. At this
-        # point every peer is stopped and the snapshot has fully converged.
-        safety_backup(name,snapshot,"pre-handover-migration")
-        print("Creating and synchronizing the initial verified handover marker...")
-        write_handover(name,snapshot,"format-migration")
-        syncthing_wait()
-    record=validate_handover(name,snapshot)
+        safety_backup(name,snapshot,"pre-handover-migration");write_handover(name,snapshot,"format-migration")
+        (syncthing_wait_local if force else syncthing_wait_cluster)()
+    record=validate_handover(name,snapshot,wanted)
     safety_backup(name,snapshot,"pre-start-snapshot")
     print("Pausing Syncthing before acquiring runtime ownership...");syncthing_pause();CRITICAL=True
     try:
-        # Revalidate after pause so no file can change between convergence and copy.
-        paused_record=validate_handover(name,snapshot)
-        if paused_record.get("generation")!=record.get("generation"):
-            raise RuntimeError("Handover generation changed while start was acquiring ownership")
+        paused=validate_handover(name,snapshot,wanted)
+        if paused.get("generation")!=record.get("generation"):raise RuntimeError("Handover changed while acquiring ownership")
         atomic_mirror(snapshot,runtime);verify_identical(snapshot,runtime,"pre-start runtime")
         network_prepare();owner.parent.mkdir(parents=True,exist_ok=True)
         owner.write_text(json.dumps({"server":name,"host":socket.gethostname(),"started":dt.datetime.now(dt.timezone.utc).isoformat()})+"\n")
@@ -622,12 +668,18 @@ def stop(name=None,remote=False):
         if active(name):raise RuntimeError(f"{name} did not stop within 180 seconds")
         backup(name,runtime);safety_backup(name,snapshot,"pre-stop-snapshot")
         atomic_mirror(runtime,snapshot);verify_identical(runtime,snapshot,"stopped snapshot")
-        write_handover(name,snapshot,"clean-stop")
+        record=write_handover(name,snapshot,"clean-stop")
         if not running_servers():network_restore()
         try:owner.unlink()
         except FileNotFoundError:pass
         print("Resuming Syncthing and publishing the verified snapshot...")
-        ensure_syncthing_resumed_and_current();CRITICAL=False
+        syncthing_resume()
+        if remote:
+            syncthing_wait_local()
+        else:
+            prepare_peers_for_sync();syncthing_wait_cluster()
+        CRITICAL=False
+        print(f"HANDOVER {record['generation']}")
         print(f"'{name}' stopped, backed up, verified, and synchronized.")
     except Exception:
         CRITICAL=False
@@ -687,6 +739,7 @@ def restore_backup(name=None,requested=None):
     name=select_server(name,"restore");archive=select_backup(name,requested)
     if sys.stdin.isatty() and input(f"Restore {name} from {archive.name}? [y/N]: ").strip().casefold() not in ("y","yes"):raise SystemExit(0)
     ensure_dependencies(name)
+    ensure_syncthing_resumed_and_current(cluster=False)
     found,unreachable=remote_state()
     if unreachable:raise RuntimeError("Cannot verify peer(s): "+", ".join(unreachable))
     for label,address,names in found:
@@ -724,7 +777,7 @@ def restore_backup(name=None,requested=None):
     finally:
         shutil.rmtree(stage,ignore_errors=True);shutil.rmtree(rollback,ignore_errors=True)
         syncthing_resume();CRITICAL=False
-    print("Scanning and synchronizing restored snapshot...");syncthing_wait()
+    print("Scanning and synchronizing restored snapshot...");prepare_peers_for_sync();syncthing_wait_cluster()
     print(f"Restored '{name}' from {archive.name}; runtime verified; server remains stopped.")
 
 def status(machine=False):
@@ -751,7 +804,7 @@ def on_signal(sig,frame):
     if CRITICAL:print("\nCritical save/transfer continues; interrupt ignored.",file=sys.stderr);return
     raise KeyboardInterrupt
 def main():
-    p=argparse.ArgumentParser();p.add_argument("action",nargs="?",default="toggle",choices=["toggle","start","stop","restore","status","logs","takeover","list","release-network","menu-status"]);p.add_argument("server",nargs="?");p.add_argument("--machine",action="store_true");p.add_argument("--remote",action="store_true");p.add_argument("--backup");a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument("action",nargs="?",default="toggle",choices=["toggle","start","stop","restore","status","logs","takeover","list","release-network","menu-status","prepare-sync"]);p.add_argument("server",nargs="?");p.add_argument("--machine",action="store_true");p.add_argument("--remote",action="store_true");p.add_argument("--backup");a=p.parse_args()
     for d in (ROOT,RUNTIME_ROOT,BACKUPS,COORD):d.mkdir(parents=True,exist_ok=True)
     for sig in (signal.SIGINT,signal.SIGTERM,signal.SIGHUP):signal.signal(sig,on_signal)
     # Machine status is a read-only peer probe. It must remain available while
@@ -759,6 +812,11 @@ def main():
     # misreported as an unreachable peer.
     if a.action=="status" and a.machine:return machine_status()
     if a.action=="menu-status":return menu_status()
+    if a.action=="prepare-sync":
+        with LOCK.open("w") as lock:
+            try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except BlockingIOError:raise RuntimeError("Cannot prepare sync during a local Minecraft transition")
+            return prepare_sync_receiver()
     mutating=a.action in ("toggle","start","stop","restore","takeover","release-network")
     cluster=contextlib.nullcontext() if not mutating else cluster_transition_lock(a.remote)
     with cluster:
