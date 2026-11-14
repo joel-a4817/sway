@@ -175,12 +175,26 @@ def syncthing_request(path,params=None,method="GET"):
     if query:url+="?"+parse.urlencode(query)
     return request.urlopen(request.Request(url,method=method,headers=headers),timeout=10)
 
+def syncthing_set_paused(paused):
+    item=syncthing_config()
+    if not item:raise RuntimeError("Configure ~/minecraft-server as its own Syncthing folder")
+    key,folder,_=item;headers={"X-API-Key":key,"Content-Type":"application/json"}
+    url="http://127.0.0.1:8384/rest/config/folders/"+parse.quote(folder,safe="")
+    payload=json.dumps({"paused":bool(paused)}).encode()
+    request.urlopen(request.Request(url,data=payload,method="PATCH",headers=headers),timeout=10).read()
+    end=time.time()+30
+    while time.time()<end:
+        current=json.load(request.urlopen(request.Request(url,headers={"X-API-Key":key}),timeout=10))
+        if bool(current.get("paused",False))==bool(paused):return
+        time.sleep(.25)
+    raise RuntimeError("Syncthing folder did not "+("pause" if paused else "resume")+" within 30 seconds")
+
 def syncthing_pause():
-    syncthing_request("/rest/db/pause",method="POST").read()
+    syncthing_set_paused(True)
     print("Syncthing folder paused for atomic restore.")
 
 def syncthing_resume():
-    syncthing_request("/rest/db/resume",method="POST").read()
+    syncthing_set_paused(False)
     print("Syncthing folder resumed.")
 
 def syncthing_wait(timeout=300):
