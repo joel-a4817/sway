@@ -993,18 +993,7 @@ def replace_snapshot_from_backup(restored,snapshot):
     # immutable generation/safety backup already exists.
     shutil.rmtree(old,ignore_errors=True);fsync_directory(snapshot.parent)
 
-def prepare_peers_for_sync():
-    failures=[]
-    for label,addresses in resolved_peer_groups():
-        address,r,_,attempts=query_group(addresses,["prepare-sync","--remote"])
-        if not address or r.returncode:
-            failures.append(f"{label}: "+("; ".join(attempts) if attempts else (r.stdout or "failed")))
-    if failures:raise RuntimeError("Could not resume peer Syncthing folders: "+"; ".join(failures))
 
-def prepare_sync_receiver():
-    if running_servers():raise RuntimeError("Refusing to resume Syncthing while Minecraft is running")
-    syncthing_resume();syncthing_wait_local()
-    print("stopped sync-ready")
 
 def safety_backup(name,source,kind):
     path=archive_transaction(name,source,kind)
@@ -1128,13 +1117,16 @@ def stop(name=None,remote=False):
     global CRITICAL
     name=select_server(name,"stop")
     if not active(name):print(f"{name} is already stopped locally.");return
-    ensure_dependencies(name);runtime,snapshot,_,owner=server_paths(name);CRITICAL=True
+    ensure_dependencies(name);runtime,snapshot,_,owner=server_paths(name);CRITICAL=False
     LOCAL_STATE.mkdir(parents=True,exist_ok=True)
+    print("Stopping live-backup workers and waiting for any active backup to finish...")
+    stop_runtime_backup_loop(name)
     with server_backup_lock(name).open("a+") as backup_lock:
       fcntl.flock(backup_lock,fcntl.LOCK_EX)
-      print("Keeping Syncthing paused while stopping and snapshotting...");syncthing_pause()
+      CRITICAL=True
+      print("Pausing only this peer's Minecraft Syncthing folder while stopping and snapshotting...");syncthing_pause()
       try:
-        stop_runtime_backup_loop(name);recover_save_guard(name);run(["sudo","systemctl","stop",unit(name)])
+        recover_save_guard(name);run(["sudo","systemctl","stop",unit(name)])
         last_state=None;last_progress=time.monotonic()
         while active(name):
           state=run(["systemctl","show",unit(name),"-p","ActiveState","-p","SubState","--value"],check=False,capture=True).stdout.strip()
@@ -1145,7 +1137,7 @@ def stop(name=None,remote=False):
         record=write_handover(name,snapshot,"clean-stop");record.update({"generation":generation["generation"],"generation_archive_sha256":generation["archive_sha256"],"publisher":generation["publisher"]})
         write_json_atomic(handover_path(name),record)
         if not running_servers():network_restore()
-        owner.unlink(missing_ok=True);ensure_syncthing_versioning();syncthing_resume();prepare_peers_for_sync();syncthing_wait_cluster();verify_generation_on_peers(name,generation)
+        owner.unlink(missing_ok=True);ensure_syncthing_versioning();syncthing_resume();syncthing_wait_cluster();verify_generation_on_peers(name,generation)
         prune_backup_storage(name);CRITICAL=False;print(f"HANDOVER {record['generation']}");print(f"'{name}' stopped, backed up, verified, and replicated.")
       except Exception:
         CRITICAL=False
@@ -1212,13 +1204,7 @@ def safe_extract_backup(archive,destination,name):
 def restore_backup(name=None,requested=None):
     global CRITICAL
     name=select_server(name,"restore");archive=select_backup(name,requested)
-    if sys.stdin.isatty():
-        print(f"Restore {name} from {archive.name}?");print("  [E] Exit");print("  [1] Restore")
-        while True:
-            confirmation=input("Selection: ").strip().casefold()
-            if confirmation=="e":raise SystemExit(0)
-            if confirmation=="1":break
-            print("Enter E or 1.")
+    if sys.stdin.isatty() and input(f"Restore {name} from {archive.name}? [y/N]: ").strip().casefold() not in ("y","yes"):raise SystemExit(0)
     ensure_dependencies(name);ensure_syncthing_resumed_and_current(cluster=False)
     found,unreachable=remote_state()
     if unreachable:raise RuntimeError("Cannot verify peer(s): "+", ".join(unreachable))
@@ -1242,7 +1228,7 @@ def restore_backup(name=None,requested=None):
         generation=publish_generation(name,runtime,"backup-restore")
         record=write_handover(name,snapshot,"backup-restore");record.update({"generation":generation["generation"],"generation_archive_sha256":generation["archive_sha256"],"publisher":generation["publisher"]});write_json_atomic(handover_path(name),record)
         write_restore_phase(name,"committed",stage=str(stage),rollback=str(rollback),generation=generation["generation"])
-        owner.unlink(missing_ok=True);network_restore();syncthing_resume();prepare_peers_for_sync();syncthing_wait_cluster();verify_generation_on_peers(name,generation)
+        owner.unlink(missing_ok=True);network_restore();syncthing_resume();syncthing_wait_cluster();verify_generation_on_peers(name,generation)
         write_restore_phase(name,"replicated",stage=str(stage),rollback=str(rollback),generation=generation["generation"]);prune_backup_storage(name)
       except Exception:
         rollback_ok=False
