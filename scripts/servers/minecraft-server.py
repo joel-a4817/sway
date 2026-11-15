@@ -21,6 +21,23 @@ GENERATION_KEEP=int(os.environ.get("MINECRAFT_GENERATION_KEEP","3"))
 
 def run(cmd,check=True,capture=False,timeout=None):
     return subprocess.run(cmd,check=check,text=True,stdout=subprocess.PIPE if capture else None,stderr=subprocess.STDOUT if capture else None,timeout=timeout)
+
+def acquire_file_lock(handle,label):
+    """Wait for an in-process file lock without an arbitrary wall-clock cutoff.
+
+    Kernel flock ownership is released automatically if the holder exits. Emit a
+    heartbeat so long legitimate backup/archive work is visible to the caller.
+    """
+    announced=False;last_report=0.0
+    while True:
+        try:fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB);return
+        except BlockingIOError:
+            now=time.monotonic()
+            if not announced or now-last_report>=15:
+                print(f"Waiting for {label}; the owning process is still holding the lock...",flush=True)
+                announced=True;last_report=now
+            time.sleep(1)
+
 def unit(name): return f"minecraft-server-{name}.service"
 def valid_name(name): return bool(re.fullmatch(r"[a-z0-9][a-z0-9-]*",name or ""))
 def parse_names(value):
@@ -215,10 +232,10 @@ def syncthing_status_clean():
            int(data.get("needBytes",0))==0 and int(data.get("pullErrors",0))==0)
     return clean,data
 
-def syncthing_wait_local(idle_timeout=300,stable_seconds=4):
+def syncthing_wait_local(idle_timeout=120,stable_seconds=4):
     """Wait until local Syncthing is clean; fail only after no observable progress."""
     syncthing_request("/rest/db/scan",method="POST").read()
-    stable=None;last={};last_signature=None;last_progress=time.monotonic()
+    stable=None;last={};last_signature=None;last_progress=last_report=time.monotonic()
     while True:
         clean,last=syncthing_status_clean()
         signature=(last.get("state"),int(last.get("needTotalItems",0) or 0),
@@ -232,15 +249,18 @@ def syncthing_wait_local(idle_timeout=300,stable_seconds=4):
             if stable is None:stable=time.monotonic()
             if time.monotonic()-stable>=stable_seconds:return
         else:stable=None
-        if time.monotonic()-last_progress>=idle_timeout:
+        now=time.monotonic()
+        if now-last_report>=15:
+            print(f"Waiting for local Syncthing: state={last.get('state')} items={last.get('needTotalItems',0)} bytes={last.get('needBytes',0)}",flush=True);last_report=now
+        if now-last_progress>=idle_timeout:
             raise RuntimeError(f"Local Syncthing made no observable progress for {idle_timeout}s: {last}")
         time.sleep(2)
 
-def syncthing_wait_cluster(idle_timeout=300,stable_seconds=4):
+def syncthing_wait_cluster(idle_timeout=120,stable_seconds=4):
     item=syncthing_config()
     if not item:raise RuntimeError("Configure ~/minecraft-server as its own Syncthing folder")
     _,_,devices=item;syncthing_request("/rest/db/scan",method="POST").read()
-    stable=None;last_reason="waiting";last_signature=None;last_progress=time.monotonic()
+    stable=None;last_reason="waiting";last_signature=None;last_progress=last_report=time.monotonic()
     while True:
         clean,data=syncthing_status_clean();incomplete=[];peers=[]
         for device in devices:
@@ -254,7 +274,10 @@ def syncthing_wait_cluster(idle_timeout=300,stable_seconds=4):
             if stable is None:stable=time.monotonic()
             if time.monotonic()-stable>=stable_seconds:return
         else:stable=None;last_reason=f"local={data}, peers={incomplete}"
-        if time.monotonic()-last_progress>=idle_timeout:
+        now=time.monotonic()
+        if now-last_report>=15:
+            print(f"Waiting for Syncthing replication: {last_reason}",flush=True);last_report=now
+        if now-last_progress>=idle_timeout:
             raise RuntimeError(f"Syncthing cluster made no observable progress for {idle_timeout}s: {last_reason}")
         time.sleep(2)
 
@@ -679,7 +702,7 @@ def validate_runtime_archive(archive,name):
 def runtime_backup_once(name):
     LOCAL_STATE.mkdir(parents=True,exist_ok=True)
     with server_backup_lock(name).open("a+") as lock:
-      fcntl.flock(lock,fcntl.LOCK_EX);recover_save_guard(name);require_backup_capacity(name)
+      acquire_file_lock(lock,f"{name} runtime backup lock");recover_save_guard(name);require_backup_capacity(name)
       if not active(name):raise RuntimeError(f"Cannot back up {name}: service is not running")
       runtime=unit_workdir(name);folder=runtime_backup_folder(name)/"generations";folder.mkdir(parents=True,exist_ok=True)
       generation=uuid.uuid4().hex;root=folder/generation;root.mkdir();incoming=root/".backup.tar.gz.incoming";archive=root/"backup.tar.gz";guard=save_guard(name)
@@ -729,7 +752,7 @@ def runtime_backup_watchdog(name):
       age=protected_backup_age(name)
       if age>=stale_limit:
         with server_backup_lock(name).open("a+") as lock:
-          fcntl.flock(lock,fcntl.LOCK_EX)
+          acquire_file_lock(lock,f"{name} watchdog backup lock")
           if protected_backup_age(name)<stale_limit:continue
           runtime=unit_workdir(name)
           try:rcon(runtime,"save-all flush");rcon(runtime,"save-on")
@@ -924,40 +947,28 @@ def cluster_transition_lock(remote_action=False):
         with path.open("a+") as handle:
             try:fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB)
             except BlockingIOError:
-                print(f"Another Minecraft transition is still finishing through {coordinator}; waiting for recovery...",flush=True)
-                deadline=time.monotonic()+600
-                while True:
-                    try:fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB);break
-                    except BlockingIOError:
-                        if time.monotonic()>=deadline:raise RuntimeError("Minecraft cluster transition did not recover within 10 minutes")
-                        time.sleep(2)
+                raise RuntimeError(f"Another Minecraft transition is already active through {coordinator}; retry after it finishes")
             try:yield
             finally:fcntl.flock(handle,fcntl.LOCK_UN)
         return
     addresses=next((addresses for label,addresses in groups if label==coordinator),None)
     if not addresses:raise RuntimeError(f"No SSH address for Minecraft coordinator {coordinator}")
-    process=None;failure=[];deadline=time.monotonic()+600;announced=False
-    while process is None:
-      failure=[]
-      for address in addresses:
-        command=["ssh","-i",str(HOME/".ssh/minecraft_peers"),"-o","IdentitiesOnly=yes","-o","StrictHostKeyChecking=accept-new","-o","BatchMode=yes","-o","ConnectTimeout=4",address,
-                 "mkdir -p ~/minecraft-server/coordination && exec flock -n ~/minecraft-server/coordination/cluster.lock sh -c 'echo LOCKED; cat >/dev/null'"]
-        try:
-            candidate=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
-            line=candidate.stdout.readline().strip()
-        except OSError as error:
-            failure.append(f"{address}: {error}");continue
-        if line=="LOCKED":process=candidate;break
-        try:output=line+candidate.communicate(timeout=5)[0]
-        except subprocess.TimeoutExpired:
-            candidate.terminate();output=line+candidate.communicate(timeout=5)[0]
-        failure.append(f"{address}: {output.strip() or 'cluster lock busy'}")
-      if process is not None:break
-      if time.monotonic()>=deadline:
-        raise RuntimeError("Minecraft cluster transition did not recover within 10 minutes: "+"; ".join(failure))
-      if not announced:
-        print("Another Minecraft transition is still finishing; waiting for its lock to release and recovery to complete...",flush=True);announced=True
-      time.sleep(2)
+    process=None;failure=[]
+    for address in addresses:
+      command=["ssh","-i",str(HOME/".ssh/minecraft_peers"),"-o","IdentitiesOnly=yes","-o","StrictHostKeyChecking=accept-new","-o","BatchMode=yes","-o","ConnectTimeout=4",address,
+               "mkdir -p ~/minecraft-server/coordination && exec flock -n ~/minecraft-server/coordination/cluster.lock sh -c 'echo LOCKED; cat >/dev/null'"]
+      try:
+          candidate=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+          line=candidate.stdout.readline().strip()
+      except OSError as error:
+          failure.append(f"{address}: {error}");continue
+      if line=="LOCKED":process=candidate;break
+      try:output=line+candidate.communicate(timeout=5)[0]
+      except subprocess.TimeoutExpired:
+          candidate.terminate();output=line+candidate.communicate(timeout=5)[0]
+      failure.append(f"{address}: {output.strip() or 'cluster lock busy'}")
+    if process is None:
+        raise RuntimeError("Minecraft cluster transition is busy or coordinator is unavailable: "+"; ".join(failure))
     try:yield
     finally:
         try:process.stdin.close()
@@ -1168,7 +1179,7 @@ def stop(name=None,remote=False):
     print("Stopping live-backup workers and waiting for any active backup to finish...")
     stop_runtime_backup_loop(name)
     with server_backup_lock(name).open("a+") as backup_lock:
-      fcntl.flock(backup_lock,fcntl.LOCK_EX)
+      acquire_file_lock(backup_lock,f"the active {name} backup to finish")
       CRITICAL=True
       print("Pausing only this peer's Minecraft Syncthing folder while stopping and snapshotting...");syncthing_pause()
       try:
@@ -1187,9 +1198,8 @@ def stop(name=None,remote=False):
         prune_backup_storage(name);CRITICAL=False;print(f"HANDOVER {record['generation']}");print(f"'{name}' stopped, backed up, verified, and replicated.")
       except Exception:
         CRITICAL=False
-        if not running_servers():
-          try:syncthing_resume()
-          except Exception:pass
+        try:syncthing_resume()
+        except Exception as resume_error:print(f"Additionally failed to resume Syncthing: {resume_error}",file=sys.stderr,flush=True)
         raise
 
 def backup_choices(name):
@@ -1262,7 +1272,7 @@ def restore_backup(name=None,requested=None):
     runtime,snapshot,_,owner=server_paths(name);stage=LOCAL_STATE/f".{name}.restore-stage";rollback=LOCAL_STATE/f".{name}.restore-rollback";CRITICAL=True
     LOCAL_STATE.mkdir(parents=True,exist_ok=True)
     with server_backup_lock(name).open("a+") as backup_lock:
-      fcntl.flock(backup_lock,fcntl.LOCK_EX)
+      acquire_file_lock(backup_lock,f"the active {name} backup to finish before restore")
       try:
         syncthing_pause();write_restore_phase(name,"prepared",stage=str(stage),rollback=str(rollback),archive=str(archive))
         shutil.rmtree(stage,ignore_errors=True);shutil.rmtree(rollback,ignore_errors=True)
@@ -1328,7 +1338,7 @@ def main():
     if a.action=="prune-storage":
         name=select_server(a.server,"prune storage for")
         with server_backup_lock(name).open("a+") as backup_lock:
-            fcntl.flock(backup_lock,fcntl.LOCK_EX);prune_backup_storage(name)
+            acquire_file_lock(backup_lock,f"{name} prune backup lock");prune_backup_storage(name)
         print(f"Pruned retained backup storage for {name}.");return 0
     if a.action=="runtime-backup-once":
         name=select_server(a.server,"back up");runtime_backup_once(name);return 0
