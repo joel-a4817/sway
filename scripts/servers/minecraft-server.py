@@ -459,26 +459,42 @@ def verify_generation_on_peers(name,record):
     if failures:raise RuntimeError("Generation replication incomplete: "+"; ".join(failures))
 
 def syncthing_backup_folder_audit():
+    """Use Tailscale for network identity and Syncthing metadata for folder/device checks.
+
+    Linux hostname is never used. Backup ownership on disk is keyed by Tailscale
+    MagicDNS. Syncthing folder labels and device display names may differ and are
+    used only for diagnostics and validation within Syncthing.
+    """
     import xml.etree.ElementTree as ET
     cfg=HOME/".local/state/syncthing/config.xml"
     if not cfg.is_file():raise RuntimeError("Syncthing config missing")
-    root=ET.parse(cfg).getroot();local=local_node_name();expected={local:((BACKUPS/local).resolve(),"sendonly")}
-    for label,_ in peer_groups():expected[label]=((BACKUPS/label).resolve(),"receiveonly")
+    root=ET.parse(cfg).getroot();local=local_node_name()
+    owners={local};owners.update(label for label,_ in resolved_peer_groups())
+    expected={owner:((BACKUPS/owner).resolve(),"sendonly" if owner==local else "receiveonly") for owner in owners}
+
+    # Syncthing device display names are valid Syncthing-local metadata. They are
+    # not required to equal Tailscale MagicDNS and are never used for SSH routing.
+    device_names={device.get("id"):device.get("name") or device.get("id") for device in root.findall("device")}
     problems=[]
-    for peer,(wanted,kind) in expected.items():
+    for owner,(wanted,kind) in sorted(expected.items()):
       matches=[]
       for folder in root.findall("folder"):
         try:path=Path(os.path.expanduser(folder.get("path",""))).resolve()
         except OSError:continue
         if path==wanted:matches.append(folder)
-      if len(matches)!=1:problems.append(f"{peer}: expected exactly one folder for {wanted}, found {len(matches)}");continue
-      folder=matches[0];actual=folder.get("type","sendreceive");devices=folder.findall("device")
-      if actual!=kind:problems.append(f"{peer}: expected {kind}, got {actual}")
-      if not devices:problems.append(f"{peer}: folder is shared with no devices")
-      if kind=="receiveonly" and not (folder.find("versioning") is not None or folder.get("versioning")):problems.append(f"{peer}: receive-only backup folder has no versioning")
-      if not wanted.exists():wanted.mkdir(parents=True,exist_ok=True)
-      if not os.access(wanted,os.R_OK|os.W_OK|os.X_OK):problems.append(f"{peer}: path permissions are unusable: {wanted}")
-    if problems:raise RuntimeError("Backup Syncthing folder audit failed: "+"; ".join(problems))
+      if len(matches)!=1:
+        problems.append(f"Tailscale owner {owner}: expected one Syncthing folder at {wanted}, found {len(matches)}")
+        continue
+      folder=matches[0];label=folder.get("label") or folder.get("id") or str(wanted)
+      actual=folder.get("type","sendreceive")
+      shared=[device_names.get(item.get("id"),item.get("id")) for item in folder.findall("device") if item.get("id")]
+      if actual!=kind:problems.append(f"Syncthing folder {label!r} for Tailscale owner {owner}: expected {kind}, got {actual}")
+      if not shared:problems.append(f"Syncthing folder {label!r} is shared with no Syncthing devices")
+      if kind=="receiveonly" and folder.find("versioning") is None:
+        problems.append(f"Syncthing folder {label!r} for Tailscale owner {owner}: receive-only copy has no versioning")
+      wanted.mkdir(parents=True,exist_ok=True)
+      if not os.access(wanted,os.R_OK|os.W_OK|os.X_OK):problems.append(f"Syncthing folder {label!r}: unusable path permissions on {wanted}")
+    if problems:raise RuntimeError("Backup Syncthing audit failed for local Tailscale identity "+local+": "+"; ".join(problems))
 
 def backup_health_path(name):return LOCAL_STATE/f"{name}.backup-health.json"
 def restore_journal_path(name):return LOCAL_STATE/f"{name}.restore-transaction.json"
@@ -1020,7 +1036,7 @@ def start(name=None,force=False):
         if paused.get("generation")!=record.get("generation"):raise RuntimeError("Handover changed while acquiring ownership")
         atomic_mirror(snapshot,runtime);verify_identical(snapshot,runtime,"pre-start runtime")
         network_prepare();owner.parent.mkdir(parents=True,exist_ok=True)
-        owner.write_text(json.dumps({"server":name,"host":socket.gethostname(),"started":dt.datetime.now(dt.timezone.utc).isoformat()})+"\n")
+        write_json_atomic(owner,{"server":name,"host":local_node_name(),"started":dt.datetime.now(dt.timezone.utc).isoformat()})
         run(["sudo","systemctl","reset-failed",unit(name)],check=False,capture=True)
         r=run(["sudo","systemctl","start",unit(name)],check=False,capture=True)
         if r.returncode:raise RuntimeError(r.stdout.strip() or f"Failed to start {unit(name)}")
