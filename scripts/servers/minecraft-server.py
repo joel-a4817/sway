@@ -736,8 +736,29 @@ def read_generation(name,generation):
     if actual!=data.get("archive_sha256"):raise RuntimeError(f"Generation archive checksum mismatch: {archive}")
     return data,archive
 
-def activate_generation(name,generation,snapshot):
-    data,archive=read_generation(name,generation)
+def wait_for_generation(name,generation,expected_digest=None,idle_timeout=300):
+    root=generation_path(name,generation);archive=root/"snapshot.tar.gz";manifest=root/"manifest.json"
+    last=None;last_progress=time.monotonic();last_error=None
+    while True:
+        syncthing_request("/rest/db/scan",method="POST").read()
+        status=json.load(syncthing_request("/rest/db/status"))
+        signature=(archive.exists(),archive.stat().st_size if archive.exists() else 0,
+                   manifest.exists(),manifest.stat().st_size if manifest.exists() else 0,
+                   status.get("state"),int(status.get("needTotalItems",0) or 0),int(status.get("needBytes",0) or 0))
+        if signature!=last:last=signature;last_progress=time.monotonic()
+        if archive.is_file() and manifest.is_file():
+            try:
+                data,found=read_generation(name,generation)
+                if expected_digest and data.get("archive_sha256")!=expected_digest:
+                    raise RuntimeError(f"Generation digest differs from handover: {name}/{generation}")
+                return data,found
+            except (OSError,ValueError,tarfile.TarError,RuntimeError) as error:last_error=error
+        if time.monotonic()-last_progress>=idle_timeout:
+            raise RuntimeError(f"Generation {name}/{generation} made no observable Syncthing/file progress for {idle_timeout}s; last_error={last_error}")
+        time.sleep(2)
+
+def activate_generation(name,generation,snapshot,expected_digest=None):
+    data,archive=wait_for_generation(name,generation,expected_digest)
     parent=snapshot.parent;extract=parent/f".{snapshot.name}.generation-{generation}.incoming"
     shutil.rmtree(extract,ignore_errors=True)
     try:
@@ -1027,7 +1048,7 @@ def start(name=None,force=False):
     if not record:raise RuntimeError(f"Missing synchronized handover marker for {name}")
     if wanted and record.get("generation")!=wanted:raise RuntimeError("Received a different handover generation")
     generation=record.get("generation")
-    if generation:activate_generation(name,generation,snapshot)
+    if generation:activate_generation(name,generation,snapshot,record.get("generation_archive_sha256"))
     record=validate_handover(name,snapshot,wanted)
     safety_backup(name,snapshot,"pre-start-snapshot")
     print("Pausing Syncthing before acquiring runtime ownership...");syncthing_pause();CRITICAL=True
