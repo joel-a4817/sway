@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MINECRAFT="$HOME/.config/sway/scripts/network/minecraft-server.py"
-RESTORE_MINECRAFT="$HOME/.config/sway/scripts/network/restore-minecraft-server.py"
-IPAD="$HOME/.config/sway/scripts/network/start-ipad-webremote.sh"
+MINECRAFT="$HOME/.config/sway/scripts/servers/minecraft-server.py"
+RESTORE_MINECRAFT="$HOME/.config/sway/scripts/servers/restore-minecraft-server.py"
+IPAD="$HOME/.config/sway/scripts/servers/start-ipad-webremote.sh"
 VNC_UNIT="camilladsp-wayvnc.service"
 PEERS="$HOME/.config/minecraft-server/peers"
 SSH=(ssh -i "$HOME/.ssh/minecraft_peers" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=4)

@@ -9,11 +9,11 @@ import ipaddress
 
 HOME=Path.home(); ROOT=HOME/"minecraft-server"; RUNTIME_ROOT=Path("/srv/minecraft")
 BACKUPS=Path(os.environ.get("MINECRAFT_BACKUP_ROOT",str(Path.home()/"minecraft-backups"))).expanduser(); COORD=ROOT/"coordination"; LOCK=COORD/"local.lock"
-PEERS=HOME/".config/minecraft-server/peers"; NETWORK_STATE=Path("/run/user")/str(os.getuid())/"minecraft-server-network.json"
+LOCAL_STATE=HOME/".local/state/minecraft-server"; PEERS=HOME/".config/minecraft-server/peers"; NETWORK_STATE=Path("/run/user")/str(os.getuid())/"minecraft-server-network.json"
 FLOATING_IP=os.environ.get("MINECRAFT_FLOATING_IP","192.168.0.240")
 DDNS_ENV=HOME/".config/minecraft-server/ddns.env"
 CRITICAL=False
-RUNTIME_BACKUP_INTERVAL=int(os.environ.get("MINECRAFT_RUNTIME_BACKUP_INTERVAL","600"))
+RUNTIME_BACKUP_INTERVAL=int(os.environ.get("MINECRAFT_RUNTIME_BACKUP_INTERVAL","300"))
 RUNTIME_BACKUP_RETRY=int(os.environ.get("MINECRAFT_RUNTIME_BACKUP_RETRY","60"))
 
 def run(cmd,check=True,capture=False,timeout=None):
@@ -92,7 +92,7 @@ def resolved_peer_groups():
     return resolved
 
 def ssh(address,args):
-    return run(["ssh","-i",str(HOME/".ssh/minecraft_peers"),"-o","IdentitiesOnly=yes","-o","StrictHostKeyChecking=accept-new","-o","BatchMode=yes","-o","ConnectTimeout=4",address,"/home/joel/.config/sway/scripts/network/minecraft-server.py",*args],check=False,capture=True)
+    return run(["ssh","-i",str(HOME/".ssh/minecraft_peers"),"-o","IdentitiesOnly=yes","-o","StrictHostKeyChecking=accept-new","-o","BatchMode=yes","-o","ConnectTimeout=4",address,"/home/joel/.config/sway/scripts/servers/minecraft-server.py",*args],check=False,capture=True)
 def query_group(addresses,args):
     failures=[]
     for address in addresses:
@@ -262,10 +262,16 @@ def ensure_dependencies(name=None):
     if name and run(["systemctl","cat",unit(name)],check=False,capture=True).returncode!=0:raise RuntimeError(f"{unit(name)} is not installed; rebuild NixOS")
     if run(["systemctl","is-active","--quiet","NetworkManager.service"],check=False).returncode!=0:raise RuntimeError("NetworkManager is not active")
     run(["systemctl","--user","start","syncthing.service"],check=False)
-    for _ in range(30):
-        try:request.urlopen("http://127.0.0.1:8384/rest/noauth/health",timeout=2).read();return
-        except Exception:time.sleep(1)
-    raise RuntimeError("Syncthing API did not become available")
+    last=None;progress=time.monotonic()
+    while True:
+      state=run(["systemctl","--user","show","syncthing.service","-p","ActiveState","-p","SubState","--value"],check=False,capture=True).stdout.strip()
+      try:request.urlopen("http://127.0.0.1:8384/rest/noauth/health",timeout=10).read();break
+      except Exception:pass
+      if state!=last:last=state;progress=time.monotonic()
+      elif time.monotonic()-progress>=300:raise RuntimeError(f"Syncthing made no startup progress for 300s; state={state!r}")
+      time.sleep(1)
+    if name:
+      recover_save_guard(name);recover_restore_transaction(name)
 def active_lan_route():
     routes=json.loads(run(["ip","-j","-4","route","show","default"],capture=True).stdout or "[]")
     candidates=[]
@@ -395,6 +401,144 @@ def atomic_mirror(src: Path, dst: Path):
     temp.rename(dst)
     shutil.rmtree(old, ignore_errors=True)
 
+def archive_transaction(name,source,kind):
+    if not source.is_dir() or not any(source.iterdir()):return None
+    folder=BACKUPS/local_node_name()/name/kind;folder.mkdir(parents=True,exist_ok=True)
+    generation=uuid.uuid4().hex;root=folder/generation;root.mkdir(parents=True,exist_ok=False)
+    incoming=root/".backup.tar.gz.incoming";archive=root/"backup.tar.gz";manifest=root/"manifest.json"
+    try:
+        with incoming.open("wb") as raw:
+            with tarfile.open(fileobj=raw,mode="w:gz") as handle:handle.add(source,arcname=name,recursive=True)
+            raw.flush();os.fsync(raw.fileno())
+        validate_runtime_archive(incoming,name);digest=archive_sha256(incoming)
+        os.replace(incoming,archive);fsync_directory(root)
+        data={"schema":1,"complete":True,"server":name,"peer":local_node_name(),"kind":kind,
+              "generation":generation,"created":dt.datetime.now(dt.timezone.utc).isoformat(),
+              "archive":"backup.tar.gz","archive_sha256":digest,"source":str(source)}
+        write_json_atomic(manifest,data);return archive
+    except Exception:
+        incoming.unlink(missing_ok=True);raise
+
+def validated_backup(path,name):
+    manifest=path.parent/"manifest.json"
+    if not manifest.is_file():return False
+    try:data=json.loads(manifest.read_text())
+    except Exception:return False
+    return bool(data.get("complete") and data.get("server")==name and data.get("archive_sha256")==archive_sha256(path))
+
+def active_generation_path(name):return LOCAL_STATE/f"{name}.active-generation.json"
+
+def recover_save_guard(name):
+    guard=save_guard(name)
+    if not guard.exists():return
+    runtime=unit_workdir(name)
+    if active(name):rcon(runtime,"save-on")
+    guard.unlink(missing_ok=True);fsync_directory(guard.parent)
+
+def generation_verified(name,generation,digest,idle_timeout=300):
+    root=generation_path(name,generation);last=None;progress=time.monotonic()
+    while True:
+      archive=root/"snapshot.tar.gz";manifest=root/"manifest.json";sig=(archive.exists(),archive.stat().st_size if archive.exists() else 0,manifest.exists(),manifest.stat().st_size if manifest.exists() else 0)
+      if sig!=last:last=sig;progress=time.monotonic()
+      if archive.is_file() and manifest.is_file():
+        data,_=read_generation(name,generation)
+        if data.get("archive_sha256")==digest:print(f"GENERATION-VERIFIED {name} {generation} {digest}");return
+      if time.monotonic()-progress>=idle_timeout:raise RuntimeError(f"Generation replication made no progress for {idle_timeout}s: {name}/{generation}")
+      time.sleep(2)
+
+def verify_generation_on_peers(name,record):
+    failures=[];expected=f"GENERATION-VERIFIED {name} {record['generation']} {record['archive_sha256']}"
+    for label,addresses in resolved_peer_groups():
+        ok=False;attempts=[]
+        for address in addresses:
+            r=ssh(address,["verify-generation",name,"--generation",record["generation"],"--digest",record["archive_sha256"]])
+            out=(r.stdout or "").strip()
+            if r.returncode==0 and expected in out:ok=True;break
+            attempts.append(f"{address}: {out or r.returncode}")
+        if not ok:failures.append(f"{label}: {'; '.join(attempts)}")
+    if failures:raise RuntimeError("Generation replication incomplete: "+"; ".join(failures))
+
+def syncthing_backup_folder_audit():
+    import xml.etree.ElementTree as ET
+    cfg=HOME/".local/state/syncthing/config.xml"
+    if not cfg.is_file():raise RuntimeError("Syncthing config missing")
+    root=ET.parse(cfg).getroot();local=local_node_name();expected={local:((BACKUPS/local).resolve(),"sendonly")}
+    for label,_ in peer_groups():expected[label]=((BACKUPS/label).resolve(),"receiveonly")
+    problems=[]
+    for peer,(wanted,kind) in expected.items():
+      matches=[]
+      for folder in root.findall("folder"):
+        try:path=Path(os.path.expanduser(folder.get("path",""))).resolve()
+        except OSError:continue
+        if path==wanted:matches.append(folder)
+      if len(matches)!=1:problems.append(f"{peer}: expected exactly one folder for {wanted}, found {len(matches)}");continue
+      folder=matches[0];actual=folder.get("type","sendreceive");devices=folder.findall("device")
+      if actual!=kind:problems.append(f"{peer}: expected {kind}, got {actual}")
+      if not devices:problems.append(f"{peer}: folder is shared with no devices")
+      if kind=="receiveonly" and not (folder.find("versioning") is not None or folder.get("versioning")):problems.append(f"{peer}: receive-only backup folder has no versioning")
+      if not wanted.exists():wanted.mkdir(parents=True,exist_ok=True)
+      if not os.access(wanted,os.R_OK|os.W_OK|os.X_OK):problems.append(f"{peer}: path permissions are unusable: {wanted}")
+    if problems:raise RuntimeError("Backup Syncthing folder audit failed: "+"; ".join(problems))
+
+def backup_health_path(name):return LOCAL_STATE/f"{name}.backup-health.json"
+def restore_journal_path(name):return LOCAL_STATE/f"{name}.restore-transaction.json"
+
+def write_restore_phase(name,phase,**values):
+    payload={"schema":1,"server":name,"phase":phase,"updated":dt.datetime.now(dt.timezone.utc).isoformat(),**values}
+    write_json_atomic(restore_journal_path(name),payload)
+
+def recover_restore_transaction(name):
+    journal=restore_journal_path(name)
+    if not journal.is_file():return
+    data=json.loads(journal.read_text());rollback=Path(data.get("rollback",""));snapshot=ROOT/"servers"/name/"snapshot";runtime=unit_workdir(name)
+    if active(name):raise RuntimeError(f"Restore recovery required for {name}, but service is running")
+    if data.get("phase") not in ("committed","replicated") and rollback.is_dir():
+        replace_snapshot_from_backup(rollback,snapshot);atomic_mirror(snapshot,runtime);verify_identical(snapshot,runtime,"restore crash rollback")
+    journal.unlink(missing_ok=True)
+    stage=Path(data.get("stage",""));shutil.rmtree(stage,ignore_errors=True);shutil.rmtree(rollback,ignore_errors=True)
+
+def verify_backup_receiver(owner,name,generation,digest,idle_timeout=300):
+    archive=BACKUPS/owner/name/"runtime"/"generations"/generation/"backup.tar.gz"
+    manifest=archive.parent/"manifest.json";last=None;progress=time.monotonic()
+    while True:
+        signature=(archive.exists(),archive.stat().st_size if archive.exists() else 0,manifest.exists(),manifest.stat().st_size if manifest.exists() else 0)
+        if signature!=last:last=signature;progress=time.monotonic()
+        if archive.is_file() and manifest.is_file():
+            data=json.loads(manifest.read_text())
+            if data.get("archive_sha256")==digest and archive_sha256(archive)==digest:
+                print(f"BACKUP-VERIFIED {owner} {name} {generation} {digest}");return
+        if time.monotonic()-progress>=idle_timeout:raise RuntimeError(f"Backup replication made no progress for {idle_timeout}s: {owner}/{name}/{generation}")
+        time.sleep(2)
+
+def verify_runtime_backup_on_peers(name,data):
+    expected=f"BACKUP-VERIFIED {data['peer']} {name} {data['generation']} {data['archive_sha256']}";failures=[]
+    for label,addresses in resolved_peer_groups():
+        ok=False;attempts=[]
+        for address in addresses:
+            result=ssh(address,["verify-backup",name,"--owner",data["peer"],"--generation",data["generation"],"--digest",data["archive_sha256"]])
+            out=(result.stdout or "").strip()
+            if result.returncode==0 and expected in out:ok=True;break
+            attempts.append(f"{address}: {out or result.returncode}")
+        if not ok:failures.append(f"{label}: {'; '.join(attempts)}")
+    if failures:raise RuntimeError("Runtime backup is locally valid but peer replication is unverified: "+"; ".join(failures))
+
+def prune_runtime_backups(name,keep=144):
+    root=runtime_backup_folder(name)/"generations"
+    valid=[]
+    if root.is_dir():
+      for manifest in root.glob("*/manifest.json"):
+        try:
+          data=json.loads(manifest.read_text());archive=manifest.parent/"backup.tar.gz"
+          if archive.is_file() and data.get("complete") and data.get("archive_sha256")==archive_sha256(archive):valid.append((data.get("created",""),manifest.parent))
+        except Exception:continue
+    for _,folder in sorted(valid,reverse=True)[keep:]:shutil.rmtree(folder,ignore_errors=True)
+
+def require_backup_capacity(name):
+    usage=shutil.disk_usage(BACKUPS);root=runtime_backup_folder(name)/"generations";sizes=[]
+    if root.is_dir():sizes=[p.stat().st_size for p in root.glob("*/backup.tar.gz") if p.is_file()]
+    required=max(10*1024**3,(max(sizes) if sizes else 512*1024**2)*2)
+    if usage.free<required:raise RuntimeError(f"Insufficient backup free space: {usage.free/1024**3:.1f} GiB free, {required/1024**3:.1f} GiB required")
+
 def runtime_backup_unit(name):
     return f"minecraft-runtime-backup-{name}.service"
 
@@ -444,57 +588,84 @@ def validate_runtime_archive(archive,name):
         if sum(member.size for member in regular)<=0:raise RuntimeError(f"Runtime backup contains no data: {archive}")
 
 def runtime_backup_once(name):
-    if not active(name):raise RuntimeError(f"Cannot back up {name}: service is not running")
-    runtime=unit_workdir(name)
-    if not runtime.is_dir():raise RuntimeError(f"Runtime directory is missing: {runtime}")
-    folder=runtime_backup_folder(name);folder.mkdir(parents=True,exist_ok=True)
-    target=folder/"running-latest.tar.gz"
-    incoming=folder/f".running-latest.tar.gz.incoming-{os.getpid()}"
-    metadata_target=folder/"running-latest.json"
-    metadata_incoming=folder/f".running-latest.json.incoming-{os.getpid()}"
-    try:
-        rcon(runtime,"save-off")
-        try:
-            rcon(runtime,"save-all flush")
-            with incoming.open("wb") as raw:
-                with tarfile.open(fileobj=raw,mode="w:gz") as archive:archive.add(runtime,arcname=name,recursive=True)
-                raw.flush();os.fsync(raw.fileno())
-            validate_runtime_archive(incoming,name)
-            metadata={"schema":1,"server":name,"runtime":local_node_name(),
-                      "created":dt.datetime.now(dt.timezone.utc).isoformat(),
-                      "archive":target.name,"archive_sha256":archive_sha256(incoming),
-                      "source":str(runtime)}
-            with metadata_incoming.open("w") as handle:
-                json.dump(metadata,handle,sort_keys=True);handle.write("\n");handle.flush();os.fsync(handle.fileno())
-            os.replace(incoming,target);os.replace(metadata_incoming,metadata_target);fsync_directory(folder)
-            print(f"Runtime backup replaced successfully: {target}",flush=True)
-            return target
-        finally:rcon(runtime,"save-on")
-    except Exception:
-        incoming.unlink(missing_ok=True);metadata_incoming.unlink(missing_ok=True)
+    LOCAL_STATE.mkdir(parents=True,exist_ok=True)
+    with server_backup_lock(name).open("a+") as lock:
+      fcntl.flock(lock,fcntl.LOCK_EX);recover_save_guard(name);require_backup_capacity(name)
+      if not active(name):raise RuntimeError(f"Cannot back up {name}: service is not running")
+      runtime=unit_workdir(name);folder=runtime_backup_folder(name)/"generations";folder.mkdir(parents=True,exist_ok=True)
+      generation=uuid.uuid4().hex;root=folder/generation;root.mkdir();incoming=root/".backup.tar.gz.incoming";archive=root/"backup.tar.gz";guard=save_guard(name)
+      try:
+        write_json_atomic(guard,{"server":name,"created":dt.datetime.now(dt.timezone.utc).isoformat()});rcon(runtime,"save-off");rcon(runtime,"save-all flush")
+        with incoming.open("wb") as raw:
+          with tarfile.open(fileobj=raw,mode="w:gz") as handle:handle.add(runtime,arcname=name,recursive=True)
+          raw.flush();os.fsync(raw.fileno())
+        validate_runtime_archive(incoming,name);digest=archive_sha256(incoming);os.replace(incoming,archive);fsync_directory(root)
+        data={"schema":1,"complete":True,"server":name,"peer":local_node_name(),"kind":"running","generation":generation,
+              "created":dt.datetime.now(dt.timezone.utc).isoformat(),"archive":"backup.tar.gz","archive_sha256":digest,"source":str(runtime)}
+        write_json_atomic(root/"manifest.json",data);write_json_atomic(runtime_backup_folder(name)/"current.json",data)
+        rcon(runtime,"save-on");guard.unlink(missing_ok=True);verify_runtime_backup_on_peers(name,data)
+        data["replicated"]=True;data["replicated_at"]=dt.datetime.now(dt.timezone.utc).isoformat();write_json_atomic(root/"manifest.json",data);write_json_atomic(backup_health_path(name),data)
+        prune_runtime_backups(name);print(f"Runtime backup protected locally and on peers: {archive}",flush=True);return archive
+      except Exception:
+        incoming.unlink(missing_ok=True)
+        try:rcon(runtime,"save-on")
+        finally:guard.unlink(missing_ok=True)
         raise
+
+def protected_backup_age(name):
+    path=backup_health_path(name)
+    if not path.is_file():return float("inf")
+    try:
+      created=json.loads(path.read_text()).get("replicated_at") or json.loads(path.read_text()).get("created")
+      return max(0,(dt.datetime.now(dt.timezone.utc)-dt.datetime.fromisoformat(created)).total_seconds())
+    except Exception:return float("inf")
 
 def runtime_backup_loop(name):
     while active(name):
+        recover_save_guard(name)
         try:
             runtime_backup_once(name)
             delay=RUNTIME_BACKUP_INTERVAL
         except Exception as error:
-            print(f"Runtime backup failed; previous successful backup retained: {error}",file=sys.stderr,flush=True)
+            print(f"Runtime backup failed; previous protected backup retained: {error}",file=sys.stderr,flush=True)
             delay=RUNTIME_BACKUP_RETRY
         for _ in range(delay):
             if not active(name):return
             time.sleep(1)
 
+def runtime_backup_watchdog_unit(name):return f"minecraft-runtime-backup-watchdog-{name}.service"
+def runtime_backup_watchdog(name):
+    stale_limit=max(900,RUNTIME_BACKUP_INTERVAL*3)
+    while active(name):
+      age=protected_backup_age(name)
+      if age>=stale_limit:
+        with server_backup_lock(name).open("a+") as lock:
+          fcntl.flock(lock,fcntl.LOCK_EX)
+          if protected_backup_age(name)<stale_limit:continue
+          runtime=unit_workdir(name)
+          try:rcon(runtime,"save-all flush");rcon(runtime,"save-on")
+          finally:save_guard(name).unlink(missing_ok=True)
+          print(f"No peer-verified backup within {stale_limit}s; stopping {name} safely.",file=sys.stderr,flush=True)
+          result=run([sys.executable,"-B",str(Path(__file__).resolve()),"stop",name],check=False,capture=True)
+          if result.stdout:print(result.stdout,file=sys.stderr,flush=True)
+          if active(name):run(["sudo","systemctl","stop",unit(name)],check=False)
+          return
+      time.sleep(1)
+
 def start_runtime_backup_loop(name):
     stop_runtime_backup_loop(name)
-    command=["systemd-run","--user","--unit",runtime_backup_unit(name),
-             "--property=Restart=no","--collect",sys.executable,"-B",str(Path(__file__).resolve()),
-             "runtime-backup-loop",name]
+    command=["systemd-run","--user","--unit",runtime_backup_unit(name),"--property=Restart=on-failure","--property=RestartSec=60s",
+             "--collect",sys.executable,"-B",str(Path(__file__).resolve()),"runtime-backup-loop",name]
     result=run(command,check=False,capture=True)
-    if result.returncode:raise RuntimeError(result.stdout.strip() or "Could not start runtime backup loop")
+    if result.returncode:raise RuntimeError(result.stdout.strip() or "Could not start supervised runtime backup loop")
+    watchdog=["systemd-run","--user","--unit",runtime_backup_watchdog_unit(name),"--property=Restart=on-failure","--property=RestartSec=5s",
+              "--collect",sys.executable,"-B",str(Path(__file__).resolve()),"runtime-backup-watchdog",name]
+    result=run(watchdog,check=False,capture=True)
+    if result.returncode:
+      run(["systemctl","--user","stop",runtime_backup_unit(name)],check=False);raise RuntimeError(result.stdout.strip() or "Could not start backup watchdog")
 
 def stop_runtime_backup_loop(name):
+    run(["systemctl","--user","stop",runtime_backup_watchdog_unit(name)],check=False,capture=True)
     run(["systemctl","--user","stop",runtime_backup_unit(name)],check=False,capture=True)
 
 def generation_root(name):return ROOT/"generations"/name
@@ -560,7 +731,7 @@ def activate_generation(name,generation,snapshot):
         if manifest_digest(restored)!=data.get("runtime_manifest_sha256"):
             raise RuntimeError(f"Extracted generation manifest mismatch: {name}/{generation}")
         replace_snapshot_from_backup(restored,snapshot)
-        write_json_atomic(COORD/f"{name}.active-generation.json",data)
+        write_json_atomic(active_generation_path(name),data)
         return data
     finally:shutil.rmtree(extract,ignore_errors=True)
 
@@ -586,11 +757,11 @@ def ensure_syncthing_versioning():
     payload=json.dumps({"versioning":{"type":"staggered","params":{"cleanInterval":"3600","maxAge":"31536000"},"cleanupIntervalS":3600}}).encode()
     request.urlopen(request.Request(url,data=payload,method="PATCH",headers=headers),timeout=300).read()
 
-def server_paths(name):return unit_workdir(name),ROOT/"servers"/name/"snapshot",BACKUPS/name,COORD/f"{name}.owner.json"
+def server_paths(name):return unit_workdir(name),ROOT/"servers"/name/"snapshot",BACKUPS/local_node_name()/name,COORD/f"{name}.owner.json"
+def server_backup_lock(name):return LOCAL_STATE/f"{name}.backup.lock"
+def save_guard(name):return LOCAL_STATE/f"{name}.save-disabled"
 def backup(name,runtime):
-    folder=BACKUPS/local_node_name()/name;folder.mkdir(parents=True,exist_ok=True); path=folder/dt.datetime.now().strftime(f"{name}-%Y%m%d-%H%M%S.tar.gz")
-    with tarfile.open(path,"w:gz") as t:t.add(runtime,arcname=name)
-    for old in sorted(folder.glob(f"{name}-*.tar.gz"),key=lambda p:p.stat().st_mtime,reverse=True)[10:]:old.unlink()
+    return archive_transaction(name,runtime,"stopped-runtime")
 def unit_workdir(name):
     result=run(["systemctl","show",unit(name),"-p","WorkingDirectory","--value"],check=False,capture=True)
     value=result.stdout.strip()
@@ -784,11 +955,9 @@ def prepare_sync_receiver():
     print("stopped sync-ready")
 
 def safety_backup(name,source,kind):
-    if not source.is_dir() or not any(source.iterdir()):return None
-    folder=BACKUPS/local_node_name()/name;folder.mkdir(parents=True,exist_ok=True)
-    target=folder/f"{name}-{kind}-{dt.datetime.now().strftime('%Y%m%d-%H%M%S')}.tar.gz"
-    with tarfile.open(target,"w:gz") as archive:archive.add(source,arcname=name,recursive=True)
-    print(f"Safety backup created: {target}");return target
+    path=archive_transaction(name,source,kind)
+    if path:print(f"Safety backup created: {path}")
+    return path
 
 def ensure_syncthing_resumed_and_current(cluster=False):
     if running_servers():raise RuntimeError("Refusing to resume Syncthing while Minecraft is running")
@@ -838,11 +1007,12 @@ def start(name=None,force=False):
     if not handover_path(name).is_file():
         safety_backup(name,snapshot,"pre-handover-migration");write_handover(name,snapshot,"format-migration")
         syncthing_wait_local()
-    record=validate_handover(name,snapshot,wanted)
+    record=read_handover(name)
+    if not record:raise RuntimeError(f"Missing synchronized handover marker for {name}")
+    if wanted and record.get("generation")!=wanted:raise RuntimeError("Received a different handover generation")
     generation=record.get("generation")
-    if generation:
-        activate_generation(name,generation,snapshot)
-        record=validate_handover(name,snapshot,wanted)
+    if generation:activate_generation(name,generation,snapshot)
+    record=validate_handover(name,snapshot,wanted)
     safety_backup(name,snapshot,"pre-start-snapshot")
     print("Pausing Syncthing before acquiring runtime ownership...");syncthing_pause();CRITICAL=True
     try:
@@ -867,8 +1037,9 @@ def start(name=None,force=False):
                 print(f"Router target: {FLOATING_IP}:{port}")
                 if public:print(f"Public address: {public}:{port}")
                 if domain:print(f"Friend address: {domain}.duckdns.org:{port}")
+                runtime_backup_once(name)
                 start_runtime_backup_loop(name)
-                print(f"Live runtime backup: immediately, then every {RUNTIME_BACKUP_INTERVAL//60} minutes after each success.")
+                print(f"Live runtime backup: protected immediately, then every {RUNTIME_BACKUP_INTERVAL//60} minutes.")
                 print("Syncthing is paused until the server is stopped and snapshotted.");return
             if time.monotonic()-last_progress>=idle_timeout:
                 raise RuntimeError(f"{name} made no startup progress for {idle_timeout}s (active={is_active}, port_busy={is_busy})")
@@ -888,51 +1059,42 @@ def stop(name=None,remote=False):
     name=select_server(name,"stop")
     if not active(name):print(f"{name} is already stopped locally.");return
     ensure_dependencies(name);runtime,snapshot,_,owner=server_paths(name);CRITICAL=True
-    print("Keeping Syncthing paused while stopping and snapshotting...");syncthing_pause()
-    try:
-        stop_runtime_backup_loop(name)
-        run(["sudo","systemctl","stop",unit(name)])
+    LOCAL_STATE.mkdir(parents=True,exist_ok=True)
+    with server_backup_lock(name).open("a+") as backup_lock:
+      fcntl.flock(backup_lock,fcntl.LOCK_EX)
+      print("Keeping Syncthing paused while stopping and snapshotting...");syncthing_pause()
+      try:
+        stop_runtime_backup_loop(name);recover_save_guard(name);run(["sudo","systemctl","stop",unit(name)])
         last_state=None;last_progress=time.monotonic()
         while active(name):
-            state=run(["systemctl","show",unit(name),"-p","ActiveState","-p","SubState","--value"],check=False,capture=True).stdout.strip()
-            if state!=last_state:last_state=state;last_progress=time.monotonic()
-            elif time.monotonic()-last_progress>=300:raise RuntimeError(f"{name} made no shutdown progress for 300s; state={state!r}")
-            time.sleep(1)
+          state=run(["systemctl","show",unit(name),"-p","ActiveState","-p","SubState","--value"],check=False,capture=True).stdout.strip()
+          if state!=last_state:last_state=state;last_progress=time.monotonic()
+          elif time.monotonic()-last_progress>=300:raise RuntimeError(f"{name} made no shutdown progress for 300s; state={state!r}")
+          time.sleep(1)
         backup(name,runtime);safety_backup(name,snapshot,"pre-stop-snapshot")
-        generation=publish_generation(name,runtime,"clean-stop")
-        atomic_mirror(runtime,snapshot);verify_identical(runtime,snapshot,"stopped snapshot")
-        record=write_handover(name,snapshot,"clean-stop")
-        record.update({"generation":generation["generation"],"generation_archive_sha256":generation["archive_sha256"],"publisher":generation["publisher"]})
+        generation=publish_generation(name,runtime,"clean-stop");atomic_mirror(runtime,snapshot);verify_identical(runtime,snapshot,"stopped snapshot")
+        record=write_handover(name,snapshot,"clean-stop");record.update({"generation":generation["generation"],"generation_archive_sha256":generation["archive_sha256"],"publisher":generation["publisher"]})
         write_json_atomic(handover_path(name),record)
         if not running_servers():network_restore()
-        try:owner.unlink()
-        except FileNotFoundError:pass
-        print("Resuming Syncthing and publishing the immutable verified generation...")
-        ensure_syncthing_versioning()
-        syncthing_resume()
-        if remote:
-            syncthing_wait_local()
-        else:
-            prepare_peers_for_sync();syncthing_wait_local()
-        CRITICAL=False
-        print(f"HANDOVER {record['generation']}")
-        print(f"'{name}' stopped, backed up, verified, and synchronized.")
-    except Exception:
+        owner.unlink(missing_ok=True);ensure_syncthing_versioning();syncthing_resume();prepare_peers_for_sync();syncthing_wait_cluster();verify_generation_on_peers(name,generation)
+        CRITICAL=False;print(f"HANDOVER {record['generation']}");print(f"'{name}' stopped, backed up, verified, and replicated.")
+      except Exception:
         CRITICAL=False
         if not running_servers():
-            try:syncthing_resume()
-            except Exception:pass
+          try:syncthing_resume()
+          except Exception:pass
         raise
 
 def backup_choices(name):
     choices=[]
-    folder=BACKUPS
-    if folder.is_dir():choices.extend(folder.glob(f"*/{name}/**/*.tar.gz"))
+    if BACKUPS.is_dir():
+      for archive in BACKUPS.glob(f"*/{name}/**/*.tar.gz"):
+        if validated_backup(archive,name):choices.append(archive)
     root=generation_root(name)
     if root.is_dir():
-        for manifest in root.glob("*/manifest.json"):
-            try:_,archive=read_generation(name,manifest.parent.name);choices.append(archive)
-            except Exception:continue
+      for manifest in root.glob("*/manifest.json"):
+        try:_,archive=read_generation(name,manifest.parent.name);choices.append(archive)
+        except Exception:continue
     return sorted(set(choices),key=lambda item:item.stat().st_mtime,reverse=True)
 
 def select_backup(name,requested=None):
@@ -982,47 +1144,48 @@ def restore_backup(name=None,requested=None):
     global CRITICAL
     name=select_server(name,"restore");archive=select_backup(name,requested)
     if sys.stdin.isatty() and input(f"Restore {name} from {archive.name}? [y/N]: ").strip().casefold() not in ("y","yes"):raise SystemExit(0)
-    ensure_dependencies(name)
-    ensure_syncthing_resumed_and_current(cluster=False)
+    ensure_dependencies(name);ensure_syncthing_resumed_and_current(cluster=False)
     found,unreachable=remote_state()
     if unreachable:raise RuntimeError("Cannot verify peer(s): "+", ".join(unreachable))
-    for label,address,names in found:
-        for remote_name in [x for x in names if not x.startswith("floating=") and x!="transitioning"]:
-            r=ssh(address,["stop",remote_name,"--remote"])
-            if r.returncode:raise RuntimeError((r.stdout or "").strip() or "remote stop failed")
+    for _,address,names in found:
+      for remote_name in [x for x in names if not x.startswith("floating=") and x!="transitioning"]:
+        result=ssh(address,["stop",remote_name,"--remote"])
+        if result.returncode:raise RuntimeError((result.stdout or "").strip() or "remote stop failed")
     for running in list(running_servers()):stop(running)
-    ensure_syncthing_resumed_and_current(cluster=False)
-    runtime,snapshot,_,owner=server_paths(name)
-    safety_backup(name,snapshot,"pre-restore-snapshot");safety_backup(name,runtime,"pre-restore-runtime")
-    stage=snapshot.parent/f".{name}.restore-{os.getpid()}";rollback=snapshot.parent/f".{name}.rollback-{os.getpid()}"
-    shutil.rmtree(stage,ignore_errors=True);shutil.rmtree(rollback,ignore_errors=True)
-    if snapshot.is_dir():shutil.copytree(snapshot,rollback,symlinks=True)
-    CRITICAL=True;mutated=False
-    try:
-        print("Pausing Syncthing for atomic restore...");syncthing_pause()
-        restored=safe_extract_backup(archive,stage,name)
-        if not (restored/'level.dat').exists() and not any(restored.glob('world*/level.dat')):raise RuntimeError("Backup contains no level.dat")
-        replace_snapshot_from_backup(restored,snapshot);mutated=True
-        atomic_mirror(snapshot,runtime);verify_identical(snapshot,runtime,"restored runtime")
-        write_handover(name,snapshot,"backup-restore")
-        now=time.time()
-        for path in snapshot.rglob("*"):
-            try:os.utime(path,(now,now),follow_symlinks=False)
-            except OSError:pass
-        os.utime(snapshot,(now,now),follow_symlinks=False)
-        try:owner.unlink()
-        except FileNotFoundError:pass
-        network_restore()
-    except Exception:
-        if mutated and rollback.is_dir():
-            print("Restore failed; restoring the pre-restore snapshot...",file=sys.stderr)
-            atomic_mirror(rollback,snapshot);atomic_mirror(snapshot,runtime)
-        raise
-    finally:
+    runtime,snapshot,_,owner=server_paths(name);stage=LOCAL_STATE/f".{name}.restore-stage";rollback=LOCAL_STATE/f".{name}.restore-rollback";CRITICAL=True
+    LOCAL_STATE.mkdir(parents=True,exist_ok=True)
+    with server_backup_lock(name).open("a+") as backup_lock:
+      fcntl.flock(backup_lock,fcntl.LOCK_EX)
+      try:
+        syncthing_pause();write_restore_phase(name,"prepared",stage=str(stage),rollback=str(rollback),archive=str(archive))
+        safety_backup(name,snapshot,"pre-restore-snapshot");safety_backup(name,runtime,"pre-restore-runtime")
         shutil.rmtree(stage,ignore_errors=True);shutil.rmtree(rollback,ignore_errors=True)
-        syncthing_resume();CRITICAL=False
-    print("Publishing and verifying the restored snapshot locally...");prepare_peers_for_sync();syncthing_wait_local()
-    print(f"Restored '{name}' from {archive.name}; runtime verified; server remains stopped.")
+        if snapshot.is_dir():shutil.copytree(snapshot,rollback,symlinks=True)
+        write_restore_phase(name,"staged",stage=str(stage),rollback=str(rollback),archive=str(archive))
+        restored=safe_extract_backup(archive,stage,name)
+        replace_snapshot_from_backup(restored,snapshot);atomic_mirror(snapshot,runtime);verify_identical(snapshot,runtime,"restored runtime")
+        write_restore_phase(name,"mutated",stage=str(stage),rollback=str(rollback),archive=str(archive))
+        generation=publish_generation(name,runtime,"backup-restore")
+        record=write_handover(name,snapshot,"backup-restore");record.update({"generation":generation["generation"],"generation_archive_sha256":generation["archive_sha256"],"publisher":generation["publisher"]});write_json_atomic(handover_path(name),record)
+        write_restore_phase(name,"committed",stage=str(stage),rollback=str(rollback),generation=generation["generation"])
+        owner.unlink(missing_ok=True);network_restore();syncthing_resume();prepare_peers_for_sync();syncthing_wait_cluster();verify_generation_on_peers(name,generation)
+        write_restore_phase(name,"replicated",stage=str(stage),rollback=str(rollback),generation=generation["generation"])
+      except Exception:
+        rollback_ok=False
+        try:
+          if rollback.is_dir():replace_snapshot_from_backup(rollback,snapshot);atomic_mirror(snapshot,runtime);verify_identical(snapshot,runtime,"restore rollback");rollback_ok=True
+        finally:
+          if rollback_ok:restore_journal_path(name).unlink(missing_ok=True)
+        raise
+      else:
+        restore_journal_path(name).unlink(missing_ok=True)
+      finally:
+        if not restore_journal_path(name).exists():
+          shutil.rmtree(stage,ignore_errors=True);shutil.rmtree(rollback,ignore_errors=True)
+        try:syncthing_resume()
+        except Exception:pass
+        CRITICAL=False
+    print(f"Restored '{name}' from {archive.name}; immutable generation verified on peers; server remains stopped.")
 
 def status(machine=False):
     running=running_servers()
@@ -1048,8 +1211,8 @@ def on_signal(sig,frame):
     if CRITICAL:print("\nCritical save/transfer continues; interrupt ignored.",file=sys.stderr);return
     raise KeyboardInterrupt
 def main():
-    p=argparse.ArgumentParser();p.add_argument("action",nargs="?",default="toggle",choices=["toggle","start","stop","restore","status","logs","takeover","list","release-network","menu-status","prepare-sync","runtime-backup-once","runtime-backup-loop"]);p.add_argument("server",nargs="?");p.add_argument("--machine",action="store_true");p.add_argument("--remote",action="store_true");p.add_argument("--backup");a=p.parse_args()
-    for d in (ROOT,RUNTIME_ROOT,BACKUPS,COORD):d.mkdir(parents=True,exist_ok=True)
+    p=argparse.ArgumentParser();p.add_argument("action",nargs="?",default="toggle",choices=["toggle","start","stop","restore","status","logs","takeover","list","release-network","menu-status","prepare-sync","runtime-backup-once","runtime-backup-loop","runtime-backup-watchdog","verify-generation","verify-backup"]);p.add_argument("server",nargs="?");p.add_argument("--machine",action="store_true");p.add_argument("--remote",action="store_true");p.add_argument("--backup");p.add_argument("--generation");p.add_argument("--digest");p.add_argument("--owner");a=p.parse_args()
+    for d in (ROOT,RUNTIME_ROOT,BACKUPS,COORD,LOCAL_STATE):d.mkdir(parents=True,exist_ok=True)
     for sig in (signal.SIGINT,signal.SIGTERM,signal.SIGHUP):signal.signal(sig,on_signal)
     # Machine status is a read-only peer probe. It must remain available while
     # start/stop owns the transition lock; otherwise a normal handover is
@@ -1060,12 +1223,21 @@ def main():
         name=select_server(a.server,"back up");runtime_backup_once(name);return 0
     if a.action=="runtime-backup-loop":
         name=select_server(a.server,"back up");runtime_backup_loop(name);return 0
+    if a.action=="runtime-backup-watchdog":
+        name=select_server(a.server,"watch backups for");runtime_backup_watchdog(name);return 0
+    if a.action=="verify-generation":
+        if not a.server or not a.generation or not a.digest:raise RuntimeError("verify-generation requires server, --generation and --digest")
+        generation_verified(a.server,a.generation,a.digest);return 0
+    if a.action=="verify-backup":
+        if not a.owner or not a.server or not a.generation or not a.digest:raise RuntimeError("verify-backup requires server, --owner, --generation and --digest")
+        verify_backup_receiver(a.owner,a.server,a.generation,a.digest);return 0
     if a.action=="prepare-sync":
         with LOCK.open("w") as lock:
             try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
             except BlockingIOError:raise RuntimeError("Cannot prepare sync during a local Minecraft transition")
             return prepare_sync_receiver()
     mutating=a.action in ("toggle","start","stop","restore","takeover","release-network")
+    if mutating:syncthing_backup_folder_audit()
     cluster=contextlib.nullcontext() if not mutating else cluster_transition_lock(a.remote)
     with cluster:
       with LOCK.open("w") as lock:

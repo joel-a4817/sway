@@ -5,7 +5,6 @@ WEBREMOTE_HOST="${WEBREMOTE_HOST:-iPad4817}"
 WEBREMOTE_PORT="${WEBREMOTE_PORT:-8765}"
 REMOTE_DIR=/var/mobile/webremote
 STOPPER="$REMOTE_DIR/stop-webremote.sh"
-
 is_running() {
     curl --silent --fail --connect-timeout 1 --max-time 2 "http://${WEBREMOTE_HOST}:${WEBREMOTE_PORT}/" >/dev/null 2>&1
 }
@@ -20,7 +19,6 @@ if is_running; then
     echo 'iPad Web Remote stopped.'
     exit 0
 fi
-
 echo 'Starting iPad Web Remote...'
 ssh "$IPAD_HOST" 'sh -s' <<'REMOTE'
 set -eu
