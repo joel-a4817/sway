@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """Safe multi-server Fabric lifecycle manager for NixOS/nix-minecraft."""
 from __future__ import annotations
-import argparse, contextlib, datetime as dt, fcntl, hashlib, json, os, re, shutil, signal, socket, subprocess, sys, tarfile, time
+import argparse, contextlib, datetime as dt, fcntl, hashlib, json, os, re, shutil, signal, socket, subprocess, sys, tarfile, time, uuid
 from pathlib import Path
 sys.dont_write_bytecode=True
 from urllib import request, parse
 import ipaddress
 
 HOME=Path.home(); ROOT=HOME/"minecraft-server"; RUNTIME_ROOT=Path("/srv/minecraft")
-BACKUPS=ROOT/"backups"; COORD=ROOT/"coordination"; LOCK=COORD/"local.lock"
+BACKUPS=Path(os.environ.get("MINECRAFT_BACKUP_ROOT",str(Path.home()/"minecraft-backups"))).expanduser(); COORD=ROOT/"coordination"; LOCK=COORD/"local.lock"
 PEERS=HOME/".config/minecraft-server/peers"; NETWORK_STATE=Path("/run/user")/str(os.getuid())/"minecraft-server-network.json"
 FLOATING_IP=os.environ.get("MINECRAFT_FLOATING_IP","192.168.0.240")
 DDNS_ENV=HOME/".config/minecraft-server/ddns.env"
 CRITICAL=False
+RUNTIME_BACKUP_INTERVAL=int(os.environ.get("MINECRAFT_RUNTIME_BACKUP_INTERVAL","600"))
+RUNTIME_BACKUP_RETRY=int(os.environ.get("MINECRAFT_RUNTIME_BACKUP_RETRY","60"))
 
 def run(cmd,check=True,capture=False,timeout=None):
     return subprocess.run(cmd,check=check,text=True,stdout=subprocess.PIPE if capture else None,stderr=subprocess.STDOUT if capture else None,timeout=timeout)
@@ -178,19 +180,23 @@ def syncthing_request(path,params=None,method="GET",idle_timeout=300):
     except TimeoutError as error:
         raise RuntimeError(f"Syncthing API made no socket progress for {idle_timeout}s during {method} {path}") from error
 
-def syncthing_set_paused(paused):
+def syncthing_set_paused(paused,idle_timeout=300):
     item=syncthing_config()
     if not item:raise RuntimeError("Configure ~/minecraft-server as its own Syncthing folder")
     key,folder,_=item;headers={"X-API-Key":key,"Content-Type":"application/json"}
     url="http://127.0.0.1:8384/rest/config/folders/"+parse.quote(folder,safe="")
     payload=json.dumps({"paused":bool(paused)}).encode()
-    request.urlopen(request.Request(url,data=payload,method="PATCH",headers=headers),timeout=300).read()
-    end=time.time()+30
-    while time.time()<end:
-        current=json.load(request.urlopen(request.Request(url,headers={"X-API-Key":key}),timeout=300))
-        if bool(current.get("paused",False))==bool(paused):return
+    request.urlopen(request.Request(url,data=payload,method="PATCH",headers=headers),timeout=idle_timeout).read()
+    last=None;last_progress=time.monotonic()
+    while True:
+        current=json.load(request.urlopen(request.Request(url,headers={"X-API-Key":key}),timeout=idle_timeout))
+        value=bool(current.get("paused",False))
+        if value==bool(paused):return
+        signature=(value,current.get("stateChanged"))
+        if signature!=last:last=signature;last_progress=time.monotonic()
+        elif time.monotonic()-last_progress>=idle_timeout:
+            raise RuntimeError("Syncthing folder made no pause/resume progress for "+str(idle_timeout)+"s")
         time.sleep(.25)
-    raise RuntimeError("Syncthing folder did not "+("pause" if paused else "resume")+" within 30 seconds")
 
 def syncthing_pause():
     syncthing_set_paused(True)
@@ -227,41 +233,30 @@ def syncthing_wait_local(idle_timeout=300,stable_seconds=4):
             raise RuntimeError(f"Local Syncthing made no observable progress for {idle_timeout}s: {last}")
         time.sleep(2)
 
-def syncthing_wait_cluster(timeout=300,stable_seconds=4):
-    """Require local cleanliness and 100% completion on every configured peer."""
+def syncthing_wait_cluster(idle_timeout=300,stable_seconds=4):
     item=syncthing_config()
     if not item:raise RuntimeError("Configure ~/minecraft-server as its own Syncthing folder")
-    _,_,devices=item
-    syncthing_request("/rest/db/scan",method="POST").read()
-    end=time.monotonic()+timeout;stable=None;last_reason="waiting for status"
-    while time.monotonic()<end:
-        clean,data=syncthing_status_clean();incomplete=[]
+    _,_,devices=item;syncthing_request("/rest/db/scan",method="POST").read()
+    stable=None;last_reason="waiting";last_signature=None;last_progress=time.monotonic()
+    while True:
+        clean,data=syncthing_status_clean();incomplete=[];peers=[]
         for device in devices:
             completion=json.load(syncthing_request("/rest/db/completion",{"device":device}))
             value=float(completion.get("completion",0.0));need=int(completion.get("needItems",0) or 0)
-            state=completion.get("remoteState","unknown")
-            if value<100.0 or need or state not in ("valid",""):
-                incomplete.append(f"{device[:7]}={value:.2f}%/{need} items/{state}")
+            peers.append((device,round(value,6),need,completion.get("needBytes")))
+            if value<100.0 or need:incomplete.append(f"{device[:7]}={value:.2f}%/{need}")
+        signature=(data.get("state"),int(data.get("needTotalItems",0) or 0),int(data.get("needBytes",0) or 0),tuple(peers))
+        if signature!=last_signature:last_signature=signature;last_progress=time.monotonic()
         if clean and not incomplete:
             if stable is None:stable=time.monotonic()
-            if time.monotonic()-stable>=stable_seconds:
-                syncthing_request("/rest/db/scan",method="POST").read()
-                confirm,_=syncthing_status_clean()
-                if confirm:return
-                stable=None
-        else:
-            stable=None
-            last_reason=(f"local={data.get('state')} needItems={data.get('needTotalItems',0)} "
-                         f"needBytes={data.get('needBytes',0)} pullErrors={data.get('pullErrors',0)}")
-            if incomplete:last_reason+=", peers="+", ".join(incomplete)
+            if time.monotonic()-stable>=stable_seconds:return
+        else:stable=None;last_reason=f"local={data}, peers={incomplete}"
+        if time.monotonic()-last_progress>=idle_timeout:
+            raise RuntimeError(f"Syncthing cluster made no observable progress for {idle_timeout}s: {last_reason}")
         time.sleep(2)
-    raise RuntimeError(f"Syncthing cluster did not converge within {timeout}s ({last_reason})")
 
-def syncthing_wait(timeout=300):
-    # Lifecycle correctness is established by the exact handover generation and
-    # snapshot digest. Waiting for every configured Syncthing device can block on
-    # an unrelated offline/paused/stale device and adds no integrity guarantee.
-    return syncthing_wait_local(timeout)
+def syncthing_wait(idle_timeout=300):
+    return syncthing_wait_local(idle_timeout)
 
 def ensure_dependencies(name=None):
     if name and run(["systemctl","cat",unit(name)],check=False,capture=True).returncode!=0:raise RuntimeError(f"{unit(name)} is not installed; rebuild NixOS")
@@ -400,9 +395,200 @@ def atomic_mirror(src: Path, dst: Path):
     temp.rename(dst)
     shutil.rmtree(old, ignore_errors=True)
 
+def runtime_backup_unit(name):
+    return f"minecraft-runtime-backup-{name}.service"
+
+def runtime_backup_folder(name):
+    return BACKUPS/local_node_name()/name/"runtime"
+
+def rcon_settings(runtime):
+    props=runtime/"server.properties"
+    values={}
+    if props.is_file():
+        for raw in props.read_text(errors="replace").splitlines():
+            raw=raw.strip()
+            if raw and not raw.startswith("#") and "=" in raw:
+                key,value=raw.split("=",1);values[key.strip()]=value.strip()
+    if values.get("enable-rcon","").casefold()!="true":
+        raise RuntimeError(f"Reliable online backup requires enable-rcon=true in {props}")
+    password=values.get("rcon.password","")
+    if not password:raise RuntimeError(f"Reliable online backup requires rcon.password in {props}")
+    try:port=int(values.get("rcon.port","25575"))
+    except ValueError:raise RuntimeError(f"Invalid rcon.port in {props}")
+    return password,port
+
+def rcon(runtime,command):
+    password,port=rcon_settings(runtime)
+    executable=shutil.which("mcrcon")
+    if not executable:raise RuntimeError("Reliable online backup requires mcrcon in PATH")
+    result=run([executable,"-H","127.0.0.1","-P",str(port),"-p",password,command],check=False,capture=True)
+    if result.returncode:raise RuntimeError((result.stdout or "").strip() or f"RCON command failed: {command}")
+    return (result.stdout or "").strip()
+
+def fsync_directory(path):
+    descriptor=os.open(path,os.O_RDONLY|getattr(os,"O_DIRECTORY",0))
+    try:os.fsync(descriptor)
+    finally:os.close(descriptor)
+
+def validate_runtime_archive(archive,name):
+    with tarfile.open(archive,"r:gz") as handle:
+        members=handle.getmembers()
+        regular=[member for member in members if member.isfile()]
+        if not regular:raise RuntimeError(f"Runtime backup contains no files: {archive}")
+        prefix=name.rstrip("/")+"/"
+        if any(not (member.name==name or member.name.startswith(prefix)) for member in members):
+            raise RuntimeError(f"Runtime backup contains paths outside {name}")
+        relative=[member.name[len(prefix):] for member in regular if member.name.startswith(prefix)]
+        if not any(path=="level.dat" or re.fullmatch(r"world[^/]*/level\.dat",path) for path in relative):
+            raise RuntimeError(f"Runtime backup contains no level.dat: {archive}")
+        if sum(member.size for member in regular)<=0:raise RuntimeError(f"Runtime backup contains no data: {archive}")
+
+def runtime_backup_once(name):
+    if not active(name):raise RuntimeError(f"Cannot back up {name}: service is not running")
+    runtime=unit_workdir(name)
+    if not runtime.is_dir():raise RuntimeError(f"Runtime directory is missing: {runtime}")
+    folder=runtime_backup_folder(name);folder.mkdir(parents=True,exist_ok=True)
+    target=folder/"running-latest.tar.gz"
+    incoming=folder/f".running-latest.tar.gz.incoming-{os.getpid()}"
+    metadata_target=folder/"running-latest.json"
+    metadata_incoming=folder/f".running-latest.json.incoming-{os.getpid()}"
+    try:
+        rcon(runtime,"save-off")
+        try:
+            rcon(runtime,"save-all flush")
+            with incoming.open("wb") as raw:
+                with tarfile.open(fileobj=raw,mode="w:gz") as archive:archive.add(runtime,arcname=name,recursive=True)
+                raw.flush();os.fsync(raw.fileno())
+            validate_runtime_archive(incoming,name)
+            metadata={"schema":1,"server":name,"runtime":local_node_name(),
+                      "created":dt.datetime.now(dt.timezone.utc).isoformat(),
+                      "archive":target.name,"archive_sha256":archive_sha256(incoming),
+                      "source":str(runtime)}
+            with metadata_incoming.open("w") as handle:
+                json.dump(metadata,handle,sort_keys=True);handle.write("\n");handle.flush();os.fsync(handle.fileno())
+            os.replace(incoming,target);os.replace(metadata_incoming,metadata_target);fsync_directory(folder)
+            print(f"Runtime backup replaced successfully: {target}",flush=True)
+            return target
+        finally:rcon(runtime,"save-on")
+    except Exception:
+        incoming.unlink(missing_ok=True);metadata_incoming.unlink(missing_ok=True)
+        raise
+
+def runtime_backup_loop(name):
+    while active(name):
+        try:
+            runtime_backup_once(name)
+            delay=RUNTIME_BACKUP_INTERVAL
+        except Exception as error:
+            print(f"Runtime backup failed; previous successful backup retained: {error}",file=sys.stderr,flush=True)
+            delay=RUNTIME_BACKUP_RETRY
+        for _ in range(delay):
+            if not active(name):return
+            time.sleep(1)
+
+def start_runtime_backup_loop(name):
+    stop_runtime_backup_loop(name)
+    command=["systemd-run","--user","--unit",runtime_backup_unit(name),
+             "--property=Restart=no","--collect",sys.executable,"-B",str(Path(__file__).resolve()),
+             "runtime-backup-loop",name]
+    result=run(command,check=False,capture=True)
+    if result.returncode:raise RuntimeError(result.stdout.strip() or "Could not start runtime backup loop")
+
+def stop_runtime_backup_loop(name):
+    run(["systemctl","--user","stop",runtime_backup_unit(name)],check=False,capture=True)
+
+def generation_root(name):return ROOT/"generations"/name
+
+def generation_path(name,generation):return generation_root(name)/generation
+
+def fsync_file(path):
+    with path.open("rb") as handle:os.fsync(handle.fileno())
+
+def write_json_atomic(path,payload):
+    path.parent.mkdir(parents=True,exist_ok=True)
+    incoming=path.with_name("."+path.name+f".incoming-{os.getpid()}")
+    with incoming.open("w") as handle:
+        json.dump(payload,handle,sort_keys=True);handle.write("\n");handle.flush();os.fsync(handle.fileno())
+    os.replace(incoming,path);fsync_directory(path.parent)
+
+def archive_sha256(path):
+    digest=hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda:handle.read(1024*1024),b""):digest.update(chunk)
+    return digest.hexdigest()
+
+def publish_generation(name,runtime,reason):
+    generation=uuid.uuid4().hex
+    root=generation_path(name,generation);root.mkdir(parents=True,exist_ok=False)
+    incoming=root/".snapshot.tar.gz.incoming";archive=root/"snapshot.tar.gz";manifest=root/"manifest.json"
+    try:
+        with incoming.open("wb") as raw:
+            with tarfile.open(fileobj=raw,mode="w:gz") as tar:tar.add(runtime,arcname=name,recursive=True)
+            raw.flush();os.fsync(raw.fileno())
+        validate_runtime_archive(incoming,name)
+        digest=archive_sha256(incoming);runtime_digest=manifest_digest(runtime)
+        os.replace(incoming,archive);fsync_directory(root)
+        payload={"schema":1,"complete":True,"server":name,"generation":generation,
+                 "publisher":local_node_name(),"created":dt.datetime.now(dt.timezone.utc).isoformat(),
+                 "reason":reason,"archive":"snapshot.tar.gz","archive_sha256":digest,
+                 "runtime_manifest_sha256":runtime_digest}
+        write_json_atomic(manifest,payload)
+        return payload
+    except Exception:
+        incoming.unlink(missing_ok=True)
+        # An incomplete generation has no manifest and is never selectable.
+        raise
+
+def read_generation(name,generation):
+    root=generation_path(name,generation);manifest=root/"manifest.json";archive=root/"snapshot.tar.gz"
+    if not manifest.is_file() or not archive.is_file():raise RuntimeError(f"Generation is incomplete: {name}/{generation}")
+    data=json.loads(manifest.read_text())
+    if not data.get("complete") or data.get("generation")!=generation or data.get("server")!=name:
+        raise RuntimeError(f"Invalid generation manifest: {manifest}")
+    actual=archive_sha256(archive)
+    if actual!=data.get("archive_sha256"):raise RuntimeError(f"Generation archive checksum mismatch: {archive}")
+    return data,archive
+
+def activate_generation(name,generation,snapshot):
+    data,archive=read_generation(name,generation)
+    parent=snapshot.parent;extract=parent/f".{snapshot.name}.generation-{generation}.incoming"
+    shutil.rmtree(extract,ignore_errors=True)
+    try:
+        safe_extract_backup(archive,extract,name)
+        restored=extract/name
+        if not restored.is_dir():raise RuntimeError(f"Generation archive lacks {name}/")
+        if manifest_digest(restored)!=data.get("runtime_manifest_sha256"):
+            raise RuntimeError(f"Extracted generation manifest mismatch: {name}/{generation}")
+        replace_snapshot_from_backup(restored,snapshot)
+        write_json_atomic(COORD/f"{name}.active-generation.json",data)
+        return data
+    finally:shutil.rmtree(extract,ignore_errors=True)
+
+def generation_backup_choices(name):
+    result=[]
+    root=generation_root(name)
+    if root.is_dir():
+        for manifest in root.glob("*/manifest.json"):
+            try:
+                data,archive=read_generation(name,manifest.parent.name)
+                result.append((archive,data))
+            except Exception:continue
+    return sorted(result,key=lambda item:item[1].get("created",""),reverse=True)
+
+def ensure_syncthing_versioning():
+    item=syncthing_config()
+    if not item:return
+    key,folder,_=item;headers={"X-API-Key":key,"Content-Type":"application/json"}
+    url="http://127.0.0.1:8384/rest/config/folders/"+parse.quote(folder,safe="")
+    current=json.load(request.urlopen(request.Request(url,headers={"X-API-Key":key}),timeout=300))
+    versioning=current.get("versioning") or {}
+    if versioning.get("type"):return
+    payload=json.dumps({"versioning":{"type":"staggered","params":{"cleanInterval":"3600","maxAge":"31536000"},"cleanupIntervalS":3600}}).encode()
+    request.urlopen(request.Request(url,data=payload,method="PATCH",headers=headers),timeout=300).read()
+
 def server_paths(name):return unit_workdir(name),ROOT/"servers"/name/"snapshot",BACKUPS/name,COORD/f"{name}.owner.json"
 def backup(name,runtime):
-    folder=BACKUPS/name;folder.mkdir(parents=True,exist_ok=True); path=folder/dt.datetime.now().strftime(f"{name}-%Y%m%d-%H%M%S.tar.gz")
+    folder=BACKUPS/local_node_name()/name;folder.mkdir(parents=True,exist_ok=True); path=folder/dt.datetime.now().strftime(f"{name}-%Y%m%d-%H%M%S.tar.gz")
     with tarfile.open(path,"w:gz") as t:t.add(runtime,arcname=name)
     for old in sorted(folder.glob(f"{name}-*.tar.gz"),key=lambda p:p.stat().st_mtime,reverse=True)[10:]:old.unlink()
 def unit_workdir(name):
@@ -567,15 +753,22 @@ def wait_for_handover(name,previous_generation=None,expected_generation=None,idl
         time.sleep(2)
 
 def replace_snapshot_from_backup(restored,snapshot):
-    incoming=snapshot.with_name(snapshot.name+".restore-incoming");old=snapshot.with_name(snapshot.name+".restore-old")
-    shutil.rmtree(incoming,ignore_errors=True);shutil.rmtree(old,ignore_errors=True)
+    incoming=snapshot.with_name(snapshot.name+".restore-incoming")
+    old=snapshot.with_name(snapshot.name+".restore-old")
+    # Recover a crash that occurred after snapshot -> old but before incoming -> snapshot.
+    if not snapshot.exists() and old.exists():old.rename(snapshot)
+    shutil.rmtree(incoming,ignore_errors=True)
+    if old.exists() and snapshot.exists():shutil.rmtree(old,ignore_errors=True)
     shutil.copytree(restored,incoming,symlinks=True)
-    if snapshot.exists():snapshot.rename(old)
-    try:incoming.rename(snapshot)
+    fsync_directory(incoming.parent)
+    if snapshot.exists():snapshot.rename(old);fsync_directory(snapshot.parent)
+    try:incoming.rename(snapshot);fsync_directory(snapshot.parent)
     except Exception:
-        if old.exists() and not snapshot.exists():old.rename(snapshot)
+        if old.exists() and not snapshot.exists():old.rename(snapshot);fsync_directory(snapshot.parent)
         raise
-    shutil.rmtree(old,ignore_errors=True)
+    # Old active tree is deleted only after the new tree is durably named and the
+    # immutable generation/safety backup already exists.
+    shutil.rmtree(old,ignore_errors=True);fsync_directory(snapshot.parent)
 
 def prepare_peers_for_sync():
     failures=[]
@@ -592,7 +785,7 @@ def prepare_sync_receiver():
 
 def safety_backup(name,source,kind):
     if not source.is_dir() or not any(source.iterdir()):return None
-    folder=BACKUPS/name;folder.mkdir(parents=True,exist_ok=True)
+    folder=BACKUPS/local_node_name()/name;folder.mkdir(parents=True,exist_ok=True)
     target=folder/f"{name}-{kind}-{dt.datetime.now().strftime('%Y%m%d-%H%M%S')}.tar.gz"
     with tarfile.open(target,"w:gz") as archive:archive.add(source,arcname=name,recursive=True)
     print(f"Safety backup created: {target}");return target
@@ -628,12 +821,14 @@ def start(name=None,force=False):
             generation=match.group(1) if match else None
             expected[remote_name]=(old,generation)
         if remote_servers:
-            deadline=time.time()+240
-            while time.time()<deadline:
+            last_text=None;last_progress=time.monotonic();idle_timeout=300
+            while True:
                 _,_,text,_=query_group([address],["status","--machine"])
                 if text=="stopped":break
+                if text!=last_text:last_text=text;last_progress=time.monotonic()
+                elif time.monotonic()-last_progress>=idle_timeout:
+                    raise RuntimeError(f"Peer {label} made no stop/handover progress for {idle_timeout}s; status={text!r}")
                 time.sleep(1)
-            else:raise RuntimeError(f"Peer {label} did not finish stop/sync handover")
     print("Waiting for the verified handover snapshot to settle locally...")
     old,wanted=expected.get(name,((read_handover(name) or {}).get("generation"),None))
     if name in expected:wait_for_handover(name,old,wanted)
@@ -644,6 +839,10 @@ def start(name=None,force=False):
         safety_backup(name,snapshot,"pre-handover-migration");write_handover(name,snapshot,"format-migration")
         syncthing_wait_local()
     record=validate_handover(name,snapshot,wanted)
+    generation=record.get("generation")
+    if generation:
+        activate_generation(name,generation,snapshot)
+        record=validate_handover(name,snapshot,wanted)
     safety_backup(name,snapshot,"pre-start-snapshot")
     print("Pausing Syncthing before acquiring runtime ownership...");syncthing_pause();CRITICAL=True
     try:
@@ -656,18 +855,24 @@ def start(name=None,force=False):
         r=run(["sudo","systemctl","start",unit(name)],check=False,capture=True)
         if r.returncode:raise RuntimeError(r.stdout.strip() or f"Failed to start {unit(name)}")
         port=port_for(name);print(f"Waiting for '{name}' to listen on TCP {port}...")
-        for elapsed in range(180):
+        last_signature=None;last_progress=time.monotonic();idle_timeout=300
+        while True:
             failure=unit_failure(name)
             if failure:raise RuntimeError(failure)
-            if active(name) and port_busy(port):
+            is_active=active(name);is_busy=port_busy(port);signature=(is_active,is_busy)
+            if signature!=last_signature:last_signature=signature;last_progress=time.monotonic()
+            if is_active and is_busy:
                 domain=ddns_update();public=public_ipv4();CRITICAL=False
                 print(f"Minecraft server '{name}' started on port {port}")
                 print(f"Router target: {FLOATING_IP}:{port}")
                 if public:print(f"Public address: {public}:{port}")
                 if domain:print(f"Friend address: {domain}.duckdns.org:{port}")
+                start_runtime_backup_loop(name)
+                print(f"Live runtime backup: immediately, then every {RUNTIME_BACKUP_INTERVAL//60} minutes after each success.")
                 print("Syncthing is paused until the server is stopped and snapshotted.");return
+            if time.monotonic()-last_progress>=idle_timeout:
+                raise RuntimeError(f"{name} made no startup progress for {idle_timeout}s (active={is_active}, port_busy={is_busy})")
             time.sleep(1)
-        raise RuntimeError(f"{name} did not listen on TCP {port} within 180 seconds")
     except Exception:
         run(["sudo","systemctl","stop",unit(name)],check=False)
         try:owner.unlink()
@@ -685,17 +890,25 @@ def stop(name=None,remote=False):
     ensure_dependencies(name);runtime,snapshot,_,owner=server_paths(name);CRITICAL=True
     print("Keeping Syncthing paused while stopping and snapshotting...");syncthing_pause()
     try:
+        stop_runtime_backup_loop(name)
         run(["sudo","systemctl","stop",unit(name)])
-        deadline=time.time()+180
-        while active(name) and time.time()<deadline:time.sleep(1)
-        if active(name):raise RuntimeError(f"{name} did not stop within 180 seconds")
+        last_state=None;last_progress=time.monotonic()
+        while active(name):
+            state=run(["systemctl","show",unit(name),"-p","ActiveState","-p","SubState","--value"],check=False,capture=True).stdout.strip()
+            if state!=last_state:last_state=state;last_progress=time.monotonic()
+            elif time.monotonic()-last_progress>=300:raise RuntimeError(f"{name} made no shutdown progress for 300s; state={state!r}")
+            time.sleep(1)
         backup(name,runtime);safety_backup(name,snapshot,"pre-stop-snapshot")
+        generation=publish_generation(name,runtime,"clean-stop")
         atomic_mirror(runtime,snapshot);verify_identical(runtime,snapshot,"stopped snapshot")
         record=write_handover(name,snapshot,"clean-stop")
+        record.update({"generation":generation["generation"],"generation_archive_sha256":generation["archive_sha256"],"publisher":generation["publisher"]})
+        write_json_atomic(handover_path(name),record)
         if not running_servers():network_restore()
         try:owner.unlink()
         except FileNotFoundError:pass
-        print("Resuming Syncthing and publishing the verified snapshot...")
+        print("Resuming Syncthing and publishing the immutable verified generation...")
+        ensure_syncthing_versioning()
         syncthing_resume()
         if remote:
             syncthing_wait_local()
@@ -712,24 +925,32 @@ def stop(name=None,remote=False):
         raise
 
 def backup_choices(name):
-    folder=BACKUPS/name
-    if not folder.is_dir():return []
-    return sorted(folder.glob(f"{name}-*.tar.gz"),key=lambda item:item.stat().st_mtime,reverse=True)
+    choices=[]
+    folder=BACKUPS
+    if folder.is_dir():choices.extend(folder.glob(f"*/{name}/**/*.tar.gz"))
+    root=generation_root(name)
+    if root.is_dir():
+        for manifest in root.glob("*/manifest.json"):
+            try:_,archive=read_generation(name,manifest.parent.name);choices.append(archive)
+            except Exception:continue
+    return sorted(set(choices),key=lambda item:item.stat().st_mtime,reverse=True)
 
 def select_backup(name,requested=None):
     choices=backup_choices(name)
     if requested:
         candidate=Path(requested).expanduser().resolve()
         if candidate not in [item.resolve() for item in choices]:
-            raise RuntimeError(f"Backup is not in {BACKUPS/name}: {candidate}")
+            raise RuntimeError(f"Backup/generation is not a validated restore point for {name}: {candidate}")
         return candidate
-    if not choices:raise RuntimeError(f"No backups exist for {name} in {BACKUPS/name}")
+    if not choices:raise RuntimeError(f"No validated backups or generations exist for {name}")
     if not sys.stdin.isatty():raise RuntimeError("Specify --backup when restore is non-interactive")
-    print(f"Choose a backup to restore for {name}:")
+    print(f"Choose a backup or immutable generation to restore for {name}:")
     print("  [E] Exit")
     for index,item in enumerate(choices,1):
         stamp=dt.datetime.fromtimestamp(item.stat().st_mtime).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
-        print(f"  [{index}] {item.name}  ({stamp}, {item.stat().st_size/1024/1024:.1f} MiB)")
+        try:label=str(item.relative_to(ROOT))
+        except ValueError:label=str(item)
+        print(f"  [{index}] {label}  ({stamp}, {item.stat().st_size/1024/1024:.1f} MiB)")
     while True:
         answer=input("Selection: ").strip()
         if answer.casefold()=="e":raise SystemExit(0)
@@ -827,7 +1048,7 @@ def on_signal(sig,frame):
     if CRITICAL:print("\nCritical save/transfer continues; interrupt ignored.",file=sys.stderr);return
     raise KeyboardInterrupt
 def main():
-    p=argparse.ArgumentParser();p.add_argument("action",nargs="?",default="toggle",choices=["toggle","start","stop","restore","status","logs","takeover","list","release-network","menu-status","prepare-sync"]);p.add_argument("server",nargs="?");p.add_argument("--machine",action="store_true");p.add_argument("--remote",action="store_true");p.add_argument("--backup");a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument("action",nargs="?",default="toggle",choices=["toggle","start","stop","restore","status","logs","takeover","list","release-network","menu-status","prepare-sync","runtime-backup-once","runtime-backup-loop"]);p.add_argument("server",nargs="?");p.add_argument("--machine",action="store_true");p.add_argument("--remote",action="store_true");p.add_argument("--backup");a=p.parse_args()
     for d in (ROOT,RUNTIME_ROOT,BACKUPS,COORD):d.mkdir(parents=True,exist_ok=True)
     for sig in (signal.SIGINT,signal.SIGTERM,signal.SIGHUP):signal.signal(sig,on_signal)
     # Machine status is a read-only peer probe. It must remain available while
@@ -835,6 +1056,10 @@ def main():
     # misreported as an unreachable peer.
     if a.action=="status" and a.machine:return machine_status()
     if a.action=="menu-status":return menu_status()
+    if a.action=="runtime-backup-once":
+        name=select_server(a.server,"back up");runtime_backup_once(name);return 0
+    if a.action=="runtime-backup-loop":
+        name=select_server(a.server,"back up");runtime_backup_loop(name);return 0
     if a.action=="prepare-sync":
         with LOCK.open("w") as lock:
             try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
