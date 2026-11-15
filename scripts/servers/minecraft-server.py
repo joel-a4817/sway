@@ -506,13 +506,21 @@ def write_restore_phase(name,phase,**values):
 def recover_restore_transaction(name):
     journal=restore_journal_path(name)
     if not journal.is_file():return
-    data=json.loads(journal.read_text());rollback=Path(data.get("rollback",""));snapshot=ROOT/"servers"/name/"snapshot";runtime=unit_workdir(name)
+    try:data=json.loads(journal.read_text())
+    except (OSError,ValueError) as error:raise RuntimeError(f"Invalid restore journal {journal}: {error}") from error
+    expected_stage=LOCAL_STATE/f".{name}.restore-stage"
+    expected_rollback=LOCAL_STATE/f".{name}.restore-rollback"
+    if data.get("schema")!=1 or data.get("server")!=name:
+        raise RuntimeError(f"Restore journal identity mismatch: {journal}")
+    stage=Path(data.get("stage",""));rollback=Path(data.get("rollback",""))
+    if stage!=expected_stage or rollback!=expected_rollback:
+        raise RuntimeError(f"Restore journal contains unsafe paths: {journal}")
+    snapshot=ROOT/"servers"/name/"snapshot";runtime=unit_workdir(name)
     if active(name):raise RuntimeError(f"Restore recovery required for {name}, but service is running")
     if data.get("phase") not in ("committed","replicated") and rollback.is_dir():
         replace_snapshot_from_backup(rollback,snapshot);atomic_mirror(snapshot,runtime);verify_identical(snapshot,runtime,"restore crash rollback")
-    journal.unlink(missing_ok=True)
-    stage=Path(data.get("stage",""));shutil.rmtree(stage,ignore_errors=True);shutil.rmtree(rollback,ignore_errors=True)
-
+    journal.unlink(missing_ok=True);fsync_directory(journal.parent)
+    shutil.rmtree(stage,ignore_errors=True);shutil.rmtree(rollback,ignore_errors=True)
 def verify_backup_receiver(owner,name,generation,digest,idle_timeout=300):
     archive=BACKUPS/owner/name/"runtime"/"generations"/generation/"backup.tar.gz"
     manifest=archive.parent/"manifest.json";last=None;progress=time.monotonic()
