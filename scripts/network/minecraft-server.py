@@ -90,7 +90,7 @@ def resolved_peer_groups():
     return resolved
 
 def ssh(address,args):
-    return run(["ssh","-i",str(HOME/".ssh/minecraft_peers"),"-o","IdentitiesOnly=yes","-o","StrictHostKeyChecking=accept-new","-o","BatchMode=yes","-o","ConnectTimeout=4",address,"/home/joel/.config/sway/scripts/network/minecraft-server.py",*args],check=False,capture=True,timeout=300)
+    return run(["ssh","-i",str(HOME/".ssh/minecraft_peers"),"-o","IdentitiesOnly=yes","-o","StrictHostKeyChecking=accept-new","-o","BatchMode=yes","-o","ConnectTimeout=4",address,"/home/joel/.config/sway/scripts/network/minecraft-server.py",*args],check=False,capture=True)
 def query_group(addresses,args):
     failures=[]
     for address in addresses:
@@ -166,14 +166,17 @@ def syncthing_config():
             devices=[item.get("id") for item in folder.findall("device") if item.get("id")]
             return key,folder.get("id"),devices
     return None
-def syncthing_request(path,params=None,method="GET"):
+def syncthing_request(path,params=None,method="GET",idle_timeout=300):
     item=syncthing_config()
     if not item:raise RuntimeError("Configure ~/minecraft-server as its own Syncthing folder")
     key,folder,_=item;headers={"X-API-Key":key};query=dict(params or {})
     query.setdefault("folder",folder)
     url="http://127.0.0.1:8384"+path
     if query:url+="?"+parse.urlencode(query)
-    return request.urlopen(request.Request(url,method=method,headers=headers),timeout=10)
+    try:
+        return request.urlopen(request.Request(url,method=method,headers=headers),timeout=idle_timeout)
+    except TimeoutError as error:
+        raise RuntimeError(f"Syncthing API made no socket progress for {idle_timeout}s during {method} {path}") from error
 
 def syncthing_set_paused(paused):
     item=syncthing_config()
@@ -181,10 +184,10 @@ def syncthing_set_paused(paused):
     key,folder,_=item;headers={"X-API-Key":key,"Content-Type":"application/json"}
     url="http://127.0.0.1:8384/rest/config/folders/"+parse.quote(folder,safe="")
     payload=json.dumps({"paused":bool(paused)}).encode()
-    request.urlopen(request.Request(url,data=payload,method="PATCH",headers=headers),timeout=10).read()
+    request.urlopen(request.Request(url,data=payload,method="PATCH",headers=headers),timeout=300).read()
     end=time.time()+30
     while time.time()<end:
-        current=json.load(request.urlopen(request.Request(url,headers={"X-API-Key":key}),timeout=10))
+        current=json.load(request.urlopen(request.Request(url,headers={"X-API-Key":key}),timeout=300))
         if bool(current.get("paused",False))==bool(paused):return
         time.sleep(.25)
     raise RuntimeError("Syncthing folder did not "+("pause" if paused else "resume")+" within 30 seconds")
@@ -203,18 +206,26 @@ def syncthing_status_clean():
            int(data.get("needBytes",0))==0 and int(data.get("pullErrors",0))==0)
     return clean,data
 
-def syncthing_wait_local(timeout=300,stable_seconds=4):
-    """Wait until this device has scanned and applied everything it currently knows."""
+def syncthing_wait_local(idle_timeout=300,stable_seconds=4):
+    """Wait until local Syncthing is clean; fail only after no observable progress."""
     syncthing_request("/rest/db/scan",method="POST").read()
-    end=time.monotonic()+timeout;stable=None;last={}
-    while time.monotonic()<end:
+    stable=None;last={};last_signature=None;last_progress=time.monotonic()
+    while True:
         clean,last=syncthing_status_clean()
+        signature=(last.get("state"),int(last.get("needTotalItems",0) or 0),
+                   int(last.get("needBytes",0) or 0),int(last.get("pullErrors",0) or 0),
+                   int(last.get("localFiles",0) or 0),int(last.get("localBytes",0) or 0),
+                   int(last.get("globalFiles",0) or 0),int(last.get("globalBytes",0) or 0),
+                   last.get("sequence"),last.get("remoteSequence"))
+        if signature!=last_signature:
+            last_signature=signature;last_progress=time.monotonic()
         if clean:
             if stable is None:stable=time.monotonic()
             if time.monotonic()-stable>=stable_seconds:return
         else:stable=None
+        if time.monotonic()-last_progress>=idle_timeout:
+            raise RuntimeError(f"Local Syncthing made no observable progress for {idle_timeout}s: {last}")
         time.sleep(2)
-    raise RuntimeError(f"Local Syncthing index did not settle within {timeout}s: {last}")
 
 def syncthing_wait_cluster(timeout=300,stable_seconds=4):
     """Require local cleanliness and 100% completion on every configured peer."""
@@ -536,15 +547,24 @@ def validate_handover(name,snapshot,expected_generation=None):
         raise RuntimeError("Snapshot content does not match its handover digest")
     return record
 
-def wait_for_handover(name,previous_generation=None,expected_generation=None,timeout=300):
-    end=time.monotonic()+timeout;last=None
-    while time.monotonic()<end:
-        syncthing_wait_local(timeout=min(60,max(5,int(end-time.monotonic()))),stable_seconds=2)
+def wait_for_handover(name,previous_generation=None,expected_generation=None,idle_timeout=300):
+    last=None;last_signature=None;last_progress=time.monotonic()
+    while True:
+        syncthing_wait_local(idle_timeout=idle_timeout,stable_seconds=2)
         record=read_handover(name);last=record
+        snapshot=ROOT/"servers"/name/"snapshot"
+        digest=None
+        if snapshot.is_dir():
+            try:digest=manifest_digest(snapshot)
+            except (OSError,RuntimeError):digest=None
+        signature=((record or {}).get("generation"),(record or {}).get("snapshot_sha256"),digest)
+        if signature!=last_signature:
+            last_signature=signature;last_progress=time.monotonic()
         if record and record.get("generation")!=previous_generation:
             if not expected_generation or record.get("generation")==expected_generation:return record
+        if time.monotonic()-last_progress>=idle_timeout:
+            raise RuntimeError(f"No handover or snapshot progress for {idle_timeout}s for {name}; last={last}")
         time.sleep(2)
-    raise RuntimeError(f"Timed out waiting for new handover generation for {name}; last={last}")
 
 def replace_snapshot_from_backup(restored,snapshot):
     incoming=snapshot.with_name(snapshot.name+".restore-incoming");old=snapshot.with_name(snapshot.name+".restore-old")
