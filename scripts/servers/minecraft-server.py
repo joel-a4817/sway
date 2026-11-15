@@ -15,6 +15,9 @@ DDNS_ENV=HOME/".config/minecraft-server/ddns.env"
 CRITICAL=False
 RUNTIME_BACKUP_INTERVAL=int(os.environ.get("MINECRAFT_RUNTIME_BACKUP_INTERVAL","300"))
 RUNTIME_BACKUP_RETRY=int(os.environ.get("MINECRAFT_RUNTIME_BACKUP_RETRY","60"))
+RUNTIME_BACKUP_KEEP=int(os.environ.get("MINECRAFT_RUNTIME_BACKUP_KEEP","12"))
+TRANSITION_BACKUP_KEEP=int(os.environ.get("MINECRAFT_TRANSITION_BACKUP_KEEP","2"))
+GENERATION_KEEP=int(os.environ.get("MINECRAFT_GENERATION_KEEP","3"))
 
 def run(cmd,check=True,capture=False,timeout=None):
     return subprocess.run(cmd,check=check,text=True,stdout=subprocess.PIPE if capture else None,stderr=subprocess.STDOUT if capture else None,timeout=timeout)
@@ -544,7 +547,7 @@ def verify_runtime_backup_on_peers(name,data):
         if not ok:failures.append(f"{label}: {'; '.join(attempts)}")
     if failures:raise RuntimeError("Runtime backup is locally valid but peer replication is unverified: "+"; ".join(failures))
 
-def prune_runtime_backups(name,keep=144):
+def prune_runtime_backups(name,keep=RUNTIME_BACKUP_KEEP):
     root=runtime_backup_folder(name)/"generations"
     valid=[]
     if root.is_dir():
@@ -554,6 +557,41 @@ def prune_runtime_backups(name,keep=144):
           if archive.is_file() and data.get("complete") and data.get("archive_sha256")==archive_sha256(archive):valid.append((data.get("created",""),manifest.parent))
         except Exception:continue
     for _,folder in sorted(valid,reverse=True)[keep:]:shutil.rmtree(folder,ignore_errors=True)
+
+def prune_transition_backups(name,keep=TRANSITION_BACKUP_KEEP):
+    root=BACKUPS/local_node_name()/name
+    if not root.is_dir():return
+    for kind in ("stopped-runtime","pre-handover-migration"):
+        folder=root/kind
+        valid=[]
+        if folder.is_dir():
+            for manifest in folder.glob("*/manifest.json"):
+                try:
+                    data=json.loads(manifest.read_text());archive=manifest.parent/"backup.tar.gz"
+                    if archive.is_file() and data.get("complete") and data.get("archive_sha256")==archive_sha256(archive):
+                        valid.append((data.get("created",""),manifest.parent))
+                except Exception:continue
+        for _,old in sorted(valid,reverse=True)[keep:]:shutil.rmtree(old,ignore_errors=True)
+
+def prune_generations(name,keep=GENERATION_KEEP):
+    root=generation_root(name)
+    if not root.is_dir():return
+    protected={(read_handover(name) or {}).get("generation")}
+    valid=[]
+    for manifest in root.glob("*/manifest.json"):
+        try:
+            data,archive=read_generation(name,manifest.parent.name)
+            valid.append((data.get("created",""),manifest.parent))
+        except Exception:continue
+    retained={folder for _,folder in sorted(valid,reverse=True)[:keep]}
+    retained.update(folder for _,folder in valid if folder.name in protected)
+    for _,folder in valid:
+        if folder not in retained:shutil.rmtree(folder,ignore_errors=True)
+
+def prune_backup_storage(name):
+    prune_runtime_backups(name)
+    prune_transition_backups(name)
+    prune_generations(name)
 
 def require_backup_capacity(name):
     usage=shutil.disk_usage(BACKUPS);root=runtime_backup_folder(name)/"generations";sizes=[]
@@ -627,7 +665,7 @@ def runtime_backup_once(name):
         write_json_atomic(root/"manifest.json",data);write_json_atomic(runtime_backup_folder(name)/"current.json",data)
         rcon(runtime,"save-on");guard.unlink(missing_ok=True);verify_runtime_backup_on_peers(name,data)
         data["replicated"]=True;data["replicated_at"]=dt.datetime.now(dt.timezone.utc).isoformat();write_json_atomic(root/"manifest.json",data);write_json_atomic(backup_health_path(name),data)
-        prune_runtime_backups(name);print(f"Runtime backup protected locally and on peers: {archive}",flush=True);return archive
+        prune_backup_storage(name);print(f"Runtime backup protected locally and on peers: {archive}",flush=True);return archive
       except Exception:
         incoming.unlink(missing_ok=True)
         try:rcon(runtime,"save-on")
@@ -784,8 +822,9 @@ def ensure_syncthing_versioning():
     url="http://127.0.0.1:8384/rest/config/folders/"+parse.quote(folder,safe="")
     current=json.load(request.urlopen(request.Request(url,headers={"X-API-Key":key}),timeout=300))
     versioning=current.get("versioning") or {}
-    if versioning.get("type"):return
-    payload=json.dumps({"versioning":{"type":"staggered","params":{"cleanInterval":"3600","maxAge":"31536000"},"cleanupIntervalS":3600}}).encode()
+    wanted={"type":"staggered","params":{"cleanInterval":"3600","maxAge":"604800"},"cleanupIntervalS":3600}
+    if versioning.get("type")==wanted["type"] and versioning.get("params")==wanted["params"] and int(versioning.get("cleanupIntervalS",0) or 0)==3600:return
+    payload=json.dumps({"versioning":wanted}).encode()
     request.urlopen(request.Request(url,data=payload,method="PATCH",headers=headers),timeout=300).read()
 
 def server_paths(name):return unit_workdir(name),ROOT/"servers"/name/"snapshot",BACKUPS/local_node_name()/name,COORD/f"{name}.owner.json"
@@ -1045,7 +1084,6 @@ def start(name=None,force=False):
         print(f"Snapshot verification failed ({error}); recovering immutable generation...")
         activate_generation(name,generation,snapshot,generation_digest)
         record=validate_handover(name,snapshot,wanted)
-    safety_backup(name,snapshot,"pre-start-snapshot")
     print("Pausing Syncthing before acquiring runtime ownership...");syncthing_pause();CRITICAL=True
     try:
         paused=validate_handover(name,snapshot,wanted)
@@ -1103,13 +1141,12 @@ def stop(name=None,remote=False):
           if state!=last_state:last_state=state;last_progress=time.monotonic()
           elif time.monotonic()-last_progress>=300:raise RuntimeError(f"{name} made no shutdown progress for 300s; state={state!r}")
           time.sleep(1)
-        backup(name,runtime);safety_backup(name,snapshot,"pre-stop-snapshot")
         generation=publish_generation(name,runtime,"clean-stop");atomic_mirror(runtime,snapshot);verify_identical(runtime,snapshot,"stopped snapshot")
         record=write_handover(name,snapshot,"clean-stop");record.update({"generation":generation["generation"],"generation_archive_sha256":generation["archive_sha256"],"publisher":generation["publisher"]})
         write_json_atomic(handover_path(name),record)
         if not running_servers():network_restore()
         owner.unlink(missing_ok=True);ensure_syncthing_versioning();syncthing_resume();prepare_peers_for_sync();syncthing_wait_cluster();verify_generation_on_peers(name,generation)
-        CRITICAL=False;print(f"HANDOVER {record['generation']}");print(f"'{name}' stopped, backed up, verified, and replicated.")
+        prune_backup_storage(name);CRITICAL=False;print(f"HANDOVER {record['generation']}");print(f"'{name}' stopped, backed up, verified, and replicated.")
       except Exception:
         CRITICAL=False
         if not running_servers():
@@ -1175,7 +1212,13 @@ def safe_extract_backup(archive,destination,name):
 def restore_backup(name=None,requested=None):
     global CRITICAL
     name=select_server(name,"restore");archive=select_backup(name,requested)
-    if sys.stdin.isatty() and input(f"Restore {name} from {archive.name}? [y/N]: ").strip().casefold() not in ("y","yes"):raise SystemExit(0)
+    if sys.stdin.isatty():
+        print(f"Restore {name} from {archive.name}?");print("  [E] Exit");print("  [1] Restore")
+        while True:
+            confirmation=input("Selection: ").strip().casefold()
+            if confirmation=="e":raise SystemExit(0)
+            if confirmation=="1":break
+            print("Enter E or 1.")
     ensure_dependencies(name);ensure_syncthing_resumed_and_current(cluster=False)
     found,unreachable=remote_state()
     if unreachable:raise RuntimeError("Cannot verify peer(s): "+", ".join(unreachable))
@@ -1190,7 +1233,6 @@ def restore_backup(name=None,requested=None):
       fcntl.flock(backup_lock,fcntl.LOCK_EX)
       try:
         syncthing_pause();write_restore_phase(name,"prepared",stage=str(stage),rollback=str(rollback),archive=str(archive))
-        safety_backup(name,snapshot,"pre-restore-snapshot");safety_backup(name,runtime,"pre-restore-runtime")
         shutil.rmtree(stage,ignore_errors=True);shutil.rmtree(rollback,ignore_errors=True)
         if snapshot.is_dir():shutil.copytree(snapshot,rollback,symlinks=True)
         write_restore_phase(name,"staged",stage=str(stage),rollback=str(rollback),archive=str(archive))
@@ -1201,7 +1243,7 @@ def restore_backup(name=None,requested=None):
         record=write_handover(name,snapshot,"backup-restore");record.update({"generation":generation["generation"],"generation_archive_sha256":generation["archive_sha256"],"publisher":generation["publisher"]});write_json_atomic(handover_path(name),record)
         write_restore_phase(name,"committed",stage=str(stage),rollback=str(rollback),generation=generation["generation"])
         owner.unlink(missing_ok=True);network_restore();syncthing_resume();prepare_peers_for_sync();syncthing_wait_cluster();verify_generation_on_peers(name,generation)
-        write_restore_phase(name,"replicated",stage=str(stage),rollback=str(rollback),generation=generation["generation"])
+        write_restore_phase(name,"replicated",stage=str(stage),rollback=str(rollback),generation=generation["generation"]);prune_backup_storage(name)
       except Exception:
         rollback_ok=False
         try:
@@ -1243,7 +1285,7 @@ def on_signal(sig,frame):
     if CRITICAL:print("\nCritical save/transfer continues; interrupt ignored.",file=sys.stderr);return
     raise KeyboardInterrupt
 def main():
-    p=argparse.ArgumentParser();p.add_argument("action",nargs="?",default="toggle",choices=["toggle","start","stop","restore","status","logs","takeover","list","release-network","menu-status","prepare-sync","runtime-backup-once","runtime-backup-loop","runtime-backup-watchdog","verify-generation","verify-backup"]);p.add_argument("server",nargs="?");p.add_argument("--machine",action="store_true");p.add_argument("--remote",action="store_true");p.add_argument("--backup");p.add_argument("--generation");p.add_argument("--digest");p.add_argument("--owner");a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument("action",nargs="?",default="toggle",choices=["toggle","start","stop","restore","status","logs","takeover","list","release-network","menu-status","prepare-sync","prune-storage","runtime-backup-once","runtime-backup-loop","runtime-backup-watchdog","verify-generation","verify-backup"]);p.add_argument("server",nargs="?");p.add_argument("--machine",action="store_true");p.add_argument("--remote",action="store_true");p.add_argument("--backup");p.add_argument("--generation");p.add_argument("--digest");p.add_argument("--owner");a=p.parse_args()
     for d in (ROOT,RUNTIME_ROOT,BACKUPS,COORD,LOCAL_STATE):d.mkdir(parents=True,exist_ok=True)
     for sig in (signal.SIGINT,signal.SIGTERM,signal.SIGHUP):signal.signal(sig,on_signal)
     # Machine status is a read-only peer probe. It must remain available while
@@ -1251,6 +1293,11 @@ def main():
     # misreported as an unreachable peer.
     if a.action=="status" and a.machine:return machine_status()
     if a.action=="menu-status":return menu_status()
+    if a.action=="prune-storage":
+        name=select_server(a.server,"prune storage for")
+        with server_backup_lock(name).open("a+") as backup_lock:
+            fcntl.flock(backup_lock,fcntl.LOCK_EX);prune_backup_storage(name)
+        print(f"Pruned retained backup storage for {name}.");return 0
     if a.action=="runtime-backup-once":
         name=select_server(a.server,"back up");runtime_backup_once(name);return 0
     if a.action=="runtime-backup-loop":

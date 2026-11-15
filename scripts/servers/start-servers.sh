@@ -76,7 +76,7 @@ else
 fi
 
 printf 'Toggle services [this device: %s]\n' "$THIS_DEVICE"
-printf '%s\n' 'Enter comma-separated numbers. [0] exits.'
+printf '%s\n' 'Enter comma-separated numbers. [E] exits.'
 printf '  [E] Exit\n'
 printf '  [R] Restore Minecraft backup\n'
 if "$IPAD" --status >/dev/null 2>&1; then
@@ -116,7 +116,6 @@ declare -A SEEN=()
 for token in "${tokens[@]}"; do
     token="${token//[[:space:]]/}"
     [[ "$token" =~ ^[0-9]+$ ]] || { printf 'Invalid selection: %s\n' "$token" >&2; exit 2; }
-    ((token == 0)) && exit 0
     ((token >= 1 && token <= ${#SERVERS[@]} + 2)) || { printf 'Selection out of range: %s\n' "$token" >&2; exit 2; }
     [[ -z "${SEEN[$token]:-}" ]] || continue
     SEEN[$token]=1

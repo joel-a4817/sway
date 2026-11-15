@@ -68,8 +68,7 @@ printf '[%d] Update all playlists\n' "$all_choice"
 echo
 read -r -p "Select playlist: " choice
 
-if [[ "$choice" == 0 ]]; then
-    pause_before_close
+if [[ "$choice" =~ ^[Ee]$ ]]; then
     exit 0
 fi
 

@@ -33,6 +33,7 @@ read -rp "Select network: " choice
 if [[ "$choice" =~ ^[Ee]$ ]]; then
     exit 0
 fi
+[[ "$choice" =~ ^[0-9]+$ ]] || { echo "Invalid selection."; exit 1; }
 
 index=$((choice-1))
 

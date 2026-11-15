@@ -239,7 +239,8 @@ case "$selected" in
             labels+=("$label")
         done
         echo; wrap_line "Listening profiles${filter_path:+ / $filter_path}"; echo
-        if [[ -z "$filter_path" ]]; then printf '[0] Exit\n'; else printf '[0] Back\n'; fi
+        print_menu_item E 'Exit'
+        [[ -n "$filter_path" ]] && print_menu_item B 'Back'
         [[ -z "$filter_path" ]] && print_menu_item 1 'No filter (bypass CamillaDSP)'
         if [[ -z "$filter_path" ]]; then filter_menu_offset=2; else filter_menu_offset=1; fi
         for i in "${!labels[@]}"; do print_menu_item "$((i + filter_menu_offset))" "${labels[i]}"; done
@@ -247,13 +248,14 @@ case "$selected" in
         ((${#labels[@]})) || { [[ -n "$filter_path" ]] || { wrap_line 'No filter folders or YAML files found.' >&2; exit 1; }; }
         while :; do
             read -r -p 'Select: ' answer || exit 0
-            [[ "$answer" =~ ^[0-9]+$ ]] || { wrap_line 'Enter a listed number.'; continue; }
-            number=$((10#$answer))
-            if ((number==0)) && [[ -z "$filter_path" ]]; then exit 0; fi
-            if ((number==1)) && [[ -z "$filter_path" ]]; then normalize_menu_step || exit 1; selected_filter='__no_filter__'; selected_label='No filter (bypass CamillaDSP)'; break 2; fi
-            if ((number==0)) && [[ -n "$filter_path" ]]; then
-                filter_path="$(jq -r '.parent // empty' <<<"$directory")"; continue 2
+            [[ "$answer" =~ ^[Ee]$ ]] && exit 0
+            if [[ "$answer" =~ ^[Bb]$ ]]; then
+                if [[ -n "$filter_path" ]]; then filter_path="$(jq -r '.parent // empty' <<<"$directory")"; continue 2; fi
+                wrap_line 'Back is unavailable at this first step.'; continue
             fi
+            [[ "$answer" =~ ^[0-9]+$ ]] || { wrap_line 'Enter E, B where shown, or a listed number.'; continue; }
+            number=$((10#$answer))
+            if ((number==1)) && [[ -z "$filter_path" ]]; then normalize_menu_step || exit 1; selected_filter='__no_filter__'; selected_label='No filter (bypass CamillaDSP)'; break 2; fi
             if [[ -z "$filter_path" ]] && ((number==${#labels[@]}+2)); then normalize_menu_step || exit 1; flock -u 9; python3 "$TOPOLOGY_SCRIPT" --create-custom-filter; exit $?; fi
             minimum=$filter_menu_offset
             maximum=$((${#labels[@]} + filter_menu_offset - 1))
