@@ -605,6 +605,35 @@ def runtime_backup_unit(name):
 def runtime_backup_folder(name):
     return BACKUPS/local_node_name()/name/"runtime"
 
+def ensure_runtime_rcon(name,runtime):
+    """Repair stale synchronized server.properties before Minecraft starts."""
+    props=runtime/"server.properties"
+    values={}
+    order=[]
+    if props.is_file():
+        for raw in props.read_text(errors="replace").splitlines():
+            if raw and not raw.startswith("#") and "=" in raw:
+                key=raw.split("=",1)[0].strip()
+                if key not in values:order.append(key)
+                values[key]=raw.split("=",1)[1]
+    wanted={
+        "enable-rcon":"true",
+        "rcon.password":f"minecraft-backup-{name}-4817",
+        "rcon.port":str(port_for(name)+1000),
+        "broadcast-rcon-to-ops":"false",
+    }
+    if all(values.get(key)==value for key,value in wanted.items()):return
+    for key in wanted:
+        if key not in order:order.append(key)
+    values.update(wanted)
+    props.parent.mkdir(parents=True,exist_ok=True)
+    temporary=props.with_suffix(".properties.incoming")
+    with temporary.open("w") as handle:
+        for key in order:handle.write(f"{key}={values[key]}\n")
+        handle.flush();os.fsync(handle.fileno())
+    os.replace(temporary,props);fsync_directory(props.parent)
+    print(f"Repaired stale RCON settings in {props}.",flush=True)
+
 def rcon_settings(runtime):
     props=runtime/"server.properties"
     values={}
@@ -894,14 +923,23 @@ def cluster_transition_lock(remote_action=False):
         path=COORD/"cluster.lock"
         with path.open("a+") as handle:
             try:fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB)
-            except BlockingIOError:raise RuntimeError(f"Minecraft transition already in progress through coordinator {coordinator}")
+            except BlockingIOError:
+                print(f"Another Minecraft transition is still finishing through {coordinator}; waiting for recovery...",flush=True)
+                deadline=time.monotonic()+600
+                while True:
+                    try:fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB);break
+                    except BlockingIOError:
+                        if time.monotonic()>=deadline:raise RuntimeError("Minecraft cluster transition did not recover within 10 minutes")
+                        time.sleep(2)
             try:yield
             finally:fcntl.flock(handle,fcntl.LOCK_UN)
         return
     addresses=next((addresses for label,addresses in groups if label==coordinator),None)
     if not addresses:raise RuntimeError(f"No SSH address for Minecraft coordinator {coordinator}")
-    process=None;failure=[]
-    for address in addresses:
+    process=None;failure=[];deadline=time.monotonic()+600;announced=False
+    while process is None:
+      failure=[]
+      for address in addresses:
         command=["ssh","-i",str(HOME/".ssh/minecraft_peers"),"-o","IdentitiesOnly=yes","-o","StrictHostKeyChecking=accept-new","-o","BatchMode=yes","-o","ConnectTimeout=4",address,
                  "mkdir -p ~/minecraft-server/coordination && exec flock -n ~/minecraft-server/coordination/cluster.lock sh -c 'echo LOCKED; cat >/dev/null'"]
         try:
@@ -910,9 +948,16 @@ def cluster_transition_lock(remote_action=False):
         except OSError as error:
             failure.append(f"{address}: {error}");continue
         if line=="LOCKED":process=candidate;break
-        output=line+candidate.communicate(timeout=5)[0]
+        try:output=line+candidate.communicate(timeout=5)[0]
+        except subprocess.TimeoutExpired:
+            candidate.terminate();output=line+candidate.communicate(timeout=5)[0]
         failure.append(f"{address}: {output.strip() or 'cluster lock busy'}")
-    if process is None:raise RuntimeError("Cannot acquire Minecraft cluster lock: "+"; ".join(failure))
+      if process is not None:break
+      if time.monotonic()>=deadline:
+        raise RuntimeError("Minecraft cluster transition did not recover within 10 minutes: "+"; ".join(failure))
+      if not announced:
+        print("Another Minecraft transition is still finishing; waiting for its lock to release and recovery to complete...",flush=True);announced=True
+      time.sleep(2)
     try:yield
     finally:
         try:process.stdin.close()
@@ -1078,6 +1123,7 @@ def start(name=None,force=False):
         paused=validate_handover(name,snapshot,wanted)
         if paused.get("generation")!=record.get("generation"):raise RuntimeError("Handover changed while acquiring ownership")
         atomic_mirror(snapshot,runtime);verify_identical(snapshot,runtime,"pre-start runtime")
+        ensure_runtime_rcon(name,runtime)
         network_prepare();owner.parent.mkdir(parents=True,exist_ok=True)
         write_json_atomic(owner,{"server":name,"host":local_node_name(),"started":dt.datetime.now(dt.timezone.utc).isoformat()})
         run(["sudo","systemctl","reset-failed",unit(name)],check=False,capture=True)
