@@ -255,8 +255,6 @@ def syncthing_wait_cluster(idle_timeout=300,stable_seconds=4):
             raise RuntimeError(f"Syncthing cluster made no observable progress for {idle_timeout}s: {last_reason}")
         time.sleep(2)
 
-def syncthing_wait(idle_timeout=300):
-    return syncthing_wait_local(idle_timeout)
 
 def ensure_dependencies(name=None):
     if name and run(["systemctl","cat",unit(name)],check=False,capture=True).returncode!=0:raise RuntimeError(f"{unit(name)} is not installed; rebuild NixOS")
@@ -696,8 +694,6 @@ def generation_root(name):return ROOT/"generations"/name
 
 def generation_path(name,generation):return generation_root(name)/generation
 
-def fsync_file(path):
-    with path.open("rb") as handle:os.fsync(handle.fileno())
 
 def write_json_atomic(path,payload):
     path.parent.mkdir(parents=True,exist_ok=True)
@@ -780,16 +776,6 @@ def activate_generation(name,generation,snapshot,expected_digest=None):
         return data
     finally:shutil.rmtree(extract,ignore_errors=True)
 
-def generation_backup_choices(name):
-    result=[]
-    root=generation_root(name)
-    if root.is_dir():
-        for manifest in root.glob("*/manifest.json"):
-            try:
-                data,archive=read_generation(name,manifest.parent.name)
-                result.append((archive,data))
-            except Exception:continue
-    return sorted(result,key=lambda item:item[1].get("created",""),reverse=True)
 
 def ensure_syncthing_versioning():
     item=syncthing_config()
@@ -937,7 +923,7 @@ def write_handover(name,snapshot,reason):
     temporary=marker.with_suffix(".json.tmp")
     with temporary.open("w") as handle:
         json.dump(record,handle,sort_keys=True);handle.write("\n");handle.flush();os.fsync(handle.fileno())
-    os.replace(temporary,marker);return record
+    os.replace(temporary,marker);fsync_directory(marker.parent);return record
 
 def validate_handover(name,snapshot,expected_generation=None):
     record=read_handover(name)
@@ -949,24 +935,6 @@ def validate_handover(name,snapshot,expected_generation=None):
         raise RuntimeError("Snapshot content does not match its handover digest")
     return record
 
-def wait_for_handover(name,previous_generation=None,expected_generation=None,idle_timeout=300):
-    last=None;last_signature=None;last_progress=time.monotonic()
-    while True:
-        syncthing_wait_local(idle_timeout=idle_timeout,stable_seconds=2)
-        record=read_handover(name);last=record
-        snapshot=ROOT/"servers"/name/"snapshot"
-        digest=None
-        if snapshot.is_dir():
-            try:digest=manifest_digest(snapshot)
-            except (OSError,RuntimeError):digest=None
-        signature=((record or {}).get("generation"),(record or {}).get("snapshot_sha256"),digest)
-        if signature!=last_signature:
-            last_signature=signature;last_progress=time.monotonic()
-        if record and record.get("generation")!=previous_generation:
-            if not expected_generation or record.get("generation")==expected_generation:return record
-        if time.monotonic()-last_progress>=idle_timeout:
-            raise RuntimeError(f"No handover or snapshot progress for {idle_timeout}s for {name}; last={last}")
-        time.sleep(2)
 
 def replace_snapshot_from_backup(restored,snapshot):
     incoming=snapshot.with_name(snapshot.name+".restore-incoming")
@@ -1043,21 +1011,40 @@ def start(name=None,force=False):
                 elif time.monotonic()-last_progress>=idle_timeout:
                     raise RuntimeError(f"Peer {label} made no stop/handover progress for {idle_timeout}s; status={text!r}")
                 time.sleep(1)
-    print("Waiting for the verified handover snapshot to settle locally...")
+    # The initial clean wait above covers an ordinary local start. A remote stop
+    # does not return until it has resumed this peer, completed cluster sync and
+    # verified the immutable generation here. Do one final bounded local check
+    # only when a remote handover actually occurred; repeatedly nesting full
+    # Syncthing-settle waits made normal starts appear hung.
     old,wanted=expected.get(name,((read_handover(name) or {}).get("generation"),None))
-    if name in expected:wait_for_handover(name,old,wanted)
-    syncthing_wait_local()
+    if name in expected:
+        print("Verifying the received handover snapshot...")
+        syncthing_wait_local(idle_timeout=120,stable_seconds=2)
     runtime,snapshot,_,owner=server_paths(name)
-    if not snapshot.is_dir() or not any(snapshot.iterdir()):raise RuntimeError(f"Snapshot is missing or empty: {snapshot}")
-    if not handover_path(name).is_file():
+    snapshot.mkdir(parents=True,exist_ok=True)
+    if not any(snapshot.iterdir()):
+        if handover_path(name).is_file():
+            raise RuntimeError(f"Snapshot is empty but has a handover marker: {snapshot}")
+        print(f"Initializing first-run snapshot for {name}.")
+        write_handover(name,snapshot,"first-run-bootstrap")
+    elif not handover_path(name).is_file():
         safety_backup(name,snapshot,"pre-handover-migration");write_handover(name,snapshot,"format-migration")
-        syncthing_wait_local()
+        syncthing_wait_local(idle_timeout=120,stable_seconds=2)
     record=read_handover(name)
     if not record:raise RuntimeError(f"Missing synchronized handover marker for {name}")
     if wanted and record.get("generation")!=wanted:raise RuntimeError("Received a different handover generation")
     generation=record.get("generation")
-    if generation:activate_generation(name,generation,snapshot,record.get("generation_archive_sha256"))
-    record=validate_handover(name,snapshot,wanted)
+    generation_digest=record.get("generation_archive_sha256")
+    try:
+        record=validate_handover(name,snapshot,wanted)
+    except RuntimeError as error:
+        # The synchronized snapshot is normally already exact. Extract the
+        # immutable generation only as corruption/conflict recovery, not on
+        # every ordinary start.
+        if not (generation and generation_digest):raise
+        print(f"Snapshot verification failed ({error}); recovering immutable generation...")
+        activate_generation(name,generation,snapshot,generation_digest)
+        record=validate_handover(name,snapshot,wanted)
     safety_backup(name,snapshot,"pre-start-snapshot")
     print("Pausing Syncthing before acquiring runtime ownership...");syncthing_pause();CRITICAL=True
     try:
