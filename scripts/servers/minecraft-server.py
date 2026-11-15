@@ -1050,19 +1050,19 @@ def ensure_syncthing_resumed_and_current(cluster=False):
     syncthing_resume()
     (syncthing_wait_cluster if cluster else syncthing_wait_local)()
 
-def start(name=None,force=False):
+def start(name=None):
     global CRITICAL
     name=select_server(name,"start");ensure_dependencies(name)
     local=running_servers()
     if local:
         if name in local:print(f"{name} is already running locally.");return
         raise RuntimeError("Another local Minecraft server is already running: "+", ".join(local))
-    if not peer_groups() and not force:raise RuntimeError(f"No peers configured in {PEERS}; refusing an uncoordinated start")
+    if not peer_groups():raise RuntimeError(f"No peers configured in {PEERS}; refusing an uncoordinated start")
     # Resume the receiving folder before requesting a remote stop. Otherwise the
     # publisher and receiver can wait on one another forever.
     ensure_syncthing_resumed_and_current(cluster=False)
     found,unreachable=remote_state()
-    if unreachable and not force:raise RuntimeError("Cannot verify peer(s): "+", ".join(unreachable))
+    if unreachable:raise RuntimeError("Cannot verify peer(s): "+", ".join(unreachable))
     expected={}
     for label,address,names in found:
         remote_servers=[item for item in names if not item.startswith("floating=") and item!="transitioning"]
@@ -1317,7 +1317,7 @@ def on_signal(sig,frame):
     if CRITICAL:print("\nCritical save/transfer continues; interrupt ignored.",file=sys.stderr);return
     raise KeyboardInterrupt
 def main():
-    p=argparse.ArgumentParser();p.add_argument("action",nargs="?",default="toggle",choices=["toggle","start","stop","restore","status","logs","takeover","list","release-network","menu-status","prepare-sync","prune-storage","runtime-backup-once","runtime-backup-loop","runtime-backup-watchdog","verify-generation","verify-backup"]);p.add_argument("server",nargs="?");p.add_argument("--machine",action="store_true");p.add_argument("--remote",action="store_true");p.add_argument("--backup");p.add_argument("--generation");p.add_argument("--digest");p.add_argument("--owner");a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument("action",nargs="?",default="toggle",choices=["toggle","start","stop","restore","status","logs","list","release-network","menu-status","prepare-sync","prune-storage","runtime-backup-once","runtime-backup-loop","runtime-backup-watchdog","verify-generation","verify-backup"]);p.add_argument("server",nargs="?");p.add_argument("--machine",action="store_true");p.add_argument("--remote",action="store_true");p.add_argument("--backup");p.add_argument("--generation");p.add_argument("--digest");p.add_argument("--owner");a=p.parse_args()
     for d in (ROOT,RUNTIME_ROOT,BACKUPS,COORD,LOCAL_STATE):d.mkdir(parents=True,exist_ok=True)
     for sig in (signal.SIGINT,signal.SIGTERM,signal.SIGHUP):signal.signal(sig,on_signal)
     # Machine status is a read-only peer probe. It must remain available while
@@ -1347,7 +1347,7 @@ def main():
             try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
             except BlockingIOError:raise RuntimeError("Cannot prepare sync during a local Minecraft transition")
             return prepare_sync_receiver()
-    mutating=a.action in ("toggle","start","stop","restore","takeover","release-network")
+    mutating=a.action in ("toggle","start","stop","restore","release-network")
     if mutating:syncthing_backup_folder_audit()
     cluster=contextlib.nullcontext() if not mutating else cluster_transition_lock(a.remote)
     with cluster:
@@ -1362,12 +1362,13 @@ def main():
             if running_servers():raise RuntimeError("Cannot release Minecraft service address while a local server is running")
             network_restore();return 0
         requested=parse_names(a.server)
-        if a.action in ("start","takeover"):
+        if a.action=="start":
             if not requested: requested=[select_server(None,"start")]
+            if len(requested)!=1: raise RuntimeError("Exactly one Minecraft server may be started at a time")
             available=set(available_servers())
             unknown=[x for x in requested if x not in available]
             if unknown: raise RuntimeError("Unknown server(s): "+", ".join(unknown))
-            for name in requested: start(name,a.action=="takeover")
+            start(requested[0])
         elif a.action=="stop":
             if not requested: requested=running_servers()
             for name in requested:
@@ -1377,8 +1378,9 @@ def main():
             restore_backup(requested[0] if requested else None,a.backup)
         elif a.action=="toggle":
             if requested:
-                for name in requested:
-                    stop(name) if active(name) else start(name)
+                if len(requested)!=1: raise RuntimeError("Toggle accepts exactly one Minecraft server")
+                name=requested[0]
+                stop(name) if active(name) else start(name)
             else:
                 running=running_servers()
                 if running:
