@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import argparse, datetime as dt, fcntl, json, os, re, socket, subprocess, sys, uuid, urllib.request, urllib.parse, xml.etree.ElementTree as ET
+import argparse, datetime as dt, fcntl, json, os, re, subprocess, sys, uuid, urllib.request, urllib.parse, xml.etree.ElementTree as ET
 from pathlib import Path
 H=Path.home(); STATE=Path(os.environ.get('MINECRAFT_STATE_ROOT',H/'minecraft-server')); BACK=Path(os.environ.get('MINECRAFT_BACKUP_ROOT',H/'minecraft-backups')); RUN=Path(os.environ.get('MINECRAFT_RUNTIME_ROOT','/srv/minecraft')); LOCAL=H/'.local/state/minecraft-server'; COORD=STATE/'coordination'; NIX_CANDIDATES=sorted((H/'nixos').glob('*/minecraft.nix')); NIX=NIX_CANDIDATES[0] if len(NIX_CANDIDATES)==1 else H/'nixos/rt4817/minecraft.nix'; MANAGER=H/'.config/sway/scripts/servers/minecraft-server.py'; LOCK=LOCAL/'rename.lock'
 def now():return dt.datetime.now(dt.timezone.utc).isoformat()
@@ -19,7 +19,6 @@ def replace_decl(old,new):
  # readable/static labels such as minecraft-port-forwarding.txt.
  n=re.sub(r'(?<![a-z0-9-])'+re.escape(old)+r'(?![a-z0-9-])',new,n)
  q=NIX.with_suffix(NIX.suffix+'.tmp');q.write_text(n);os.replace(q,NIX)
-def stop(old): cmd([sys.executable,'-B',str(MANAGER),'stop',old])
 def host():
  r=subprocess.run(['tailscale','status','--json'],text=True,capture_output=True,timeout=10)
  if r.returncode!=0:raise RuntimeError('Cannot determine Tailscale MagicDNS identity: '+(r.stderr.strip() or f'exit {r.returncode}'))
@@ -127,7 +126,6 @@ def managed_roots():
  # Complete rename scope. The shared backup roots belonging to other peers are
  # deliberately excluded: each peer may modify only its own backup subtree.
  return [p for p in (H/'nixos',H/'.config/sway',STATE,RUN,BACK/host(),LOCAL) if path_writable(p)]
-def excluded(p):return any(part in ('.git','__pycache__') for part in p.parts)
 def token_pattern(old):return re.compile(r'(?<![A-Za-z0-9-])'+re.escape(old)+r'(?![A-Za-z0-9-])')
 def text_rewrite(p,old,new):
  try:data=p.read_bytes()

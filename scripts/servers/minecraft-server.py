@@ -409,12 +409,21 @@ def ddns_update():
     return domain
 
 def atomic_mirror(src: Path, dst: Path):
+    # Block a live-runtime write before creating or changing any destination
+    # path. This guard must precede even parent-directory setup.
+    is_runtime = str(dst).startswith("/srv/minecraft/")
+    if is_runtime and valid_name(dst.name) and active(dst.name):
+        raise RuntimeError(f"Refusing to overwrite active Minecraft runtime: {dst}")
+
     dst.parent.mkdir(parents=True, exist_ok=True)
 
     # Keep the nix-minecraft WorkingDirectory root in place. The service and
     # lifecycle manager both run as joel:users, so all world data remains
     # directly readable for backup and Syncthing publication.
     if str(dst).startswith("/srv/minecraft/"):
+        # Destructive rsync into a live world is never permitted, even if a
+        # caller regresses or a recovery journal is replayed unexpectedly.
+        # This is the final write barrier immediately before --delete.
         if not dst.exists():
             dst.mkdir(mode=0o2770)
         if not os.access(dst, os.W_OK | os.X_OK):
