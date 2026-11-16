@@ -972,9 +972,11 @@ def activate_generation(name,generation,snapshot,expected_digest=None):
     parent=snapshot.parent;extract=parent/f".{snapshot.name}.generation-{generation}.incoming"
     shutil.rmtree(extract,ignore_errors=True)
     try:
-        safe_extract_backup(archive,extract,name)
-        restored=extract/name
-        if not restored.is_dir():raise RuntimeError(f"Generation archive lacks {name}/")
+        # A generation can legitimately retain the previous top-level server
+        # name after a transactional rename. safe_extract_backup validates that
+        # root against accepted_server_names(name) and returns the actual tree.
+        restored=safe_extract_backup(archive,extract,name)
+        if not restored.is_dir():raise RuntimeError(f"Generation archive has no usable server tree for {name}")
         if manifest_digest(restored)!=data.get("runtime_manifest_sha256"):
             raise RuntimeError(f"Extracted generation manifest mismatch: {name}/{generation}")
         replace_snapshot_from_backup(restored,snapshot)
