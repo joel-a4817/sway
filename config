@@ -21,8 +21,8 @@ set $termid foot
 set $menu wmenu-run
 seat * xcursor_theme Bibata-Modern-Amber 32
 
-exec_always --no-startup-id sh -c 'systemctl --user start graphical-session-pre.target; dbus-update-activation-environment --systemd WAYLAND_DISPLAY SWAYSOCK XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_SESSION_DESKTOP; systemctl --user start --no-block graphical-session.target'
-exec --no-startup-id sh -c 'while [ -S "$SWAYSOCK" ]; do sleep 1; done; systemctl --user stop graphical-session.target; systemctl --user unset-environment SWAYSOCK WAYLAND_DISPLAY'
+exec_always --no-startup-id ~/.config/sway/scripts/sway-session-environment.sh start
+exec --no-startup-id ~/.config/sway/scripts/sway-session-environment.sh watch
 
 exec solaar
 

@@ -32,6 +32,28 @@ case "$mode" in
     ;;
 esac
 
+# Keep the current GTK preference consistent for all applications launched
+# through the shell, Sway, D-Bus, or the systemd user manager.
+case "$mode" in
+  dark)  export GTK_THEME=Adwaita-dark ;;
+  light) export GTK_THEME=Adwaita ;;
+esac
+systemctl --user set-environment GTK_THEME="$GTK_THEME" 2>/dev/null || true
+if [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
+  dbus-update-activation-environment --systemd GTK_THEME 2>/dev/null || true
+fi
+
+# Synchronize the GTK preference for every process launched through the user
+# manager or D-Bus. This is session-wide; no application is special-cased.
+case "$mode" in
+  dark)  export GTK_THEME=Adwaita-dark ;;
+  light) export GTK_THEME=Adwaita ;;
+esac
+systemctl --user set-environment GTK_THEME="$GTK_THEME" 2>/dev/null || true
+if [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
+  dbus-update-activation-environment --systemd GTK_THEME 2>/dev/null || true
+fi
+
 # Ensure D-Bus/systemd-launched applications inherit the live Sway session only.
 if [[ -n "${WAYLAND_DISPLAY:-}" && -n "${SWAYSOCK:-}" ]]; then
   dbus-update-activation-environment --systemd \
