@@ -131,7 +131,6 @@ def main():
       for src,dst,label in moves:
           print(f"- {label}: {src} -> {dst}" if src.exists() else f"- {label}: absent, skip {src}")
       print(f"- patch exact quoted identifier in {MINECRAFT_NIX}")
-      print(f"- patch exact quoted identifier in {MANAGER} (includes first-start port fallback)")
       print(f"- migrate {a.old}.* local state files to {a.new}.* and update exact JSON values")
       print(f"- preserve checksum-bound history under {legacy}; archives are NOT rewritten")
       print(f"- cleanly stop {a.old} through the lifecycle manager if running on either peer")
@@ -146,7 +145,6 @@ def main():
       tx=LOCAL/"rename-transactions"/f"{a.old}-to-{a.new}-{stamp}"
       tx.mkdir(parents=True)
       shutil.copy2(MINECRAFT_NIX,tx/"minecraft.nix.before")
-      shutil.copy2(MANAGER,tx/"minecraft-server.py.before")
       journal={"schema":1,"old":a.old,"new":a.new,"host":socket.gethostname(),"created":dt.datetime.now(dt.timezone.utc).isoformat(),"moves":[]}
       (tx/"transaction.json").write_text(json.dumps(journal,indent=2)+"\n")
       sync_was_active=run(["systemctl","--user","is-active","--quiet","syncthing.service"],False).returncode==0
@@ -154,7 +152,6 @@ def main():
       try:
         if sync_was_active: run(["systemctl","--user","stop","syncthing.service"])
         exact_replace(MINECRAFT_NIX,a.old,a.new)
-        exact_replace(MANAGER,a.old,a.new)
         for src,dst,label in moves:
             if not src.exists(): continue
             dst.parent.mkdir(parents=True,exist_ok=True)
