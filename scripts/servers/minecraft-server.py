@@ -215,13 +215,20 @@ def minecraft_peer_device_ids():
     """Resolve only configured MagicDNS Minecraft peers to Syncthing IDs."""
     ids=[]
     for label,addresses in resolved_peer_groups():
-        address,result,text,failures=query_group(addresses,["syncthing-id"])
-        if result is None or result.returncode:
+        device_id=None;failures=[]
+        for address in addresses:
+            try:result=ssh(address,["syncthing-id"])
+            except (subprocess.TimeoutExpired,OSError) as error:
+                failures.append(f"{address}: {error}");continue
+            text=(result.stdout or "").strip()
+            candidate=next((line.strip() for line in reversed(text.splitlines())
+                            if re.fullmatch(r"[A-Z0-9-]{20,}",line.strip())),None)
+            if result.returncode==0 and candidate:
+                device_id=candidate;break
+            failures.append(f"{address}: {text or 'exit '+str(result.returncode)}")
+        if not device_id:
             detail="; ".join(failures) or f"no usable address for {label}"
             raise RuntimeError(f"Cannot obtain Syncthing ID for Minecraft peer {label}: {detail}")
-        device_id=text.strip()
-        if not re.fullmatch(r"[A-Z0-9-]{20,}",device_id):
-            raise RuntimeError(f"Minecraft peer {label} returned an invalid Syncthing ID: {device_id!r}")
         if device_id not in ids:ids.append(device_id)
     return ids
 
@@ -260,14 +267,16 @@ def syncthing_status_clean():
 def syncthing_wait_local(idle_timeout=120,stable_seconds=4):
     """Wait for local convergence; reset only when outstanding work decreases."""
     syncthing_request("/rest/db/scan",method="POST").read()
-    stable=None;best_need=None;best_bytes=None;last={};last_progress=last_report=time.monotonic()
+    stable=None;previous=None;last={};last_progress=last_report=time.monotonic()
     while True:
         clean,last=syncthing_status_clean()
         need=int(last.get("needTotalItems",0) or 0);need_bytes=int(last.get("needBytes",0) or 0)
-        if best_need is None or need<best_need or need_bytes<best_bytes:
-            best_need=need if best_need is None else min(best_need,need)
-            best_bytes=need_bytes if best_bytes is None else min(best_bytes,need_bytes)
-            last_progress=time.monotonic()
+        state=(last.get("state"),need,need_bytes,int(last.get("pullErrors",0) or 0))
+        if previous is None or state != previous:
+            # Any coherent state transition proves the API and scanner are alive.
+            # Completion still requires idle/zero/error-free below; this watchdog
+            # detects a truly frozen state rather than comparing unrelated minima.
+            previous=state;last_progress=time.monotonic()
         if clean:
             if stable is None:stable=time.monotonic()
             if time.monotonic()-stable>=stable_seconds:return
@@ -293,7 +302,7 @@ def syncthing_wait_cluster(idle_timeout=120,stable_seconds=4):
     if missing:
         raise RuntimeError("Configured Minecraft peer is not a member of the Minecraft Syncthing folder: "+", ".join(x[:7] for x in missing))
     syncthing_request("/rest/db/scan",method="POST").read()
-    stable=None;last_reason="waiting";best={};last_progress=last_report=time.monotonic()
+    stable=None;last_reason="waiting";previous={};last_progress=last_report=time.monotonic()
     while True:
         clean,data=syncthing_status_clean();incomplete=[];peers=[];progressed=False
         for device in devices:
@@ -302,13 +311,9 @@ def syncthing_wait_cluster(idle_timeout=120,stable_seconds=4):
             need=int(completion.get("needItems",0) or 0)
             need_bytes=int(completion.get("needBytes",0) or 0)
             peers.append((device,value,need,need_bytes))
-            previous=best.get(device)
-            if previous is None or value>previous[0]+1e-9 or need<previous[1] or need_bytes<previous[2]:
-                progressed=True
-            if previous is None:
-                best[device]=(value,need,need_bytes)
-            else:
-                best[device]=(max(previous[0],value),min(previous[1],need),min(previous[2],need_bytes))
+            sample=(round(value,9),need,need_bytes)
+            if previous.get(device) != sample:progressed=True
+            previous[device]=sample
             if value<100.0 or need or need_bytes:
                 incomplete.append(f"{device[:7]}={value:.2f}%/{need} items/{need_bytes} bytes")
         if progressed:last_progress=time.monotonic()
@@ -1198,6 +1203,9 @@ def start(name=None):
     global CRITICAL
     name=select_server(name,"start");ensure_dependencies(name)
     local=running_servers()
+    _,_,_,local_owner=server_paths(name)
+    if local_owner.exists() and name not in local:
+        raise RuntimeError(f"Interrupted local stop detected for {name}; run 'minecraft-server stop {name}' to finalize its backup and handover before starting")
     if local:
         if name in local:print(f"{name} is already running locally.");return
         raise RuntimeError("Another local Minecraft server is already running: "+", ".join(local))
@@ -1243,6 +1251,12 @@ def start(name=None):
         if handover_path(name).is_file():
             raise RuntimeError(f"Snapshot is empty but has a handover marker: {snapshot}")
         print(f"Initializing first-run snapshot for {name}.")
+        # Preserve declarative files already materialized by nix-minecraft.
+        # Publishing an empty snapshot and then rsync --delete would otherwise
+        # erase those inputs immediately before the first service start.
+        if runtime.is_dir() and any(runtime.iterdir()):
+            atomic_mirror(runtime,snapshot)
+            verify_identical(runtime,snapshot,"first-run snapshot")
         write_handover(name,snapshot,"first-run-bootstrap")
     elif not handover_path(name).is_file():
         safety_backup(name,snapshot,"pre-handover-migration");write_handover(name,snapshot,"format-migration")
@@ -1308,8 +1322,11 @@ def start(name=None):
 def stop(name=None,remote=False):
     global CRITICAL
     name=select_server(name,"stop")
-    if not active(name):print(f"{name} is already stopped locally.");return
-    ensure_dependencies(name);runtime,snapshot,_,owner=server_paths(name);CRITICAL=False
+    runtime,snapshot,_,owner=server_paths(name)
+    if not active(name) and not owner.exists():print(f"{name} is already stopped locally.");return
+    if not active(name):
+        print(f"{name} is stopped but still has a local ownership record; finalizing its interrupted handover.")
+    ensure_dependencies(name);CRITICAL=False
     LOCAL_STATE.mkdir(parents=True,exist_ok=True)
     print("Stopping live-backup workers and waiting for any active backup to finish...")
     stop_runtime_backup_loop(name)
@@ -1398,7 +1415,7 @@ def restore_backup(name=None,requested=None):
     global CRITICAL
     name=select_server(name,"restore");archive=select_backup(name,requested)
     if sys.stdin.isatty() and input(f"Restore {name} from {archive.name}? [y/N]: ").strip().casefold() not in ("y","yes"):raise SystemExit(0)
-    ensure_dependencies(name);ensure_syncthing_resumed_and_current(cluster=False)
+    ensure_dependencies(name)
     found,unreachable=remote_state()
     if unreachable:raise RuntimeError("Cannot verify peer(s): "+", ".join(unreachable))
     # Restore only the server selected by the user. Stop that server through
@@ -1418,6 +1435,9 @@ def restore_backup(name=None,requested=None):
       result=ssh(address,["stop",name,"--remote"])
       if result.returncode:raise RuntimeError((result.stdout or "").strip() or f"remote stop failed for {name}")
     stop(name)
+    # A selected running server is stopped through the full verified handover.
+    # Only now is it safe to require a resumed, current receive folder.
+    ensure_syncthing_resumed_and_current(cluster=False)
     runtime,snapshot,_,owner=server_paths(name);stage=LOCAL_STATE/f".{name}.restore-stage";rollback=LOCAL_STATE/f".{name}.restore-rollback";CRITICAL=True
     LOCAL_STATE.mkdir(parents=True,exist_ok=True)
     with server_backup_lock(name).open("a+") as backup_lock:
@@ -1537,9 +1557,11 @@ def main():
             if unknown: raise RuntimeError("Unknown server(s): "+", ".join(unknown))
             start(requested[0])
         elif a.action=="stop":
-            if not requested: requested=running_servers()
-            for name in requested:
-                if active(name): stop(name,a.remote)
+            if not requested:
+                requested=running_servers()
+                for candidate in available_servers():
+                    if server_paths(candidate)[3].exists() and candidate not in requested:requested.append(candidate)
+            for name in requested:stop(name,a.remote)
         elif a.action=="restore":
             if len(requested)>1:raise RuntimeError("Restore accepts exactly one server")
             restore_backup(requested[0] if requested else None,a.backup)

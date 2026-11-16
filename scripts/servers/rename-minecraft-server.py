@@ -143,7 +143,10 @@ def exhaustive_plan(old,new):
  for root in managed_roots():
   if not root.exists():continue
   for base,dirs,names in os.walk(root,topdown=True,followlinks=False):
-   bp=Path(base);dirs[:]=[d for d in dirs if d not in ('.git','__pycache__')]
+   bp=Path(base)
+   # Transaction journals are the crash-recovery source of truth. Rewriting
+   # their old/new fields during the rename would destroy rollback identity.
+   dirs[:]=[d for d in dirs if d not in ('.git','__pycache__','rename-transactions')]
    for name in names:
     p=bp/name
     if not p.is_symlink() and p.is_file():files.append(p)
