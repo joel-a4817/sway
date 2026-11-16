@@ -11,11 +11,11 @@ PEERS="$HOME/.config/minecraft-server/peers"
 SSH=(ssh -i "$HOME/.ssh/minecraft_peers" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=4)
 
 mapfile -t SERVERS < <("$MINECRAFT" list)
-# The local kernel hostname is authoritative. Tailscale's JSON may describe a
-# different userspace/network namespace and must not relabel this peer.
-THIS_DEVICE="$(hostname -s 2>/dev/null || true)"
+# Peer identity is the first label of this device's Tailscale MagicDNS name.
+# Both laptops intentionally share the same NixOS/kernel hostname.
+THIS_DEVICE="$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName // empty' | sed 's/\.$//; s/\..*$//' || true)"
 if [[ -z "$THIS_DEVICE" ]]; then
-    printf '%s\n' 'Cannot determine this device hostname.' >&2
+    printf '%s\n' 'Cannot determine this device Tailscale MagicDNS identity.' >&2
     exit 1
 fi
 declare -A LOCAL=()

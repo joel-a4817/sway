@@ -20,7 +20,12 @@ def replace_decl(old,new):
  n=re.sub(r'(?<![a-z0-9-])'+re.escape(old)+r'(?![a-z0-9-])',new,n)
  q=NIX.with_suffix(NIX.suffix+'.tmp');q.write_text(n);os.replace(q,NIX)
 def stop(old): cmd([sys.executable,'-B',str(MANAGER),'stop',old])
-def host():return socket.gethostname().split('.',1)[0]
+def host():
+ r=subprocess.run(['tailscale','status','--json'],text=True,capture_output=True,timeout=10)
+ if r.returncode!=0:raise RuntimeError('Cannot determine Tailscale MagicDNS identity: '+(r.stderr.strip() or f'exit {r.returncode}'))
+ data=json.loads(r.stdout or '{}');dns=((data.get('Self') or {}).get('DNSName') or '').rstrip('.')
+ if not dns:raise RuntimeError('This device has no Tailscale MagicDNS identity')
+ return dns.split('.',1)[0]
 def move_plan(old,new):
  return [(STATE/'servers'/old,STATE/'servers'/new,'synchronized snapshot'),(RUN/old,RUN/new,'runtime'),(STATE/'generations'/old,STATE/'generations'/new,'generations'),(BACK/host()/old,BACK/host()/new,'peer backup directory')]
 def local_file_moves(old,new):
