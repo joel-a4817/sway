@@ -257,28 +257,45 @@ def syncthing_wait_local(idle_timeout=120,stable_seconds=4):
         time.sleep(2)
 
 def syncthing_wait_cluster(idle_timeout=120,stable_seconds=4):
+    """Wait for all peers, resetting the watchdog only on directional progress.
+
+    Syncthing counters can churn or oscillate without transferring the pending
+    data. Only fewer required items/bytes or higher peer completion qualifies.
+    """
     item=syncthing_config()
     if not item:raise RuntimeError("Configure ~/minecraft-server as its own Syncthing folder")
     _,_,devices=item;syncthing_request("/rest/db/scan",method="POST").read()
-    stable=None;last_reason="waiting";last_signature=None;last_progress=last_report=time.monotonic()
+    stable=None;last_reason="waiting";best={};last_progress=last_report=time.monotonic()
     while True:
-        clean,data=syncthing_status_clean();incomplete=[];peers=[]
+        clean,data=syncthing_status_clean();incomplete=[];peers=[];progressed=False
         for device in devices:
             completion=json.load(syncthing_request("/rest/db/completion",{"device":device}))
-            value=float(completion.get("completion",0.0));need=int(completion.get("needItems",0) or 0)
-            peers.append((device,round(value,6),need,completion.get("needBytes")))
-            if value<100.0 or need:incomplete.append(f"{device[:7]}={value:.2f}%/{need}")
-        signature=(data.get("state"),int(data.get("needTotalItems",0) or 0),int(data.get("needBytes",0) or 0),tuple(peers))
-        if signature!=last_signature:last_signature=signature;last_progress=time.monotonic()
+            value=float(completion.get("completion",0.0) or 0.0)
+            need=int(completion.get("needItems",0) or 0)
+            need_bytes=int(completion.get("needBytes",0) or 0)
+            peers.append((device,value,need,need_bytes))
+            previous=best.get(device)
+            if previous is None or value>previous[0]+1e-9 or need<previous[1] or need_bytes<previous[2]:
+                progressed=True
+            if previous is None:
+                best[device]=(value,need,need_bytes)
+            else:
+                best[device]=(max(previous[0],value),min(previous[1],need),min(previous[2],need_bytes))
+            if value<100.0 or need or need_bytes:
+                incomplete.append(f"{device[:7]}={value:.2f}%/{need} items/{need_bytes} bytes")
+        if progressed:last_progress=time.monotonic()
         if clean and not incomplete:
             if stable is None:stable=time.monotonic()
             if time.monotonic()-stable>=stable_seconds:return
-        else:stable=None;last_reason=f"local={data}, peers={incomplete}"
+        else:
+            stable=None
+            last_reason=(f"local={data.get('state')} need={data.get('needTotalItems',0)} items/"
+                         f"{data.get('needBytes',0)} bytes, peers={incomplete}")
         now=time.monotonic()
         if now-last_report>=15:
             print(f"Waiting for Syncthing replication: {last_reason}",flush=True);last_report=now
         if now-last_progress>=idle_timeout:
-            raise RuntimeError(f"Syncthing cluster made no observable progress for {idle_timeout}s: {last_reason}")
+            raise RuntimeError(f"Syncthing peer replication made no forward progress for {idle_timeout}s: {last_reason}")
         time.sleep(2)
 
 
