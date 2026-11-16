@@ -1351,11 +1351,23 @@ def restore_backup(name=None,requested=None):
     ensure_dependencies(name);ensure_syncthing_resumed_and_current(cluster=False)
     found,unreachable=remote_state()
     if unreachable:raise RuntimeError("Cannot verify peer(s): "+", ".join(unreachable))
+    # Restore only the server selected by the user. Stop that server through
+    # the normal lifecycle so RCON save, backup, generation and handover all run.
+    # Never silently stop an unrelated server.
+    local_running=running_servers()
+    unrelated=[x for x in local_running if x!=name]
+    remote_selected=[];remote_unrelated=[]
     for _,address,names in found:
-      for remote_name in [x for x in names if not x.startswith("floating=") and x!="transitioning"]:
-        result=ssh(address,["stop",remote_name,"--remote"])
-        if result.returncode:raise RuntimeError((result.stdout or "").strip() or "remote stop failed")
-    for running in list(running_servers()):stop(running)
+      clean=[x for x in names if not x.startswith("floating=") and x!="transitioning"]
+      if name in clean:remote_selected.append(address)
+      remote_unrelated.extend((address,x) for x in clean if x!=name)
+    if unrelated or remote_unrelated:
+      details=[f"local:{x}" for x in unrelated]+[f"{address}:{x}" for address,x in remote_unrelated]
+      raise RuntimeError("Refusing restore while another server is running: "+", ".join(details))
+    for address in remote_selected:
+      result=ssh(address,["stop",name,"--remote"])
+      if result.returncode:raise RuntimeError((result.stdout or "").strip() or f"remote stop failed for {name}")
+    if active(name):stop(name)
     runtime,snapshot,_,owner=server_paths(name);stage=LOCAL_STATE/f".{name}.restore-stage";rollback=LOCAL_STATE/f".{name}.restore-rollback";CRITICAL=True
     LOCAL_STATE.mkdir(parents=True,exist_ok=True)
     with server_backup_lock(name).open("a+") as backup_lock:

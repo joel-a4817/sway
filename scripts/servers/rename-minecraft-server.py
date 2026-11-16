@@ -85,8 +85,7 @@ def preflight(old,new,moves):
     if old==new or not valid(old) or not valid(new): raise RuntimeError("Names must differ and match [a-z0-9][a-z0-9-]*")
     for f in (MINECRAFT_NIX,MANAGER):
         if not f.is_file(): raise RuntimeError(f"Missing {f}")
-    if active(old) or active(new): raise RuntimeError("Old or new local Minecraft service is active")
-    remote_stopped(old,new)
+    if active(new): raise RuntimeError("The destination server service is already active locally")
     for src,dst,label in moves:
         if dst.exists(): raise RuntimeError(f"Destination already exists for {label}: {dst}")
     if not (ROOT/"servers"/old/"snapshot").is_dir(): raise RuntimeError(f"Missing stopped snapshot: {ROOT/'servers'/old/'snapshot'}")
@@ -94,6 +93,24 @@ def preflight(old,new,moves):
     if trans: raise RuntimeError("Unfinished transaction paths exist: "+", ".join(map(str,trans[:8])))
     if f'"{new}"' in MINECRAFT_NIX.read_text(): raise RuntimeError(f"New name already exists in {MINECRAFT_NIX}")
     if f'"{old}"' not in MINECRAFT_NIX.read_text(): raise RuntimeError(f"Old name is not declared in {MINECRAFT_NIX}")
+
+def stop_selected_for_rename(name,new):
+    manager=HOME/".config/sway/scripts/servers/minecraft-server.py"
+    print(f"\nStopping {name} cleanly if it is running on either peer...")
+    # The lifecycle manager discovers the current owner, executes the normal
+    # RCON save/stop, backup, generation, handover and peer verification path.
+    run([sys.executable,"-B",str(manager),"stop",name])
+    if active(name) or active(new):
+        raise RuntimeError("Old or destination service remains active locally after stop")
+    remote_stopped(name,new)
+
+def rebuild_nixos():
+    host=socket.gethostname().split(".",1)[0]
+    flake=NIXOS
+    if not (flake/"flake.nix").is_file():
+        raise RuntimeError(f"Missing flake: {flake/'flake.nix'}")
+    print(f"\nRebuilding NixOS for {host} from {flake} with --impure...")
+    run(["sudo","nixos-rebuild","switch","--impure","--flake",f"{flake}#{host}"])
 
 def main():
     ap=argparse.ArgumentParser()
@@ -125,13 +142,16 @@ def main():
       print(f"- patch exact quoted identifier in {MANAGER} (includes first-start port fallback)")
       print(f"- migrate {a.old}.* local state files to {a.new}.* and update exact JSON values")
       print(f"- preserve checksum-bound history under {legacy}; archives are NOT rewritten")
+      print(f"- cleanly stop {a.old} through the lifecycle manager if running on either peer")
       print("- stop/restart Syncthing around atomic moves")
+      print(f"- run: sudo nixos-rebuild switch --impure --flake {NIXOS}#{socket.gethostname().split('.',1)[0]}")
       if not a.apply:
           answer=input("\nApply this rename on this peer now? Type RENAME to continue: ").strip()
           if answer != "RENAME":
               print("Cancelled without changes.")
               return
           a.apply=True
+      stop_selected_for_rename(a.old,a.new)
       tx=LOCAL/"rename-transactions"/f"{a.old}-to-{a.new}-{stamp}"
       tx.mkdir(parents=True)
       shutil.copy2(MINECRAFT_NIX,tx/"minecraft.nix.before")
@@ -164,17 +184,25 @@ def main():
         marker.write_text(json.dumps({"old":a.old,"new":a.new,"host":socket.gethostname(),"note":"Historical archives retained byte-for-byte; do not rename archive members or alter manifests."},indent=2)+"\n")
         run([sys.executable,"-m","py_compile",str(MANAGER)])
         if shutil.which("nix-instantiate"): run(["nix-instantiate","--parse",str(MINECRAFT_NIX)])
+        rebuild_nixos()
+        journal["rebuild_complete"]=True
         journal["complete"]=True; (tx/"transaction.json").write_text(json.dumps(journal,indent=2)+"\n")
       except Exception:
         for src,dst,label in reversed(completed):
             if dst.exists() and not src.exists(): src.parent.mkdir(parents=True,exist_ok=True); os.rename(dst,src)
         shutil.copy2(tx/"minecraft.nix.before",MINECRAFT_NIX); shutil.copy2(tx/"minecraft-server.py.before",MANAGER)
+        journal["rolled_back"]=True
+        (tx/"transaction.json").write_text(json.dumps(journal,indent=2)+"\n")
+        print("Rename failed; source and filesystem moves were rolled back.", file=sys.stderr)
+        print("Restoring the previously declared NixOS configuration...", file=sys.stderr)
+        try: rebuild_nixos()
+        except Exception as rollback_error: print(f"WARNING: rollback rebuild also failed: {rollback_error}",file=sys.stderr)
         raise
       finally:
         if sync_was_active: run(["systemctl","--user","start","syncthing.service"],False)
-      print("\nRENAMED LOCALLY WITHOUT REWRITING ANY CHECKSUM-BOUND ARCHIVE.")
-      print("Run the same command on the other peer before starting Minecraft.")
-      print(f"Then rebuild each peer and run: minecraft-server start {a.new}")
+      print("\nRENAMED AND REBUILT LOCALLY WITHOUT REWRITING ANY CHECKSUM-BOUND ARCHIVE.")
+      print("Run the same rename on the other peer before starting Minecraft.")
+      print(f"After both peers complete successfully, run: minecraft-server start {a.new}")
       print(f"Legacy backup/generation history remains at: {legacy}")
       print(f"Rollback record: {tx}")
 if __name__=="__main__":
