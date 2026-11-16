@@ -458,12 +458,19 @@ def archive_transaction(name,source,kind):
     except Exception:
         incoming.unlink(missing_ok=True);raise
 
+def accepted_server_names(name):
+    aliases_file=ROOT/"rename-aliases.json"
+    names={name}
+    try:names.update(json.loads(aliases_file.read_text()).get("aliases",{}).get(name,[]))
+    except Exception:pass
+    return names
+
 def validated_backup(path,name):
     manifest=path.parent/"manifest.json"
     if not manifest.is_file():return False
     try:data=json.loads(manifest.read_text())
     except Exception:return False
-    return bool(data.get("complete") and data.get("server")==name and data.get("archive_sha256")==archive_sha256(path))
+    return bool(data.get("complete") and data.get("server") in accepted_server_names(name) and data.get("archive_sha256")==archive_sha256(path))
 
 def active_generation_path(name):return LOCAL_STATE/f"{name}.active-generation.json"
 
@@ -548,7 +555,7 @@ def recover_restore_transaction(name):
     try:data=json.loads(journal.read_text())
     except (OSError,ValueError) as error:raise RuntimeError(f"Invalid restore journal {journal}: {error}") from error
     expected_stage=LOCAL_STATE/f".{name}.restore-stage";expected_rollback=LOCAL_STATE/f".{name}.restore-rollback"
-    if data.get("schema")!=1 or data.get("server")!=name:raise RuntimeError(f"Restore journal identity mismatch: {journal}")
+    if data.get("schema")!=1 or data.get("server") not in accepted_server_names(name):raise RuntimeError(f"Restore journal identity mismatch: {journal}")
     stage=Path(data.get("stage",""));rollback=Path(data.get("rollback",""));phase=data.get("phase")
     if stage!=expected_stage or rollback!=expected_rollback:raise RuntimeError(f"Restore journal contains unsafe paths: {journal}")
     snapshot=ROOT/"servers"/name/"snapshot";runtime=unit_workdir(name)
@@ -745,9 +752,11 @@ def validate_runtime_archive(archive,name):
         members=handle.getmembers()
         regular=[member for member in members if member.isfile()]
         if not regular:raise RuntimeError(f"Runtime backup contains no files: {archive}")
-        prefix=name.rstrip("/")+"/"
-        if any(not (member.name==name or member.name.startswith(prefix)) for member in members):
-            raise RuntimeError(f"Runtime backup contains paths outside {name}")
+        roots={member.name.split("/",1)[0] for member in members if member.name}
+        allowed=accepted_server_names(name)
+        if len(roots)!=1 or not roots.issubset(allowed):
+            raise RuntimeError(f"Runtime backup root {sorted(roots)} is not valid for {name}; accepted={sorted(allowed)}")
+        archive_name=next(iter(roots));prefix=archive_name.rstrip("/")+"/"
         relative=[member.name[len(prefix):] for member in regular if member.name.startswith(prefix)]
         if not any(path=="level.dat" or re.fullmatch(r"world[^/]*/level\.dat",path) for path in relative):
             raise RuntimeError(f"Runtime backup contains no level.dat: {archive}")
@@ -892,7 +901,7 @@ def read_generation(name,generation):
     root=generation_path(name,generation);manifest=root/"manifest.json";archive=root/"snapshot.tar.gz"
     if not manifest.is_file() or not archive.is_file():raise RuntimeError(f"Generation is incomplete: {name}/{generation}")
     data=json.loads(manifest.read_text())
-    if not data.get("complete") or data.get("generation")!=generation or data.get("server")!=name:
+    if not data.get("complete") or data.get("generation")!=generation or data.get("server") not in accepted_server_names(name):
         raise RuntimeError(f"Invalid generation manifest: {manifest}")
     actual=archive_sha256(archive)
     if actual!=data.get("archive_sha256"):raise RuntimeError(f"Generation archive checksum mismatch: {archive}")

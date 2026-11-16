@@ -33,8 +33,8 @@ exec_always clipse -listen
 exec ~/.config/sway/scripts/battery-warn.sh
 exec autotiling
 default_orientation auto
-exec_always ~/.config/sway/scripts/windows/float-geometry-watcher.sh --replace
 exec_always ~/.config/sway/scripts/windows/borders-follow-state.sh --replace
+exec_always --no-startup-id ~/.config/sway/scripts/windows/float-state-daemon.py
 
 set $popup popup
 
@@ -120,7 +120,7 @@ bindsym --no-repeat $mod+shift+v fullscreen disable; exec $term -T "$popup-updat
 bindsym --no-repeat $mod+shift+t fullscreen disable; exec $term -T "$popup-settime" -e bash -c '~/.config/sway/scripts/settime.sh; echo; read -n 1 -rsp "Press any key to close..."'
 bindsym --no-repeat $mod+shift+y fullscreen disable; exec $term -T "$popup-update-playlists" -e bash -c '~/.config/sway/scripts/updaters/update-playlists.sh'
 bindsym --no-repeat $mod+shift+a fullscreen disable; exec $term -T "$popup-update-add_audio_device" -e bash -c 'python3 ~/.config/sway/scripts/updaters/add-audio-device.py'
-bindsym --no-repeat $mod+shift+b fullscreen disable; exec $term -T "$popup-update-services" -e bash -c '/home/joel/.config/sway/scripts/network/start-services.sh; echo; read -n 1 -rsp "Press any key to close..."'
+bindsym --no-repeat $mod+shift+b fullscreen disable; exec $term -T "$popup-update-services" -e bash -c '/home/joel/.config/sway/scripts/servers/start-servers.sh; echo; read -n 1 -rsp "Press any key to close..."'
 bindsym --locked --no-repeat $mod+Shift+d fullscreen disable; exec bash -c "python3 /home/joel/.config/sway/scripts/device-lock.py"
 bindsym --no-repeat $mod+shift+e fullscreen disable; exec systemctl suspend
 
