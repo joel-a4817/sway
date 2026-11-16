@@ -86,10 +86,16 @@ def folder_for(path):
   try:p.relative_to(f['path']);matches.append(f)
   except ValueError:pass
  return max(matches,key=lambda f:len(f['path'].parts)) if matches else None
+def peer_owned_backup(path):
+ try:Path(path).resolve().relative_to((BACK/host()).resolve());return True
+ except ValueError:return False
 def writable_folder(path):
  f=folder_for(path)
- return None if f and f['type']=='receiveonly' else f
+ # MagicDNS peer ownership is authoritative for ~/minecraft-backups/<peer>.
+ # The matching peer edits its own subtree; all other peer subtrees are excluded.
+ return f if peer_owned_backup(path) or not (f and f['type']=='receiveonly') else None
 def path_writable(path):
+ if peer_owned_backup(path):return True
  f=folder_for(path)
  return not (f and f['type']=='receiveonly')
 def set_folder_paused(folder,paused):
@@ -163,6 +169,14 @@ def exhaustive_replace(old,new):
   if same_path(src,dst):continue
   merge_path(src,dst,'managed path');changed=True
  return changed
+def stale_owned_names():
+ configured=set(declared());out=set()
+ # Peer-owned backup subtree is authoritative for that peer. Also inspect local
+ # runtime and generations, but never another peer's backup subtree.
+ for base in (BACK/host(),RUN,STATE/'generations'):
+  if base.is_dir() and path_writable(base):
+   out.update(p.name for p in base.iterdir() if p.is_dir() and re.fullmatch(r'[a-z0-9][a-z0-9-]*',p.name) and p.name not in configured)
+ return sorted(out)
 def known_old_names(new):
  out=set()
  aliases=readj(STATE/'rename-aliases.json',{'aliases':{}}).get('aliases',{})
@@ -175,8 +189,8 @@ def known_old_names(new):
    t=readj(f,{})
    if t.get('new')==new and t.get('old'):out.add(t['old'])
  return sorted(x for x in out if x and x!=new)
-def repair_name(new,interactive=True,announce=True):
- olds=known_old_names(new);pending=[]
+def repair_name(new,interactive=True,announce=True,extra_olds=None):
+ olds=sorted(set(known_old_names(new)+(extra_olds or [])));pending=[]
  for old in olds:
   pending.extend((src,dst,label,old) for src,dst,label in move_plan(old,new)+local_file_moves(old,new) if src.exists() and not same_path(src,dst) and path_writable(src) and path_writable(dst))
  if not pending and not olds:return False
@@ -265,11 +279,18 @@ def main():
   names=declared();print('Select server to rename:');[print(f' [{i}] {n}') for i,n in enumerate(names,1)];i=int(input('Server: '));a.old=names[i-1];a.new=input('New name: ').strip()
  if not re.fullmatch(r'[a-z0-9][a-z0-9-]*',a.new or ''):raise SystemExit('Invalid new name')
  if a.old==a.new:
-  # Re-apply the already-declared name to any paths still carrying a known
-  # previous name. This is maintenance, not a new rename: no intent, Nix edit,
-  # transaction, server stop, or name-change prompt is created.
-  changed=repair_name(a.new,False,False)
-  print(f'Current name {a.new} applied to all known local paths.' if changed else f'Current name {a.new} is already applied everywhere known.')
+  stale=stale_owned_names();known=known_old_names(a.new)
+  unknown=[x for x in stale if x not in known]
+  selected=[]
+  if len(unknown)==1:selected=unknown
+  elif len(unknown)>1:
+   print(f'Select previous name(s) belonging to {a.new} on peer {host()}:')
+   [print(f' [{i}] {n}') for i,n in enumerate(unknown,1)]
+   raw=input('Comma-separated numbers, or Enter for none: ').strip()
+   if raw:selected=[unknown[int(x)-1] for x in raw.split(',')]
+  changed=repair_name(a.new,False,False,selected)
+  if changed:print(f'Current name {a.new} applied across peer {host()} writable paths.')
+  else:print(f'No previous-name paths for {a.new} were found in peer {host()} writable scope.')
   return
  tid=str(uuid.uuid4());print(f'Plan: stop {a.old}; declare {a.new}; rename snapshot, runtime, generations, local backup directory and all local state; preserve archive bytes and record alias metadata.')
  if not a.apply and input('Type RENAME to apply: ').strip()!='RENAME':return
