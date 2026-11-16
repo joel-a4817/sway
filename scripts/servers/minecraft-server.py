@@ -233,27 +233,25 @@ def syncthing_status_clean():
     return clean,data
 
 def syncthing_wait_local(idle_timeout=120,stable_seconds=4):
-    """Wait until local Syncthing is clean; fail only after no observable progress."""
+    """Wait for local convergence; reset only when outstanding work decreases."""
     syncthing_request("/rest/db/scan",method="POST").read()
-    stable=None;last={};last_signature=None;last_progress=last_report=time.monotonic()
+    stable=None;best_need=None;best_bytes=None;last={};last_progress=last_report=time.monotonic()
     while True:
         clean,last=syncthing_status_clean()
-        signature=(last.get("state"),int(last.get("needTotalItems",0) or 0),
-                   int(last.get("needBytes",0) or 0),int(last.get("pullErrors",0) or 0),
-                   int(last.get("localFiles",0) or 0),int(last.get("localBytes",0) or 0),
-                   int(last.get("globalFiles",0) or 0),int(last.get("globalBytes",0) or 0),
-                   last.get("sequence"),last.get("remoteSequence"))
-        if signature!=last_signature:
-            last_signature=signature;last_progress=time.monotonic()
+        need=int(last.get("needTotalItems",0) or 0);need_bytes=int(last.get("needBytes",0) or 0)
+        if best_need is None or need<best_need or need_bytes<best_bytes:
+            best_need=need if best_need is None else min(best_need,need)
+            best_bytes=need_bytes if best_bytes is None else min(best_bytes,need_bytes)
+            last_progress=time.monotonic()
         if clean:
             if stable is None:stable=time.monotonic()
             if time.monotonic()-stable>=stable_seconds:return
         else:stable=None
         now=time.monotonic()
         if now-last_report>=15:
-            print(f"Waiting for local Syncthing: state={last.get('state')} items={last.get('needTotalItems',0)} bytes={last.get('needBytes',0)}",flush=True);last_report=now
+            print(f"Waiting for local Syncthing: state={last.get('state')} items={need} bytes={need_bytes}",flush=True);last_report=now
         if now-last_progress>=idle_timeout:
-            raise RuntimeError(f"Local Syncthing made no observable progress for {idle_timeout}s: {last}")
+            raise RuntimeError(f"Local Syncthing made no forward progress for {idle_timeout}s: {last}")
         time.sleep(2)
 
 def syncthing_wait_cluster(idle_timeout=120,stable_seconds=4):
@@ -549,19 +547,28 @@ def recover_restore_transaction(name):
     if not journal.is_file():return
     try:data=json.loads(journal.read_text())
     except (OSError,ValueError) as error:raise RuntimeError(f"Invalid restore journal {journal}: {error}") from error
-    expected_stage=LOCAL_STATE/f".{name}.restore-stage"
-    expected_rollback=LOCAL_STATE/f".{name}.restore-rollback"
-    if data.get("schema")!=1 or data.get("server")!=name:
-        raise RuntimeError(f"Restore journal identity mismatch: {journal}")
-    stage=Path(data.get("stage",""));rollback=Path(data.get("rollback",""))
-    if stage!=expected_stage or rollback!=expected_rollback:
-        raise RuntimeError(f"Restore journal contains unsafe paths: {journal}")
+    expected_stage=LOCAL_STATE/f".{name}.restore-stage";expected_rollback=LOCAL_STATE/f".{name}.restore-rollback"
+    if data.get("schema")!=1 or data.get("server")!=name:raise RuntimeError(f"Restore journal identity mismatch: {journal}")
+    stage=Path(data.get("stage",""));rollback=Path(data.get("rollback",""));phase=data.get("phase")
+    if stage!=expected_stage or rollback!=expected_rollback:raise RuntimeError(f"Restore journal contains unsafe paths: {journal}")
     snapshot=ROOT/"servers"/name/"snapshot";runtime=unit_workdir(name)
     if active(name):raise RuntimeError(f"Restore recovery required for {name}, but service is running")
-    if data.get("phase") not in ("committed","replicated") and rollback.is_dir():
-        replace_snapshot_from_backup(rollback,snapshot);atomic_mirror(snapshot,runtime);verify_identical(snapshot,runtime,"restore crash rollback")
+    if phase not in ("committed","replicated"):
+        if rollback.is_dir():replace_snapshot_from_backup(rollback,snapshot);atomic_mirror(snapshot,runtime);verify_identical(snapshot,runtime,"restore crash rollback")
+        journal.unlink(missing_ok=True);fsync_directory(journal.parent)
+        shutil.rmtree(stage,ignore_errors=True);shutil.rmtree(rollback,ignore_errors=True);return
+    generation=data.get("generation")
+    if not generation:raise RuntimeError(f"Committed restore journal lacks generation: {journal}")
+    generation_data,_=read_generation(name,generation)
+    record=read_handover(name)
+    if not record or record.get("generation")!=generation or record.get("generation_archive_sha256")!=generation_data.get("archive_sha256"):
+        raise RuntimeError(f"Committed restore metadata is inconsistent: {journal}")
+    validate_handover(name,snapshot,generation);atomic_mirror(snapshot,runtime);verify_identical(snapshot,runtime,"committed restore recovery")
+    if phase=="committed":
+        syncthing_resume();syncthing_wait_cluster();verify_generation_on_peers(name,generation_data)
     journal.unlink(missing_ok=True);fsync_directory(journal.parent)
     shutil.rmtree(stage,ignore_errors=True);shutil.rmtree(rollback,ignore_errors=True)
+
 def verify_backup_receiver(owner,name,generation,digest,idle_timeout=300):
     archive=BACKUPS/owner/name/"runtime"/"generations"/generation/"backup.tar.gz"
     manifest=archive.parent/"manifest.json";last=None;progress=time.monotonic()
@@ -767,8 +774,12 @@ def runtime_backup_once(name):
         prune_backup_storage(name);print(f"Runtime backup protected locally and on peers: {archive}",flush=True);return archive
       except Exception:
         incoming.unlink(missing_ok=True)
-        try:rcon(runtime,"save-on")
-        finally:guard.unlink(missing_ok=True)
+        try:
+          rcon(runtime,"save-on")
+        except Exception as save_error:
+          print(f"Could not re-enable Minecraft saving; recovery guard retained: {save_error}",file=sys.stderr,flush=True)
+        else:
+          guard.unlink(missing_ok=True);fsync_directory(guard.parent)
         raise
 
 def protected_backup_age(name):
@@ -796,19 +807,29 @@ def runtime_backup_watchdog_unit(name):return f"minecraft-runtime-backup-watchdo
 def runtime_backup_watchdog(name):
     stale_limit=max(900,RUNTIME_BACKUP_INTERVAL*3)
     while active(name):
-      age=protected_backup_age(name)
-      if age>=stale_limit:
-        with server_backup_lock(name).open("a+") as lock:
-          acquire_file_lock(lock,f"{name} watchdog backup lock")
-          if protected_backup_age(name)<stale_limit:continue
-          runtime=unit_workdir(name)
-          try:rcon(runtime,"save-all flush");rcon(runtime,"save-on")
-          finally:save_guard(name).unlink(missing_ok=True)
-          print(f"No peer-verified backup within {stale_limit}s; stopping {name} safely.",file=sys.stderr,flush=True)
-          result=run([sys.executable,"-B",str(Path(__file__).resolve()),"stop",name],check=False,capture=True)
-          if result.stdout:print(result.stdout,file=sys.stderr,flush=True)
-          if active(name):run(["sudo","systemctl","stop",unit(name)],check=False)
-          return
+      if protected_backup_age(name)<stale_limit:
+        time.sleep(1);continue
+      should_stop=False
+      with server_backup_lock(name).open("a+") as lock:
+        acquire_file_lock(lock,f"{name} watchdog backup lock")
+        if protected_backup_age(name)<stale_limit:continue
+        runtime=unit_workdir(name)
+        try:
+          rcon(runtime,"save-all flush");rcon(runtime,"save-on")
+          save_guard(name).unlink(missing_ok=True);fsync_directory(save_guard(name).parent)
+        except Exception as error:
+          print(f"Backup watchdog could not flush through RCON: {error}",file=sys.stderr,flush=True)
+        should_stop=True
+      # The stop command must acquire this same backup lock. Never invoke it
+      # while the watchdog still owns the lock.
+      if should_stop:
+        print(f"No peer-verified backup within {stale_limit}s; stopping {name} safely.",file=sys.stderr,flush=True)
+        result=run([sys.executable,"-B",str(Path(__file__).resolve()),"stop",name],check=False,capture=True)
+        if result.stdout:print(result.stdout,file=sys.stderr,flush=True)
+        if result.returncode and active(name):
+          print("Managed stop failed; forcing the systemd service down to prevent unprotected play.",file=sys.stderr,flush=True)
+          run(["sudo","systemctl","stop",unit(name)],check=False)
+        return
       time.sleep(1)
 
 def start_runtime_backup_loop(name):
@@ -1108,6 +1129,14 @@ def ensure_syncthing_resumed_and_current(cluster=False):
     syncthing_resume()
     (syncthing_wait_cluster if cluster else syncthing_wait_local)()
 
+def prepare_sync_receiver():
+    """Put a stopped peer into a verified receiving state for handover."""
+    if running_servers():raise RuntimeError("Cannot prepare sync while a local Minecraft server is running")
+    ensure_dependencies()
+    ensure_syncthing_resumed_and_current(cluster=False)
+    print("Minecraft Syncthing receiver is resumed and locally current.")
+    return 0
+
 def start(name=None):
     global CRITICAL
     name=select_server(name,"start");ensure_dependencies(name)
@@ -1195,7 +1224,7 @@ def start(name=None):
             is_active=active(name);is_busy=port_busy(port);signature=(is_active,is_busy)
             if signature!=last_signature:last_signature=signature;last_progress=time.monotonic()
             if is_active and is_busy:
-                domain=ddns_update();public=public_ipv4();CRITICAL=False
+                domain=ddns_update();public=public_ipv4()
                 print(f"Minecraft server '{name}' started on port {port}")
                 print(f"Router target: {FLOATING_IP}:{port}")
                 if public:print(f"Public address: {public}:{port}")
@@ -1203,6 +1232,7 @@ def start(name=None):
                 wait_for_rcon_ready(name,runtime)
                 runtime_backup_once(name)
                 start_runtime_backup_loop(name)
+                CRITICAL=False
                 print(f"Live runtime backup: protected immediately, then every {RUNTIME_BACKUP_INTERVAL//60} minutes.")
                 print("Syncthing is paused until the server is stopped and snapshotted.");return
             if time.monotonic()-last_progress>=idle_timeout:
@@ -1238,11 +1268,13 @@ def stop(name=None,remote=False):
           if state!=last_state:last_state=state;last_progress=time.monotonic()
           elif time.monotonic()-last_progress>=300:raise RuntimeError(f"{name} made no shutdown progress for 300s; state={state!r}")
           time.sleep(1)
+        stopped_archive=backup(name,runtime)
+        if not stopped_archive:raise RuntimeError(f"Refusing handover: stopped runtime for {name} is empty")
         generation=publish_generation(name,runtime,"clean-stop");atomic_mirror(runtime,snapshot);verify_identical(runtime,snapshot,"stopped snapshot")
         record=write_handover(name,snapshot,"clean-stop");record.update({"generation":generation["generation"],"generation_archive_sha256":generation["archive_sha256"],"publisher":generation["publisher"]})
         write_json_atomic(handover_path(name),record)
         if not running_servers():network_restore()
-        owner.unlink(missing_ok=True);ensure_syncthing_versioning();syncthing_resume();syncthing_wait_cluster();verify_generation_on_peers(name,generation)
+        owner.unlink(missing_ok=True);fsync_directory(owner.parent);ensure_syncthing_versioning();syncthing_resume();syncthing_wait_cluster();verify_generation_on_peers(name,generation)
         prune_backup_storage(name);CRITICAL=False;print(f"HANDOVER {record['generation']}");print(f"'{name}' stopped, backed up, verified, and replicated.")
       except Exception:
         CRITICAL=False
@@ -1332,14 +1364,21 @@ def restore_backup(name=None,requested=None):
         generation=publish_generation(name,runtime,"backup-restore")
         record=write_handover(name,snapshot,"backup-restore");record.update({"generation":generation["generation"],"generation_archive_sha256":generation["archive_sha256"],"publisher":generation["publisher"]});write_json_atomic(handover_path(name),record)
         write_restore_phase(name,"committed",stage=str(stage),rollback=str(rollback),generation=generation["generation"])
-        owner.unlink(missing_ok=True);network_restore();syncthing_resume();syncthing_wait_cluster();verify_generation_on_peers(name,generation)
+        owner.unlink(missing_ok=True);fsync_directory(owner.parent);network_restore();syncthing_resume();syncthing_wait_cluster();verify_generation_on_peers(name,generation)
         write_restore_phase(name,"replicated",stage=str(stage),rollback=str(rollback),generation=generation["generation"]);prune_backup_storage(name)
       except Exception:
-        rollback_ok=False
+        phase="unknown"
         try:
-          if rollback.is_dir():replace_snapshot_from_backup(rollback,snapshot);atomic_mirror(snapshot,runtime);verify_identical(snapshot,runtime,"restore rollback");rollback_ok=True
-        finally:
-          if rollback_ok:restore_journal_path(name).unlink(missing_ok=True)
+          if restore_journal_path(name).is_file():phase=json.loads(restore_journal_path(name).read_text()).get("phase","unknown")
+        except Exception:pass
+        if phase not in ("committed","replicated"):
+          rollback_ok=False
+          try:
+            if rollback.is_dir():replace_snapshot_from_backup(rollback,snapshot);atomic_mirror(snapshot,runtime);verify_identical(snapshot,runtime,"restore rollback");rollback_ok=True
+          finally:
+            if rollback_ok:restore_journal_path(name).unlink(missing_ok=True);fsync_directory(restore_journal_path(name).parent)
+        else:
+          print(f"Restore committed locally; preserving generation and recovery journal because peer replication is incomplete (phase={phase}).",file=sys.stderr,flush=True)
         raise
       else:
         restore_journal_path(name).unlink(missing_ok=True)
