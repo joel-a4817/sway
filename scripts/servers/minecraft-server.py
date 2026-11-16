@@ -698,6 +698,36 @@ def rcon(runtime,command):
     if result.returncode:raise RuntimeError((result.stdout or "").strip() or f"RCON command failed: {command}")
     return (result.stdout or "").strip()
 
+def wait_for_rcon_ready(name,runtime,idle_timeout=300):
+    """Require a successful authenticated RCON command before online backup.
+
+    The game socket can listen well before Minecraft has started its RCON
+    listener. Journal growth and service state changes count as startup
+    progress; repeated connection refusal by itself does not.
+    """
+    password,port=rcon_settings(runtime)
+    executable=shutil.which("mcrcon")
+    if not executable:raise RuntimeError("Reliable online backup requires mcrcon in PATH")
+    cursor=None;last_state=None;last_error="RCON not attempted";last_progress=last_report=time.monotonic()
+    while True:
+        failure=unit_failure(name)
+        if failure:raise RuntimeError(failure)
+        state=run(["systemctl","show",unit(name),"-p","ActiveState","-p","SubState","-p","MainPID","--value"],check=False,capture=True).stdout.strip()
+        journal=run(["journalctl","-u",unit(name),"-n","1","--show-cursor","--no-pager","-o","cat"],check=False,capture=True).stdout or ""
+        match=re.search(r"-- cursor: (.+)$",journal,re.M);new_cursor=match.group(1) if match else None
+        if state!=last_state or (new_cursor and new_cursor!=cursor):
+            last_state=state;cursor=new_cursor;last_progress=time.monotonic()
+        result=run([executable,"-H","127.0.0.1","-P",str(port),"-p",password,"list"],check=False,capture=True)
+        if result.returncode==0:
+            print(f"RCON ready on TCP {port}.",flush=True);return
+        last_error=(result.stdout or "").strip() or f"mcrcon exited {result.returncode}"
+        now=time.monotonic()
+        if now-last_report>=15:
+            print(f"Waiting for authenticated RCON on TCP {port}: {last_error}",flush=True);last_report=now
+        if now-last_progress>=idle_timeout:
+            raise RuntimeError(f"{name} made no startup progress for {idle_timeout}s while waiting for RCON TCP {port}: {last_error}")
+        time.sleep(1)
+
 def fsync_directory(path):
     descriptor=os.open(path,os.O_RDONLY|getattr(os,"O_DIRECTORY",0))
     try:os.fsync(descriptor)
@@ -1170,6 +1200,7 @@ def start(name=None):
                 print(f"Router target: {FLOATING_IP}:{port}")
                 if public:print(f"Public address: {public}:{port}")
                 if domain:print(f"Friend address: {domain}.duckdns.org:{port}")
+                wait_for_rcon_ready(name,runtime)
                 runtime_backup_once(name)
                 start_runtime_backup_loop(name)
                 print(f"Live runtime backup: protected immediately, then every {RUNTIME_BACKUP_INTERVAL//60} minutes.")
