@@ -200,6 +200,31 @@ def syncthing_request(path,params=None,method="GET",idle_timeout=300):
     except TimeoutError as error:
         raise RuntimeError(f"Syncthing API made no socket progress for {idle_timeout}s during {method} {path}") from error
 
+def syncthing_device_id():
+    """Return this machine's Syncthing device ID without folder-wide inference."""
+    item=syncthing_config()
+    if not item:raise RuntimeError("Configure ~/minecraft-server as its own Syncthing folder")
+    key,_,_=item
+    url="http://127.0.0.1:8384/rest/system/status"
+    data=json.load(request.urlopen(request.Request(url,headers={"X-API-Key":key}),timeout=30))
+    device_id=(data.get("myID") or "").strip()
+    if not device_id:raise RuntimeError("Syncthing did not report this peer's device ID")
+    return device_id
+
+def minecraft_peer_device_ids():
+    """Resolve only configured MagicDNS Minecraft peers to Syncthing IDs."""
+    ids=[]
+    for label,addresses in resolved_peer_groups():
+        address,result,text,failures=query_group(addresses,["syncthing-id"])
+        if result is None or result.returncode:
+            detail="; ".join(failures) or f"no usable address for {label}"
+            raise RuntimeError(f"Cannot obtain Syncthing ID for Minecraft peer {label}: {detail}")
+        device_id=text.strip()
+        if not re.fullmatch(r"[A-Z0-9-]{20,}",device_id):
+            raise RuntimeError(f"Minecraft peer {label} returned an invalid Syncthing ID: {device_id!r}")
+        if device_id not in ids:ids.append(device_id)
+    return ids
+
 def syncthing_set_paused(paused,idle_timeout=300):
     item=syncthing_config()
     if not item:raise RuntimeError("Configure ~/minecraft-server as its own Syncthing folder")
@@ -262,7 +287,12 @@ def syncthing_wait_cluster(idle_timeout=120,stable_seconds=4):
     """
     item=syncthing_config()
     if not item:raise RuntimeError("Configure ~/minecraft-server as its own Syncthing folder")
-    _,_,devices=item;syncthing_request("/rest/db/scan",method="POST").read()
+    _,_,folder_devices=item
+    devices=minecraft_peer_device_ids()
+    missing=[device for device in devices if device not in folder_devices]
+    if missing:
+        raise RuntimeError("Configured Minecraft peer is not a member of the Minecraft Syncthing folder: "+", ".join(x[:7] for x in missing))
+    syncthing_request("/rest/db/scan",method="POST").read()
     stable=None;last_reason="waiting";best={};last_progress=last_report=time.monotonic()
     while True:
         clean,data=syncthing_status_clean();incomplete=[];peers=[];progressed=False
@@ -1451,13 +1481,14 @@ def on_signal(sig,frame):
     if CRITICAL:print("\nCritical save/transfer continues; interrupt ignored.",file=sys.stderr);return
     raise KeyboardInterrupt
 def main():
-    p=argparse.ArgumentParser();p.add_argument("action",nargs="?",default="toggle",choices=["toggle","start","stop","restore","status","logs","list","release-network","menu-status","prepare-sync","prune-storage","runtime-backup-once","runtime-backup-loop","runtime-backup-watchdog","verify-generation","verify-backup"]);p.add_argument("server",nargs="?");p.add_argument("--machine",action="store_true");p.add_argument("--remote",action="store_true");p.add_argument("--backup");p.add_argument("--generation");p.add_argument("--digest");p.add_argument("--owner");a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument("action",nargs="?",default="toggle",choices=["toggle","start","stop","restore","status","logs","list","release-network","menu-status","prepare-sync","prune-storage","runtime-backup-once","runtime-backup-loop","runtime-backup-watchdog","verify-generation","verify-backup","syncthing-id"]);p.add_argument("server",nargs="?");p.add_argument("--machine",action="store_true");p.add_argument("--remote",action="store_true");p.add_argument("--backup");p.add_argument("--generation");p.add_argument("--digest");p.add_argument("--owner");a=p.parse_args()
     for d in (ROOT,RUNTIME_ROOT,BACKUPS,COORD,LOCAL_STATE):d.mkdir(parents=True,exist_ok=True)
     for sig in (signal.SIGINT,signal.SIGTERM,signal.SIGHUP):signal.signal(sig,on_signal)
     # Machine status is a read-only peer probe. It must remain available while
     # start/stop owns the transition lock; otherwise a normal handover is
     # misreported as an unreachable peer.
     if a.action=="status" and a.machine:return machine_status()
+    if a.action=="syncthing-id":print(syncthing_device_id());return 0
     if a.action=="menu-status":return menu_status()
     if a.action=="prune-storage":
         name=select_server(a.server,"prune storage for")
