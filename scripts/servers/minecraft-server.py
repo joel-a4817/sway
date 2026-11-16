@@ -1376,7 +1376,7 @@ def restore_backup(name=None,requested=None):
     for address in remote_selected:
       result=ssh(address,["stop",name,"--remote"])
       if result.returncode:raise RuntimeError((result.stdout or "").strip() or f"remote stop failed for {name}")
-    if active(name):stop(name)
+    stop(name)
     runtime,snapshot,_,owner=server_paths(name);stage=LOCAL_STATE/f".{name}.restore-stage";rollback=LOCAL_STATE/f".{name}.restore-rollback";CRITICAL=True
     LOCAL_STATE.mkdir(parents=True,exist_ok=True)
     with server_backup_lock(name).open("a+") as backup_lock:

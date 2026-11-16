@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import argparse, datetime as dt, fcntl, json, os, re, socket, subprocess, sys, uuid
+import argparse, datetime as dt, fcntl, json, os, re, socket, subprocess, sys, uuid, urllib.request, urllib.parse, xml.etree.ElementTree as ET
 from pathlib import Path
 H=Path.home(); STATE=Path(os.environ.get('MINECRAFT_STATE_ROOT',H/'minecraft-server')); BACK=Path(os.environ.get('MINECRAFT_BACKUP_ROOT',H/'minecraft-backups')); RUN=Path(os.environ.get('MINECRAFT_RUNTIME_ROOT','/srv/minecraft')); LOCAL=H/'.local/state/minecraft-server'; COORD=STATE/'coordination'; NIX_CANDIDATES=sorted((H/'nixos').glob('*/minecraft.nix')); NIX=NIX_CANDIDATES[0] if len(NIX_CANDIDATES)==1 else H/'nixos/rt4817/minecraft.nix'; MANAGER=H/'.config/sway/scripts/servers/minecraft-server.py'; LOCK=LOCAL/'rename.lock'
 def now():return dt.datetime.now(dt.timezone.utc).isoformat()
@@ -17,7 +17,7 @@ def replace_decl(old,new):
  # Update every remaining literal occurrence in minecraft.nix. Generated unit,
  # runtime and policy names already derive from server.name; this catches human-
  # readable/static labels such as minecraft-port-forwarding.txt.
- n=n.replace(old,new)
+ n=re.sub(r'(?<![a-z0-9-])'+re.escape(old)+r'(?![a-z0-9-])',new,n)
  q=NIX.with_suffix(NIX.suffix+'.tmp');q.write_text(n);os.replace(q,NIX)
 def stop(old): cmd([sys.executable,'-B',str(MANAGER),'stop',old])
 def host():return socket.gethostname().split('.',1)[0]
@@ -65,6 +65,97 @@ def merge_path(src,dst,label):
   return True
  if src.is_file() and dst.is_file() and src.read_bytes()==dst.read_bytes():src.unlink();return True
  raise RuntimeError(f'Conflicting old/new {label}; refusing to overwrite: {src} / {dst}')
+def syncthing_folders():
+ cfg=H/'.local/state/syncthing/config.xml'
+ if not cfg.exists():return []
+ root=ET.parse(cfg).getroot();key=root.findtext('gui/apikey') or ''
+ out=[]
+ for f in root.findall('folder'):
+  raw=os.path.expandvars(os.path.expanduser(f.get('path','')))
+  if not raw:continue
+  out.append({'id':f.get('id'),'path':Path(raw).resolve(),'type':(f.get('type') or 'sendreceive').lower(),'paused':f.get('paused','false').lower()=='true','key':key})
+ return out
+def folder_for(path):
+ p=path.resolve();matches=[]
+ for f in syncthing_folders():
+  try:p.relative_to(f['path']);matches.append(f)
+  except ValueError:pass
+ return max(matches,key=lambda f:len(f['path'].parts)) if matches else None
+def assert_writable(path):
+ f=folder_for(path)
+ if f and f['type']=='receiveonly':raise RuntimeError(f'Refusing to modify receive-only Syncthing folder {f["id"]}: {f["path"]}')
+ return f
+def set_folder_paused(folder,paused):
+ url='http://127.0.0.1:8384/rest/config/folders/'+urllib.parse.quote(folder['id'],safe='')
+ data=json.dumps({'paused':bool(paused)}).encode();headers={'X-API-Key':folder['key'],'Content-Type':'application/json'}
+ urllib.request.urlopen(urllib.request.Request(url,data=data,method='PATCH',headers=headers),timeout=30).read()
+def pause_affected():
+ unique={}
+ for path in (STATE,BACK/host()):
+  f=assert_writable(path)
+  if f:unique[f['id']]=f
+ changed=[]
+ try:
+  for f in unique.values():
+   if not f['paused']:set_folder_paused(f,True);changed.append(f)
+  return changed
+ except Exception:
+  for f in reversed(changed):
+   try:set_folder_paused(f,False)
+   except Exception:pass
+  raise
+def resume_folders(folders):
+ errors=[]
+ for f in reversed(folders):
+  try:set_folder_paused(f,False)
+  except Exception as e:errors.append(f'{f["id"]}: {e}')
+ if errors:raise RuntimeError('Rename completed but failed to resume Syncthing folder(s): '+'; '.join(errors))
+def managed_roots():
+ # Complete rename scope. The shared backup roots belonging to other peers are
+ # deliberately excluded: each peer may modify only its own backup subtree.
+ return [H/'nixos',H/'.config/sway',STATE,RUN,BACK/host(),LOCAL]
+def excluded(p):return any(part in ('.git','__pycache__') for part in p.parts)
+def token_pattern(old):return re.compile(r'(?<![A-Za-z0-9-])'+re.escape(old)+r'(?![A-Za-z0-9-])')
+def text_rewrite(p,old,new):
+ try:data=p.read_bytes()
+ except (OSError,PermissionError):return False
+ if b'\0' in data:return False
+ try:text=data.decode('utf-8')
+ except UnicodeDecodeError:return False
+ changed,n=token_pattern(old).subn(new,text)
+ if not n:return False
+ st=p.stat();q=p.with_name(p.name+'.minecraft-rename-tmp')
+ q.write_bytes(changed.encode('utf-8'));os.chmod(q,st.st_mode & 0o7777);os.replace(q,p)
+ return True
+def exhaustive_plan(old,new):
+ files=[];paths=[]
+ for root in managed_roots():
+  if not root.exists():continue
+  for base,dirs,names in os.walk(root,topdown=True,followlinks=False):
+   bp=Path(base);dirs[:]=[d for d in dirs if d not in ('.git','__pycache__')]
+   for name in names:
+    p=bp/name
+    if not p.is_symlink() and p.is_file():files.append(p)
+   for name in dirs:
+    p=bp/name
+    if old in name:paths.append(p)
+   for name in names:
+    p=bp/name
+    if old in name:paths.append(p)
+ return files,sorted(set(paths),key=lambda p:len(p.parts),reverse=True)
+def exhaustive_replace(old,new):
+ if old==new:return False
+ files,paths=exhaustive_plan(old,new);changed=False
+ # Rewrite contents before renaming their paths. Binary/archive bytes are never
+ # modified; all UTF-8 text is processed atomically with exact token boundaries.
+ for p in files:
+  if p.exists() and text_rewrite(p,old,new):changed=True
+ for src in paths:
+  if not src.exists() or src.is_symlink():continue
+  dst=src.with_name(src.name.replace(old,new))
+  if same_path(src,dst):continue
+  merge_path(src,dst,'managed path');changed=True
+ return changed
 def known_old_names(new):
  out=set()
  aliases=readj(STATE/'rename-aliases.json',{'aliases':{}}).get('aliases',{})
@@ -77,71 +168,60 @@ def known_old_names(new):
    t=readj(f,{})
    if t.get('new')==new and t.get('old'):out.add(t['old'])
  return sorted(x for x in out if x and x!=new)
-def repair_name(new,interactive=True):
- olds=known_old_names(new); pending=[]
+def repair_name(new,interactive=True,announce=True):
+ olds=known_old_names(new);pending=[]
  for old in olds:
   pending.extend((src,dst,label,old) for src,dst,label in move_plan(old,new)+local_file_moves(old,new) if src.exists() and not same_path(src,dst))
- if not pending:return False
- print(f'Incomplete Minecraft rename data found for {new}:')
- for src,dst,label,old in pending:print(f'  {label}: {src} -> {dst}')
- if interactive and input("Complete this peer's unfinished rename now? [Y/n]: ").strip().lower() not in ('','y','yes'):return False
- sync=subprocess.run(['systemctl','--user','is-active','--quiet','syncthing.service']).returncode==0
+ if not pending and not olds:return False
+ if announce and pending:
+  print(f'Incomplete Minecraft rename data found for {new}:')
+  for src,dst,label,old in pending:print(f'  {label}: {src} -> {dst}')
+ if interactive and pending and input("Complete this peer's unfinished rename now? [Y/n]: ").strip().lower() not in ('','y','yes'):return False
+ # Always pass through the manager. If running, this performs its verified stop
+ # generation/backup and handover publication before any path mutation.
+ cmd([sys.executable,'-B',str(MANAGER),'stop',new])
+ paused=pause_affected();changed=False
  try:
-  if sync:cmd(['systemctl','--user','stop','syncthing.service'])
   for src,dst,label,old in pending:
-   merge_path(src,dst,label)
+   merge_path(src,dst,label);changed=True
    if dst.is_dir():
     for jf in dst.rglob('*.json'):update_exact_json(jf,old,new)
    elif dst.suffix=='.json':update_exact_json(dst,old,new)
- finally:
-  if sync:cmd(['systemctl','--user','start','syncthing.service'],False)
- print(f'Completed unfinished local rename data for {new}.')
- return True
+  for old in olds:changed=exhaustive_replace(old,new) or changed
+ finally:resume_folders(paused)
+ if announce and changed:print(f'Completed unfinished local rename data for {new}.')
+ return changed
 def repair_all(interactive=True):
  changed=False
  for name in declared():changed=repair_name(name,interactive) or changed
  return changed
 
 def apply(old,new,tid,edit_nix=False):
- LOCAL.mkdir(parents=True,exist_ok=True)
- with LOCK.open('a+') as f:
-  fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
-  txp=transaction(old,new,tid); tx=readj(txp,{'schema':2,'id':tid,'old':old,'new':new,'peer':host(),'phases':{},'moves':[]})
-  def phase(k):tx['phases'][k]=True;writej(txp,tx)
-  # The initiating peer must cleanly stop before changing the declaration,
-  # otherwise the lifecycle manager can no longer resolve the old service.
-  if not tx['phases'].get('stopped'):
-   if edit_nix:
-    stop(old)
-   else:
-    # The origin peer already performed the cluster-wide clean stop. Refuse if
-    # this peer somehow still has the old unit active rather than stopping it
-    # outside the lifecycle manager.
-    if subprocess.run(['systemctl','is-active','--quiet',f'minecraft-server-{old}.service']).returncode==0:
-     raise RuntimeError(f'{old} is still active locally; stop it before adopting the propagated rename')
-   phase('stopped')
-  if edit_nix and not tx['phases'].get('intent'):
-   if old not in declared():raise RuntimeError(f'{old} not declared in minecraft.nix')
-   replace_decl(old,new);ensure_intent(old,new,tid);phase('intent')
-  sync=subprocess.run(['systemctl','--user','is-active','--quiet','syncthing.service']).returncode==0
-  try:
-   if sync:cmd(['systemctl','--user','stop','syncthing.service'])
-   for src,dst,label in move_plan(old,new)+local_file_moves(old,new):
-    key='move:'+str(dst)
-    if tx['phases'].get(key):continue
-    if same_path(src,dst):phase(key);continue
-    if src.exists():
-     merge_path(src,dst,label);tx['moves'].append({'from':str(src),'to':str(dst),'label':label})
-    elif not dst.exists() and label in ('synchronized snapshot','runtime'):raise RuntimeError(f'Neither old nor new {label} exists')
-    if dst.is_dir():
-     for jf in dst.rglob('*.json'):update_exact_json(jf,old,new)
-    elif dst.suffix=='.json':update_exact_json(dst,old,new)
-    phase(key)
-   aliases=readj(STATE/'rename-aliases.json',{'schema':1,'aliases':{}});aliases['aliases'][new]=sorted(set(aliases['aliases'].get(new,[])+[old]));writej(STATE/'rename-aliases.json',aliases);phase('aliases')
-   tx['complete']=True;tx['rebuild_required']=True;writej(txp,tx)
-  finally:
-   if sync:cmd(['systemctl','--user','start','syncthing.service'],False)
-  writej(LOCAL/'accepted-server-names.json',{'schema':1,'names':declared(),'updated_at':now()}); print(f"Rename {old} -> {new} is complete on {host()}. Rebuild this peer manually after all peers adopt it.")
+ LOCAL.mkdir(parents=True,exist_ok=True);lock=LOCK.open('a+');fcntl.flock(lock,fcntl.LOCK_EX)
+ txp=transaction(old,new,tid);tx=readj(txp,{'schema':1,'id':tid,'old':old,'new':new,'host':host(),'phases':{},'moves':[],'complete':False})
+ def phase(k):tx['phases'][k]=now();writej(txp,tx)
+ # The manager owns clean stop, final verified runtime generation, ownership
+ # release, and peer handover state. Never mutate names before this succeeds.
+ cmd([sys.executable,'-B',str(MANAGER),'stop',old]);phase('stopped-and-backed-up')
+ paused=pause_affected()
+ try:
+  if edit_nix and not tx['phases'].get('nix'):
+   replace_decl(old,new);ensure_intent(old,new,tid);phase('nix')
+  for src,dst,label in move_plan(old,new)+local_file_moves(old,new):
+   key='move:'+str(src)
+   if tx['phases'].get(key):continue
+   if same_path(src,dst):phase(key);continue
+   if src.exists():merge_path(src,dst,label);tx['moves'].append({'from':str(src),'to':str(dst),'label':label})
+   if dst.is_dir():
+    for p in dst.rglob('*.json'):update_exact_json(p,old,new)
+   elif dst.suffix=='.json':update_exact_json(dst,old,new)
+   phase(key)
+  exhaustive_replace(old,new);phase('exhaustive')
+  aliases=readj(STATE/'rename-aliases.json',{'schema':1,'aliases':{}});aliases['aliases'][new]=sorted(set(aliases['aliases'].get(new,[])+[old]));writej(STATE/'rename-aliases.json',aliases);phase('aliases')
+  tx['complete']=True;tx['rebuild_required']=True;writej(txp,tx)
+ finally:resume_folders(paused)
+ writej(LOCAL/'accepted-server-names.json',{'schema':1,'names':declared(),'updated_at':now()})
+ print(f'Rename {old} -> {new} is complete on {host()}. Rebuild this peer before starting the renamed server.')
 def pending():return intents()
 def local_names():
  out=set()
@@ -177,8 +257,11 @@ def main():
   names=declared();print('Select server to rename:');[print(f' [{i}] {n}') for i,n in enumerate(names,1)];i=int(input('Server: '));a.old=names[i-1];a.new=input('New name: ').strip()
  if not re.fullmatch(r'[a-z0-9][a-z0-9-]*',a.new or ''):raise SystemExit('Invalid new name')
  if a.old==a.new:
-  # Same name means no rename. Do not create an intent, transaction, prompt,
-  # warning, or repair action.
+  # Re-apply the already-declared name to any paths still carrying a known
+  # previous name. This is maintenance, not a new rename: no intent, Nix edit,
+  # transaction, server stop, or name-change prompt is created.
+  changed=repair_name(a.new,False,False)
+  print(f'Current name {a.new} applied to all known local paths.' if changed else f'Current name {a.new} is already applied everywhere known.')
   return
  tid=str(uuid.uuid4());print(f'Plan: stop {a.old}; declare {a.new}; rename snapshot, runtime, generations, local backup directory and all local state; preserve archive bytes and record alias metadata.')
  if not a.apply and input('Type RENAME to apply: ').strip()!='RENAME':return
