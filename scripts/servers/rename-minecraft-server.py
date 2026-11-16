@@ -81,10 +81,12 @@ def folder_for(path):
   try:p.relative_to(f['path']);matches.append(f)
   except ValueError:pass
  return max(matches,key=lambda f:len(f['path'].parts)) if matches else None
-def assert_writable(path):
+def writable_folder(path):
  f=folder_for(path)
- if f and f['type']=='receiveonly':raise RuntimeError(f'Refusing to modify receive-only Syncthing folder {f["id"]}: {f["path"]}')
- return f
+ return None if f and f['type']=='receiveonly' else f
+def path_writable(path):
+ f=folder_for(path)
+ return not (f and f['type']=='receiveonly')
 def set_folder_paused(folder,paused):
  url='http://127.0.0.1:8384/rest/config/folders/'+urllib.parse.quote(folder['id'],safe='')
  data=json.dumps({'paused':bool(paused)}).encode();headers={'X-API-Key':folder['key'],'Content-Type':'application/json'}
@@ -92,7 +94,7 @@ def set_folder_paused(folder,paused):
 def pause_affected():
  unique={}
  for path in (STATE,BACK/host()):
-  f=assert_writable(path)
+  f=writable_folder(path)
   if f:unique[f['id']]=f
  changed=[]
  try:
@@ -113,7 +115,7 @@ def resume_folders(folders):
 def managed_roots():
  # Complete rename scope. The shared backup roots belonging to other peers are
  # deliberately excluded: each peer may modify only its own backup subtree.
- return [H/'nixos',H/'.config/sway',STATE,RUN,BACK/host(),LOCAL]
+ return [p for p in (H/'nixos',H/'.config/sway',STATE,RUN,BACK/host(),LOCAL) if path_writable(p)]
 def excluded(p):return any(part in ('.git','__pycache__') for part in p.parts)
 def token_pattern(old):return re.compile(r'(?<![A-Za-z0-9-])'+re.escape(old)+r'(?![A-Za-z0-9-])')
 def text_rewrite(p,old,new):
@@ -171,7 +173,7 @@ def known_old_names(new):
 def repair_name(new,interactive=True,announce=True):
  olds=known_old_names(new);pending=[]
  for old in olds:
-  pending.extend((src,dst,label,old) for src,dst,label in move_plan(old,new)+local_file_moves(old,new) if src.exists() and not same_path(src,dst))
+  pending.extend((src,dst,label,old) for src,dst,label in move_plan(old,new)+local_file_moves(old,new) if src.exists() and not same_path(src,dst) and path_writable(src) and path_writable(dst))
  if not pending and not olds:return False
  if announce and pending:
   print(f'Incomplete Minecraft rename data found for {new}:')
@@ -208,6 +210,7 @@ def apply(old,new,tid,edit_nix=False):
   if edit_nix and not tx['phases'].get('nix'):
    replace_decl(old,new);ensure_intent(old,new,tid);phase('nix')
   for src,dst,label in move_plan(old,new)+local_file_moves(old,new):
+   if not path_writable(src) or not path_writable(dst):continue
    key='move:'+str(src)
    if tx['phases'].get(key):continue
    if same_path(src,dst):phase(key);continue
