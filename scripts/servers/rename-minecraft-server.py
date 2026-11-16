@@ -177,7 +177,8 @@ def main():
   names=declared();print('Select server to rename:');[print(f' [{i}] {n}') for i,n in enumerate(names,1)];i=int(input('Server: '));a.old=names[i-1];a.new=input('New name: ').strip()
  if not re.fullmatch(r'[a-z0-9][a-z0-9-]*',a.new or ''):raise SystemExit('Invalid new name')
  if a.old==a.new:
-  if not repair_name(a.new,True):print(f'No unfinished rename data was found for {a.new}.')
+  # Same name means no rename. Do not create an intent, transaction, prompt,
+  # warning, or repair action.
   return
  tid=str(uuid.uuid4());print(f'Plan: stop {a.old}; declare {a.new}; rename snapshot, runtime, generations, local backup directory and all local state; preserve archive bytes and record alias metadata.')
  if not a.apply and input('Type RENAME to apply: ').strip()!='RENAME':return
