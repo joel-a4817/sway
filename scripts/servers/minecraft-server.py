@@ -969,9 +969,16 @@ def port_for(name):
             if line.startswith("server-port="):
                 try:return int(line.split("=",1)[1].strip())
                 except ValueError:pass
-    known={"modded-server":25565,"latest-server":25566}
-    if name in known:return known[name]
-    raise RuntimeError(f"Cannot determine TCP port for {name}; server.properties has not been generated")
+    # First start: derive the declared port from minecraft.nix so renames and
+    # port edits remain declarative and never require another hardcoded map.
+    nix_file=Path(os.environ.get("MINECRAFT_NIX", str(Path.home()/"nixos/rt4817/minecraft.nix")))
+    if nix_file.is_file():
+        text=nix_file.read_text(errors="replace")
+        block=re.search(r"\{\s*name\s*=\s*\""+re.escape(name)+r"\";(?P<body>.*?)\n\s*\}",text,re.S)
+        if block:
+            match=re.search(r"\bport\s*=\s*([0-9]+)\s*;",block.group("body"))
+            if match:return int(match.group(1))
+    raise RuntimeError(f"Cannot determine TCP port for {name}; server.properties is absent and minecraft.nix has no matching declaration")
 
 def port_busy(port):
     with socket.socket() as s:

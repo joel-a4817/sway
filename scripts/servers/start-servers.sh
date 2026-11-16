@@ -3,6 +3,7 @@ set -euo pipefail
 
 MINECRAFT="$HOME/.config/sway/scripts/servers/minecraft-server.py"
 RESTORE_MINECRAFT="$HOME/.config/sway/scripts/servers/restore-minecraft-server.py"
+RENAME_MINECRAFT="$HOME/.config/sway/scripts/servers/rename-minecraft-server.py"
 IPAD="$HOME/.config/sway/scripts/servers/start-ipad-webremote.sh"
 VNC_UNIT="camilladsp-wayvnc.service"
 PEERS="$HOME/.config/minecraft-server/peers"
@@ -79,6 +80,7 @@ printf 'Toggle services [this device: %s]\n' "$THIS_DEVICE"
 printf '%s\n' 'Enter comma-separated numbers. [E] exits.'
 printf '  [E] Exit\n'
 printf '  [R] Restore Minecraft backup\n'
+printf '  [N] Rename Minecraft server safely\n'
 if "$IPAD" --status >/dev/null 2>&1; then
     printf '  [1] iPad Web Remote [running]\n'
 else
@@ -111,6 +113,7 @@ read -r -p 'Selection: ' input
 [[ -n "${input//[[:space:]]/}" ]] || exit 0
 [[ "$input" =~ ^[Ee]$ ]] && exit 0
 [[ "$input" =~ ^[Rr]$ ]] && exec "$RESTORE_MINECRAFT"
+[[ "$input" =~ ^[Nn]$ ]] && exec "$RENAME_MINECRAFT"
 IFS=',' read -ra tokens <<< "$input"
 declare -A SEEN=()
 for token in "${tokens[@]}"; do
