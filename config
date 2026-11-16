@@ -22,7 +22,7 @@ set $menu wmenu-run
 seat * xcursor_theme Bibata-Modern-Amber 32
 
 exec_always --no-startup-id ~/.config/sway/scripts/sway-session-environment.sh start
-exec --no-startup-id ~/.config/sway/scripts/sway-session-environment.sh watch
+exec --no-startup-id sh -c 'exec ~/.config/sway/scripts/sway-session-environment.sh watch >/dev/null 2>&1'
 
 exec solaar
 

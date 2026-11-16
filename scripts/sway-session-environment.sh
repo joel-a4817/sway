@@ -27,11 +27,14 @@ case "$action" in
     systemctl --user try-restart xdg-desktop-portal-gtk.service \
       xdg-desktop-portal-wlr.service xdg-desktop-portal.service 2>/dev/null || true
     ;;
-  watch)
-    : "${SWAYSOCK:?SWAYSOCK is required}"
-    while [[ -S "$SWAYSOCK" ]]; do sleep 1; done
+  stop)
     systemctl --user stop graphical-session.target || true
     systemctl --user unset-environment SWAYSOCK WAYLAND_DISPLAY DISPLAY || true
     ;;
-  *) echo "Usage: ${0##*/} start|watch" >&2; exit 2 ;;
+  watch)
+    : "${SWAYSOCK:?SWAYSOCK is required}"
+    while [[ -S "$SWAYSOCK" ]]; do sleep 1; done
+    "$0" stop
+    ;;
+  *) echo "Usage: ${0##*/} start|stop|watch" >&2; exit 2 ;;
 esac

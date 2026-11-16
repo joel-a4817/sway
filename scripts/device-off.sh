@@ -8,5 +8,5 @@ swaynag \
   -o "$OUT" \
   -m 'Device Off Options' \
   -z 'Reboot' 'rm -rf ~/.local/state/sway && reboot' \
-  -z 'Exit Sway' 'rm -rf ~/.local/state/sway && swaymsg exit' \
+  -z 'Exit Sway' '~/.config/sway/scripts/sway-session-environment.sh stop; rm -rf ~/.local/state/sway; swaymsg exit' \
   -z 'Sleep' 'swaylock -F -fi /home/joel/.config/sway/mcqueen.jpeg && systemctl suspend'
