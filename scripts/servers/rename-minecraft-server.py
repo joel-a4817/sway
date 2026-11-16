@@ -54,11 +54,16 @@ def remote_stopped(old,new):
 
 def exact_replace(path,old,new):
     text=path.read_text()
-    before=text
-    # Only semantic quoted server identifiers, never broad substring replacement.
-    text=text.replace(f'"{old}"',f'"{new}"').replace(f"'{old}'",f"'{new}'")
-    if text==before: raise RuntimeError(f"No exact quoted {old!r} found in {path}")
+    old_tokens=(f'"{old}"',f"'{old}'")
+    new_tokens=(f'"{new}"',f"'{new}'")
+    if not any(token in text for token in old_tokens):
+        if any(token in text for token in new_tokens):
+            print(f"Already updated by peer synchronization: {path}")
+            return False
+        raise RuntimeError(f"Neither old nor new quoted server name found in {path}")
+    text=text.replace(old_tokens[0],new_tokens[0]).replace(old_tokens[1],new_tokens[1])
     path.write_text(text)
+    return True
 
 def json_replace(path,old,new):
     try: data=json.loads(path.read_text())
@@ -87,12 +92,20 @@ def preflight(old,new,moves):
         if not f.is_file(): raise RuntimeError(f"Missing {f}")
     if active(new): raise RuntimeError("The destination server service is already active locally")
     for src,dst,label in moves:
-        if dst.exists(): raise RuntimeError(f"Destination already exists for {label}: {dst}")
-    if not (ROOT/"servers"/old/"snapshot").is_dir(): raise RuntimeError(f"Missing stopped snapshot: {ROOT/'servers'/old/'snapshot'}")
+        if src.exists() and dst.exists():
+            raise RuntimeError(f"Both old and new paths exist for {label}; refusing ambiguous merge: {src} and {dst}")
+        if not src.exists() and dst.exists():
+            print(f"Already migrated on another peer: {label}: {dst}")
+    old_snapshot=ROOT/"servers"/old/"snapshot"
+    new_snapshot=ROOT/"servers"/new/"snapshot"
+    if not old_snapshot.is_dir() and not new_snapshot.is_dir():
+        raise RuntimeError(f"Neither old nor new stopped snapshot exists: {old_snapshot} / {new_snapshot}")
     trans=[p for p in ROOT.rglob("*") if p.name.endswith((".incoming",".old",".restore-incoming",".restore-old"))]
     if trans: raise RuntimeError("Unfinished transaction paths exist: "+", ".join(map(str,trans[:8])))
-    if f'"{new}"' in MINECRAFT_NIX.read_text(): raise RuntimeError(f"New name already exists in {MINECRAFT_NIX}")
-    if f'"{old}"' not in MINECRAFT_NIX.read_text(): raise RuntimeError(f"Old name is not declared in {MINECRAFT_NIX}")
+    nix_text=MINECRAFT_NIX.read_text()
+    has_old=f'"{old}"' in nix_text; has_new=f'"{new}"' in nix_text
+    if has_old and has_new: raise RuntimeError(f"Both old and new names are declared in {MINECRAFT_NIX}")
+    if not has_old and not has_new: raise RuntimeError(f"Neither old nor new name is declared in {MINECRAFT_NIX}")
 
 def stop_selected_for_rename(name,new):
     manager=HOME/".config/sway/scripts/servers/minecraft-server.py"
@@ -128,6 +141,7 @@ def main():
       fcntl.flock(lh,fcntl.LOCK_EX|fcntl.LOCK_NB)
       preflight(a.old,a.new,moves)
       print("\nPLAN")
+      print("- cluster-safe and idempotent: paths already migrated by Syncthing are verified and skipped")
       for src,dst,label in moves:
           print(f"- {label}: {src} -> {dst}" if src.exists() else f"- {label}: absent, skip {src}")
       print(f"- patch exact quoted identifier in {MINECRAFT_NIX}")
@@ -153,7 +167,9 @@ def main():
         if sync_was_active: run(["systemctl","--user","stop","syncthing.service"])
         exact_replace(MINECRAFT_NIX,a.old,a.new)
         for src,dst,label in moves:
-            if not src.exists(): continue
+            if not src.exists():
+                if dst.exists(): print(f"Skipping already migrated {label}: {dst}")
+                continue
             dst.parent.mkdir(parents=True,exist_ok=True)
             os.rename(src,dst); completed.append((src,dst,label)); journal["moves"].append({"from":str(src),"to":str(dst),"label":label})
             (tx/"transaction.json").write_text(json.dumps(journal,indent=2)+"\n")
