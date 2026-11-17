@@ -143,19 +143,14 @@ def stop_audio_services(mark_stopped=True,stop_pipewire=True):
             stop_bypass()
             stop_camilla(include_stale=True)
             airplay(False)
-            if stop_pipewire:
-                for unit in ('wireplumber.service','pipewire-pulse.service','pipewire.service',
-                             'pipewire-pulse.socket','pipewire.socket'):
-                    user_service('stop',unit)
+            # NixOS owns PipeWire, pipewire-pulse and WirePlumber. Audio Stop
+            # tears down only Media Control-owned routes and engines.
         finally:
             if mark_stopped:STOP_ACK.touch()
 def toggle_audio_services():
     with LOCK:
         if STOPPED.exists():
-            # audio_start_change() reads and pauses the live playback graph.
-            # When Stop has shut PipeWire down, entering that transaction first
-            # fails in wpctl/pactl with ENETDOWN ("Host is down"). Bring up the
-            # local audio APIs before any gain/media transaction touches them.
+            # Verify the NixOS-owned graph before restoring Media Control.
             reset_pipewire_stack()
             with audio_start_change():
                 start_runtime(force=True,pipewire_ready=True)

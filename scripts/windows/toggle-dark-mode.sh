@@ -38,7 +38,7 @@ case "$mode" in
   dark)  export GTK_THEME=Adwaita-dark ;;
   light) export GTK_THEME=Adwaita ;;
 esac
-systemctl --user set-environment GTK_THEME="$GTK_THEME" 2>/dev/null || true
+"$HOME/.config/sway/scripts/systemd-userctl.sh" set-environment GTK_THEME="$GTK_THEME" 2>/dev/null || true
 if [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
   dbus-update-activation-environment --systemd GTK_THEME 2>/dev/null || true
 fi
@@ -49,7 +49,7 @@ case "$mode" in
   dark)  export GTK_THEME=Adwaita-dark ;;
   light) export GTK_THEME=Adwaita ;;
 esac
-systemctl --user set-environment GTK_THEME="$GTK_THEME" 2>/dev/null || true
+"$HOME/.config/sway/scripts/systemd-userctl.sh" set-environment GTK_THEME="$GTK_THEME" 2>/dev/null || true
 if [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
   dbus-update-activation-environment --systemd GTK_THEME 2>/dev/null || true
 fi

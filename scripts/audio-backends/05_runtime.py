@@ -214,7 +214,7 @@ def media_env():
     env.setdefault('XDG_RUNTIME_DIR',runtime); env.setdefault('DBUS_SESSION_BUS_ADDRESS',f'unix:path={runtime}/bus')
     return env
 def user_service(action,name):
-    r=run(['systemctl','--user',action,name],False,30)
+    r=run([str(SCRIPTS/'systemd-userctl.sh'),action,name],False,30,media_env())
     if r.returncode:raise RuntimeError(r.stderr.strip() or r.stdout.strip() or f'Could not {action} {name}')
 PIPEWIRE_UNITS=('pipewire.socket','pipewire-pulse.socket','wireplumber.service')
 

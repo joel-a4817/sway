@@ -336,10 +336,10 @@ def syncthing_wait_cluster(idle_timeout=120,stable_seconds=4):
 def ensure_dependencies(name=None):
     if name and run(["systemctl","cat",unit(name)],check=False,capture=True).returncode!=0:raise RuntimeError(f"{unit(name)} is not installed; rebuild NixOS")
     if run(["systemctl","is-active","--quiet","NetworkManager.service"],check=False).returncode!=0:raise RuntimeError("NetworkManager is not active")
-    run(["systemctl","--user","start","syncthing.service"],check=False)
+    run([str(HOME/".config/sway/scripts/systemd-userctl.sh"),"start","syncthing.service"],check=False)
     last=None;progress=time.monotonic()
     while True:
-      state=run(["systemctl","--user","show","syncthing.service","-p","ActiveState","-p","SubState","--value"],check=False,capture=True).stdout.strip()
+      state=run([str(HOME/".config/sway/scripts/systemd-userctl.sh"),"show","syncthing.service","-p","ActiveState","-p","SubState","--value"],check=False,capture=True).stdout.strip()
       try:request.urlopen("http://127.0.0.1:8384/rest/noauth/health",timeout=10).read();break
       except Exception:pass
       if state!=last:last=state;progress=time.monotonic()
@@ -886,19 +886,19 @@ def runtime_backup_watchdog(name):
 
 def start_runtime_backup_loop(name):
     stop_runtime_backup_loop(name)
-    command=["systemd-run","--user","--unit",runtime_backup_unit(name),"--property=Restart=on-failure","--property=RestartSec=60s",
+    command=[str(HOME/".config/sway/scripts/systemd-userctl.sh"),"--systemd-run","--unit",runtime_backup_unit(name),"--property=Restart=on-failure","--property=RestartSec=60s",
              "--collect",sys.executable,"-B",str(Path(__file__).resolve()),"runtime-backup-loop",name]
     result=run(command,check=False,capture=True)
     if result.returncode:raise RuntimeError(result.stdout.strip() or "Could not start supervised runtime backup loop")
-    watchdog=["systemd-run","--user","--unit",runtime_backup_watchdog_unit(name),"--property=Restart=on-failure","--property=RestartSec=5s",
+    watchdog=[str(HOME/".config/sway/scripts/systemd-userctl.sh"),"--systemd-run","--unit",runtime_backup_watchdog_unit(name),"--property=Restart=on-failure","--property=RestartSec=5s",
               "--collect",sys.executable,"-B",str(Path(__file__).resolve()),"runtime-backup-watchdog",name]
     result=run(watchdog,check=False,capture=True)
     if result.returncode:
-      run(["systemctl","--user","stop",runtime_backup_unit(name)],check=False);raise RuntimeError(result.stdout.strip() or "Could not start backup watchdog")
+      run([str(HOME/".config/sway/scripts/systemd-userctl.sh"),"stop",runtime_backup_unit(name)],check=False);raise RuntimeError(result.stdout.strip() or "Could not start backup watchdog")
 
 def stop_runtime_backup_loop(name):
-    run(["systemctl","--user","stop",runtime_backup_watchdog_unit(name)],check=False,capture=True)
-    run(["systemctl","--user","stop",runtime_backup_unit(name)],check=False,capture=True)
+    run([str(HOME/".config/sway/scripts/systemd-userctl.sh"),"stop",runtime_backup_watchdog_unit(name)],check=False,capture=True)
+    run([str(HOME/".config/sway/scripts/systemd-userctl.sh"),"stop",runtime_backup_unit(name)],check=False,capture=True)
 
 def generation_root(name):return ROOT/"generations"/name
 

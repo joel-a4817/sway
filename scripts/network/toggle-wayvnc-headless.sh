@@ -6,8 +6,9 @@ SWAY_UNIT=sway-vnc-headless-session.service
 RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/sway/vnc"
 OUTPUT_FILE="$STATE_DIR/output"
+CREATED_OUTPUT_FILE="$STATE_DIR/created-output"
 OWN_SWAY_FILE="$STATE_DIR/owns-sway-session"
-LOCK_DIR="$STATE_DIR/lock"
+LOCK_FILE="$STATE_DIR/lifecycle.lock"
 PORT="${WAYVNC_PORT:-5900}"
 mkdir -p "$STATE_DIR"
 
@@ -17,11 +18,11 @@ log_failure() {
 }
 
 lock() {
-  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    echo 'Another VNC operation is already in progress.' >&2
-    exit 1
+  exec 9>"$LOCK_FILE"
+  flock -w 15 9 || { echo 'Another VNC operation is already in progress.' >&2; exit 1; }
+  if [[ -f "$OWN_SWAY_FILE" ]] && ! "$HOME/.config/sway/scripts/systemd-userctl.sh" is-active --quiet "$SWAY_UNIT"; then
+    rm -f "$OWN_SWAY_FILE" "$OUTPUT_FILE" "$CREATED_OUTPUT_FILE"
   fi
-  trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
 }
 
 find_sway_socket() {
@@ -41,9 +42,9 @@ find_sway_socket() {
 
 start_headless_sway() {
   rm -f "$OWN_SWAY_FILE"
-  systemctl --user stop "$SWAY_UNIT" 2>/dev/null || true
-  systemctl --user reset-failed "$SWAY_UNIT" 2>/dev/null || true
-  systemd-run --user --unit="$SWAY_UNIT" --collect --quiet \
+  "$HOME/.config/sway/scripts/systemd-userctl.sh" stop "$SWAY_UNIT" 2>/dev/null || true
+  "$HOME/.config/sway/scripts/systemd-userctl.sh" reset-failed "$SWAY_UNIT" 2>/dev/null || true
+  "$HOME/.config/sway/scripts/systemd-userctl.sh" --systemd-run --unit="$SWAY_UNIT" --collect --quiet \
     --setenv="XDG_RUNTIME_DIR=$RUNTIME_DIR" \
     --setenv=WLR_BACKENDS=headless --setenv=WLR_HEADLESS_OUTPUTS=1 \
     --setenv=WLR_LIBINPUT_NO_DEVICES=1 \
@@ -65,12 +66,12 @@ ensure_sway_socket() {
       printf '%s\n' "$socket"
       return 0
     fi
-    systemctl --user is-active --quiet "$SWAY_UNIT" || break
+    "$HOME/.config/sway/scripts/systemd-userctl.sh" is-active --quiet "$SWAY_UNIT" || break
     sleep 0.2
   done
   echo 'The dedicated headless Sway session failed to start.' >&2
   log_failure "$SWAY_UNIT"
-  systemctl --user stop "$SWAY_UNIT" 2>/dev/null || true
+  "$HOME/.config/sway/scripts/systemd-userctl.sh" stop "$SWAY_UNIT" 2>/dev/null || true
   return 1
 }
 
@@ -93,19 +94,16 @@ find_wayland_display() {
       fi
     done < <(find "/proc/$pid/fd" -maxdepth 1 -type l -printf '%l\n' 2>/dev/null | sed -n 's/^socket:\[\([0-9][0-9]*\)\]$/\1/p')
   fi
-  value="$(systemctl --user show-environment 2>/dev/null | sed -n 's/^WAYLAND_DISPLAY=//p' | head -n1)"
-  if [[ -n "$value" && -S "$RUNTIME_DIR/$value" ]]; then
-    printf '%s\n' "$value"
-    return 0
-  fi
   return 1
 }
 
 ensure_headless_output() {
-  local name deadline
+  local name deadline created=0
   name="$(sway_outputs | jq -r '[.[] | select(.name | startswith("HEADLESS-")) | select(.active == true) | .name][0] // empty')"
+  rm -f "$CREATED_OUTPUT_FILE"
   if [[ -z "$name" ]]; then
     sway_cmd -q create_output
+    created=1
     deadline=$((SECONDS + 8))
     while (( SECONDS < deadline )); do
       name="$(sway_outputs | jq -r '[.[] | select(.name | startswith("HEADLESS-")) | select(.active == true) | .name][0] // empty')"
@@ -115,6 +113,7 @@ ensure_headless_output() {
   fi
   [[ -n "$name" ]] || { echo 'Sway did not expose an active HEADLESS output.' >&2; return 1; }
   sway_cmd -q output "$name" mode 1920x1080@60Hz
+  (( created )) && printf '%s\n' "$name" > "$CREATED_OUTPUT_FILE"
   printf '%s\n' "$name"
 }
 
@@ -127,12 +126,12 @@ bind_address() {
 }
 
 cleanup_failed_start() {
-  systemctl --user stop "$VNC_UNIT" 2>/dev/null || true
+  "$HOME/.config/sway/scripts/systemd-userctl.sh" stop "$VNC_UNIT" 2>/dev/null || true
   if [[ -f "$OWN_SWAY_FILE" ]]; then
-    systemctl --user stop "$SWAY_UNIT" 2>/dev/null || true
+    "$HOME/.config/sway/scripts/systemd-userctl.sh" stop "$SWAY_UNIT" 2>/dev/null || true
     rm -f "$OWN_SWAY_FILE"
   fi
-  rm -f "$OUTPUT_FILE"
+  rm -f "$OUTPUT_FILE" "$CREATED_OUTPUT_FILE"
 }
 
 start_vnc() {
@@ -149,25 +148,25 @@ start_vnc() {
   [[ -n "$address" ]] || { echo 'No Tailscale IPv4 address is available.' >&2; cleanup_failed_start; return 1; }
   printf '%s\n' "$output" > "$OUTPUT_FILE"
 
-  systemctl --user stop "$VNC_UNIT" 2>/dev/null || true
-  systemctl --user reset-failed "$VNC_UNIT" 2>/dev/null || true
-  systemd-run --user --unit="$VNC_UNIT" --collect --quiet \
+  "$HOME/.config/sway/scripts/systemd-userctl.sh" stop "$VNC_UNIT" 2>/dev/null || true
+  "$HOME/.config/sway/scripts/systemd-userctl.sh" reset-failed "$VNC_UNIT" 2>/dev/null || true
+  "$HOME/.config/sway/scripts/systemd-userctl.sh" --systemd-run --unit="$VNC_UNIT" --collect --quiet \
     --setenv="XDG_RUNTIME_DIR=$RUNTIME_DIR" --setenv="WAYLAND_DISPLAY=$wayland_display" \
     --property=Restart=on-failure --property=RestartSec=1s --property=TimeoutStopSec=10s \
     wayvnc --max-fps=30 --output "$output" "$address" "$PORT"
 
   deadline=$((SECONDS + 10))
   while (( SECONDS < deadline )); do
-    if systemctl --user is-active --quiet "$VNC_UNIT"; then
-      restarts_a="$(systemctl --user show "$VNC_UNIT" -p NRestarts --value)"
+    if "$HOME/.config/sway/scripts/systemd-userctl.sh" is-active --quiet "$VNC_UNIT"; then
+      restarts_a="$("$HOME/.config/sway/scripts/systemd-userctl.sh" show "$VNC_UNIT" -p NRestarts --value)"
       sleep 1
-      restarts_b="$(systemctl --user show "$VNC_UNIT" -p NRestarts --value)"
-      if systemctl --user is-active --quiet "$VNC_UNIT" && [[ "$restarts_a" == "$restarts_b" ]]; then
+      restarts_b="$("$HOME/.config/sway/scripts/systemd-userctl.sh" show "$VNC_UNIT" -p NRestarts --value)"
+      if "$HOME/.config/sway/scripts/systemd-userctl.sh" is-active --quiet "$VNC_UNIT" && [[ "$restarts_a" == "$restarts_b" ]]; then
         echo "VNC started on $address:$PORT using $output."
         return 0
       fi
     fi
-    systemctl --user is-failed --quiet "$VNC_UNIT" && break
+    "$HOME/.config/sway/scripts/systemd-userctl.sh" is-failed --quiet "$VNC_UNIT" && break
     sleep 0.2
   done
   echo 'wayvnc failed to remain running.' >&2
@@ -178,22 +177,22 @@ start_vnc() {
 
 stop_vnc() {
   local socket output
-  systemctl --user stop "$VNC_UNIT" 2>/dev/null || true
+  "$HOME/.config/sway/scripts/systemd-userctl.sh" stop "$VNC_UNIT" 2>/dev/null || true
   if [[ -f "$OWN_SWAY_FILE" ]]; then
-    systemctl --user stop "$SWAY_UNIT" 2>/dev/null || true
+    "$HOME/.config/sway/scripts/systemd-userctl.sh" stop "$SWAY_UNIT" 2>/dev/null || true
     rm -f "$OWN_SWAY_FILE"
-  elif [[ -s "$OUTPUT_FILE" ]] && socket="$(find_sway_socket)"; then
-    output="$(cat "$OUTPUT_FILE")"
+  elif [[ -s "$CREATED_OUTPUT_FILE" ]] && socket="$(find_sway_socket)"; then
+    output="$(cat "$CREATED_OUTPUT_FILE")"
     swaymsg -s "$socket" -q output "$output" disable 2>/dev/null || true
   fi
-  rm -f "$OUTPUT_FILE"
+  rm -f "$OUTPUT_FILE" "$CREATED_OUTPUT_FILE"
   echo 'VNC stopped.'
 }
 
 case "${1:-toggle}" in
-  status) systemctl --user is-active --quiet "$VNC_UNIT" ;;
-  start) lock; systemctl --user is-active --quiet "$VNC_UNIT" || start_vnc ;;
+  status) "$HOME/.config/sway/scripts/systemd-userctl.sh" is-active --quiet "$VNC_UNIT" ;;
+  start) lock; "$HOME/.config/sway/scripts/systemd-userctl.sh" is-active --quiet "$VNC_UNIT" || start_vnc ;;
   stop) lock; stop_vnc ;;
-  toggle) lock; if systemctl --user is-active --quiet "$VNC_UNIT"; then stop_vnc; else start_vnc; fi ;;
+  toggle) lock; if "$HOME/.config/sway/scripts/systemd-userctl.sh" is-active --quiet "$VNC_UNIT"; then stop_vnc; else start_vnc; fi ;;
   *) echo "Usage: ${0##*/} [toggle|start|stop|status]" >&2; exit 2 ;;
 esac
