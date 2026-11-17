@@ -28,7 +28,7 @@ def outputs():
 
 def classify(rows):
     internal = next((row for row in rows if row.get("active") and str(row.get("name", "")).startswith(("eDP-", "LVDS-", "DSI-"))), None)
-    hdmi = next((row for row in rows if row.get("active") and str(row.get("name", "")).startswith("HDMI-")), None)
+    hdmi = next((row for row in rows if str(row.get("name", "")).startswith("HDMI-")), None)
     return internal, hdmi
 
 
