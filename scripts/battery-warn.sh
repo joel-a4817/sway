@@ -45,7 +45,7 @@ low_mode=0
 last_nag_time=0
 last_exit_time=0
 
-while true; do
+while [[ -n "${SWAYSOCK:-}" && -S "$SWAYSOCK" ]]; do
   # ---- safe reads (survive suspend/resume) ----
   if ! read -r cap < "$BAT_PATH/capacity" 2>/dev/null \
      || ! read -r status < "$BAT_PATH/status" 2>/dev/null; then

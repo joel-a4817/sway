@@ -44,9 +44,12 @@ def replace_previous():
  time.sleep(.1)
 def daemon():
  replace_previous();state=load();last={};dirty=False;lastsave=0.0
- while True:
+ sock=os.environ.get('SWAYSOCK','')
+ while sock and os.path.exists(sock):
   try:nodes=list(walk(tree()))
-  except Exception:time.sleep(.2);continue
+  except Exception:
+   if not os.path.exists(sock): break
+   time.sleep(.2);continue
   present=set()
   for n in nodes:
    cid=str(n['id']);present.add(cid);floating=n.get('floating')=='user_on';g=geom(n);rec=state.setdefault(cid,{})

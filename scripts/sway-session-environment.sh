@@ -19,7 +19,6 @@ case "$action" in
     systemctl --user reset-failed graphical-session-pre.target graphical-session.target \
       xdg-desktop-portal.service xdg-desktop-portal-gtk.service \
       xdg-desktop-portal-wlr.service 2>/dev/null || true
-    systemctl --user start graphical-session-pre.target
     systemctl --user start graphical-session.target
     # GTK4/libadwaita clients obtain the dark preference from
     # org.freedesktop.portal.Settings. Restart stale portal instances only after
