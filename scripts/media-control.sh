@@ -4,7 +4,7 @@ set -u
 SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
 SELF_PID=$$
 
-pause_all_playback() {
+pause_playback_only_everywhere() {
     local socket
     # First pause all MPRIS players. mpv is included when mpv-mpris is active.
     if command -v playerctl >/dev/null 2>&1; then
@@ -35,8 +35,8 @@ for path in paths:
         pass
 PYPAUSE
 }
-# Media Control is a paused configuration surface from the moment it opens.
-pause_all_playback
+# Media Control only pauses playback. No backend action or cleanup path resumes media.
+pause_playback_only_everywhere
 
 is_previous_media_control() {
     local pid="$1" comm arg

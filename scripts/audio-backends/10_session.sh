@@ -131,8 +131,8 @@ trap 'exit 131' QUIT
 # same manifest independently, but it is not a dependency of this interface.
 TOPOLOGY_SCRIPT="$HOME_DIR/.config/sway/scripts/audio-backends/audio-backend-cli.py"
 [[ -f "$TOPOLOGY_SCRIPT" ]] || { echo "Missing local audio backend CLI: $TOPOLOGY_SCRIPT" >&2; exit 1; }
-if ! declare -F pause_all_playback >/dev/null 2>&1; then
-    pause_all_playback() {
+if ! declare -F pause_playback_only_everywhere >/dev/null 2>&1; then
+    pause_playback_only_everywhere() {
         command -v playerctl >/dev/null 2>&1 && playerctl --all-players pause >/dev/null 2>&1 || true
         command -v python3 >/dev/null 2>&1 || return 0
         python3 - <<'PYPAUSE' >/dev/null 2>&1 || true
@@ -158,7 +158,7 @@ fi
 normalize_menu_step() {
     # This file executes before 20_menu_helpers.sh is sourced, so the shared
     # pause/normalize boundary must be defined here rather than in that later file.
-    pause_all_playback
+    pause_playback_only_everywhere
     python3 "$TOPOLOGY_SCRIPT" --normalize-menu-open >>"$ACTION_LOG" 2>&1 || {
         printf '%s\n' 'Volume normalization failed; the selection was not applied.' >&2
         return 1
@@ -177,6 +177,9 @@ normalize_menu_step || {
     cat "$ACTION_LOG" >&2
     exit 1
 }
+# Playback remains paused after every action and after Media Control exits.
+# No cleanup, rollback, transaction, or backend lifecycle path resumes media.
+#
 # Once a baseline exists, the menu itself is read-only.
 output_topology() { python3 "$TOPOLOGY_SCRIPT" --output-topology; }
 run_quiet_action() {
