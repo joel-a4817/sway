@@ -13,6 +13,7 @@ LOCAL_STATE=HOME/".local/state/minecraft-server"; PEERS=HOME/".config/minecraft-
 FLOATING_IP=os.environ.get("MINECRAFT_FLOATING_IP","192.168.0.240")
 DDNS_ENV=HOME/".config/minecraft-server/ddns.env"
 CRITICAL=False
+RECOVERING=False
 RUNTIME_BACKUP_INTERVAL=int(os.environ.get("MINECRAFT_RUNTIME_BACKUP_INTERVAL","300"))
 RUNTIME_BACKUP_RETRY=int(os.environ.get("MINECRAFT_RUNTIME_BACKUP_RETRY","60"))
 RUNTIME_BACKUP_KEEP=int(os.environ.get("MINECRAFT_RUNTIME_BACKUP_KEEP","12"))
@@ -344,8 +345,6 @@ def ensure_dependencies(name=None):
       if state!=last:last=state;progress=time.monotonic()
       elif time.monotonic()-progress>=300:raise RuntimeError(f"Syncthing made no startup progress for 300s; state={state!r}")
       time.sleep(1)
-    if name:
-      recover_save_guard(name);recover_restore_transaction(name)
 def active_lan_route():
     routes=json.loads(run(["ip","-j","-4","route","show","default"],capture=True).stdout or "[]")
     candidates=[]
@@ -1075,9 +1074,7 @@ def cluster_transition_lock(remote_action=False):
     if coordinator==local:
         path=COORD/"cluster.lock"
         with path.open("a+") as handle:
-            try:fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB)
-            except BlockingIOError:
-                raise RuntimeError(f"Another Minecraft transition is already active through {coordinator}; retry after it finishes")
+            acquire_file_lock(handle,f"the active Minecraft cluster transition through {coordinator} to finish")
             try:yield
             finally:fcntl.flock(handle,fcntl.LOCK_UN)
         return
@@ -1086,7 +1083,7 @@ def cluster_transition_lock(remote_action=False):
     process=None;failure=[]
     for address in addresses:
       command=["ssh","-i",str(HOME/".ssh/minecraft_peers"),"-o","IdentitiesOnly=yes","-o","StrictHostKeyChecking=accept-new","-o","BatchMode=yes","-o","ConnectTimeout=4",address,
-               "mkdir -p ~/minecraft-server/coordination && exec flock -n ~/minecraft-server/coordination/cluster.lock sh -c 'echo LOCKED; cat >/dev/null'"]
+               "mkdir -p ~/minecraft-server/coordination && exec flock ~/minecraft-server/coordination/cluster.lock sh -c 'echo LOCKED; cat >/dev/null'"]
       try:
           candidate=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
           line=candidate.stdout.readline().strip()
@@ -1204,8 +1201,6 @@ def start(name=None):
     name=select_server(name,"start");ensure_dependencies(name)
     local=running_servers()
     _,_,_,local_owner=server_paths(name)
-    if local_owner.exists() and name not in local:
-        raise RuntimeError(f"Interrupted local stop detected for {name}; run 'minecraft-server stop {name}' to finalize its backup and handover before starting")
     if local:
         if name in local:print(f"{name} is already running locally.");return
         raise RuntimeError("Another local Minecraft server is already running: "+", ".join(local))
@@ -1356,6 +1351,49 @@ def stop(name=None,remote=False):
         except Exception as resume_error:print(f"Additionally failed to resume Syncthing: {resume_error}",file=sys.stderr,flush=True)
         raise
 
+def incomplete_operations_pending():
+    """Cheap local predicate used to decide whether a read command needs the cluster lock."""
+    for name in available_servers():
+        if save_guard(name).exists() or restore_journal_path(name).is_file():return True
+        owner=server_paths(name)[3]
+        if owner.exists() and not active(name):return True
+    return False
+
+def recover_incomplete_operations():
+    """Finish durable Minecraft transactions before accepting a new command.
+
+    This runs while the local and cluster transition locks are held. Recovery is
+    deliberately idempotent: save guards re-enable saves, restore journals either
+    roll back or finish replication, and stale ownership records complete the
+    normal verified stop/handover pathway. A second command therefore continues
+    the interrupted operation instead of starting beside it.
+    """
+    global RECOVERING
+    if RECOVERING:return
+    RECOVERING=True
+    try:
+        names=available_servers()
+        for name in names:
+            LOCAL_STATE.mkdir(parents=True,exist_ok=True)
+            if save_guard(name).exists():
+                print(f"Recovering interrupted save guard for {name}...",flush=True)
+                recover_save_guard(name)
+            if restore_journal_path(name).is_file():
+                print(f"Recovering interrupted restore for {name}...",flush=True)
+                recover_restore_transaction(name)
+            owner=server_paths(name)[3]
+            if owner.exists() and not active(name):
+                print(f"Completing interrupted stop/handover for {name}...",flush=True)
+                stop(name)
+        # A hard interruption can occur after pausing the dedicated Minecraft
+        # folder but before its first journal/owner write. With no local server
+        # running, receiving and converging that folder is always the safe state.
+        if names and not running_servers():
+            ensure_dependencies()
+            ensure_syncthing_resumed_and_current(cluster=False)
+    finally:
+        RECOVERING=False
+
 def backup_choices(name):
     choices=[]
     if BACKUPS.is_dir():
@@ -1503,7 +1541,7 @@ def on_signal(sig,frame):
     if CRITICAL:print("\nCritical save/transfer continues; interrupt ignored.",file=sys.stderr);return
     raise KeyboardInterrupt
 def main():
-    p=argparse.ArgumentParser();p.add_argument("action",nargs="?",default="toggle",choices=["toggle","start","stop","restore","status","logs","list","release-network","menu-status","prepare-sync","prune-storage","runtime-backup-once","runtime-backup-loop","runtime-backup-watchdog","verify-generation","verify-backup","syncthing-id"]);p.add_argument("server",nargs="?");p.add_argument("--machine",action="store_true");p.add_argument("--remote",action="store_true");p.add_argument("--backup");p.add_argument("--generation");p.add_argument("--digest");p.add_argument("--owner");a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument("action",nargs="?",default="toggle",choices=["toggle","start","stop","restore","status","logs","list","release-network","menu-status","prepare-sync","prune-storage","runtime-backup-once","runtime-backup-loop","runtime-backup-watchdog","verify-generation","verify-backup","syncthing-id","recover"]);p.add_argument("server",nargs="?");p.add_argument("--machine",action="store_true");p.add_argument("--remote",action="store_true");p.add_argument("--backup");p.add_argument("--generation");p.add_argument("--digest");p.add_argument("--owner");a=p.parse_args()
     for d in (ROOT,RUNTIME_ROOT,BACKUPS,COORD,LOCAL_STATE):d.mkdir(parents=True,exist_ok=True)
     for sig in (signal.SIGINT,signal.SIGTERM,signal.SIGHUP):signal.signal(sig,on_signal)
     # Machine status is a read-only peer probe. It must remain available while
@@ -1511,14 +1549,6 @@ def main():
     # misreported as an unreachable peer.
     if a.action=="status" and a.machine:return machine_status()
     if a.action=="syncthing-id":print(syncthing_device_id());return 0
-    if a.action=="menu-status":return menu_status()
-    if a.action=="prune-storage":
-        name=select_server(a.server,"prune storage for")
-        with server_backup_lock(name).open("a+") as backup_lock:
-            acquire_file_lock(backup_lock,f"{name} prune backup lock");prune_backup_storage(name)
-        print(f"Pruned retained backup storage for {name}.");return 0
-    if a.action=="runtime-backup-once":
-        name=select_server(a.server,"back up");runtime_backup_once(name);return 0
     if a.action=="runtime-backup-loop":
         name=select_server(a.server,"back up");runtime_backup_loop(name);return 0
     if a.action=="runtime-backup-watchdog":
@@ -1529,18 +1559,30 @@ def main():
     if a.action=="verify-backup":
         if not a.owner or not a.server or not a.generation or not a.digest:raise RuntimeError("verify-backup requires server, --owner, --generation and --digest")
         verify_backup_receiver(a.owner,a.server,a.generation,a.digest);return 0
-    if a.action=="prepare-sync":
-        with LOCK.open("w") as lock:
-            try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-            except BlockingIOError:raise RuntimeError("Cannot prepare sync during a local Minecraft transition")
-            return prepare_sync_receiver()
-    mutating=a.action in ("toggle","start","stop","restore","release-network")
+    user_command=a.action in ("toggle","start","stop","restore","status","logs","list","release-network","menu-status","prepare-sync","prune-storage","runtime-backup-once","recover")
+    mutating=a.action in ("toggle","start","stop","restore","release-network","recover")
     if mutating:syncthing_backup_folder_audit()
-    cluster=contextlib.nullcontext() if not mutating else cluster_transition_lock(a.remote)
+    pending_recovery=incomplete_operations_pending() if user_command else False
+    needs_cluster=mutating or pending_recovery
+    cluster=contextlib.nullcontext() if not needs_cluster else cluster_transition_lock(a.remote)
     with cluster:
       with LOCK.open("w") as lock:
-        try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        except BlockingIOError:raise RuntimeError("Another Minecraft transition is in progress")
+        if user_command:
+            acquire_file_lock(lock,"the active local Minecraft transition to finish")
+        else:
+            try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except BlockingIOError:raise RuntimeError("Another Minecraft transition is in progress")
+        if user_command:recover_incomplete_operations()
+        if a.action=="recover":print("Minecraft recovery complete.");return 0
+        if a.action=="menu-status":return menu_status()
+        if a.action=="prepare-sync":return prepare_sync_receiver()
+        if a.action=="prune-storage":
+            name=select_server(a.server,"prune storage for")
+            with server_backup_lock(name).open("a+") as backup_lock:
+                acquire_file_lock(backup_lock,f"{name} prune backup lock");prune_backup_storage(name)
+            print(f"Pruned retained backup storage for {name}.");return 0
+        if a.action=="runtime-backup-once":
+            name=select_server(a.server,"back up");runtime_backup_once(name);return 0
         if a.action=="list":print("\n".join(available_servers()));return 0
         if a.action=="status":return status(a.machine)
         if a.action=="logs":

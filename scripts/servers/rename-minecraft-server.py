@@ -25,6 +25,14 @@ def host():
  data=json.loads(r.stdout or '{}');dns=((data.get('Self') or {}).get('DNSName') or '').rstrip('.')
  if not dns:raise RuntimeError('This device has no Tailscale MagicDNS identity')
  return dns.split('.',1)[0]
+def manager_stop_for_rename(old,new):
+ # Before a local declaration change the old systemd unit exists; after a peer
+ # adopts the synchronized declaration only the new unit may exist. Route the
+ # verified stop through whichever declarative identity is currently installed.
+ names=set(declared())
+ target=old if old in names else new if new in names else old
+ cmd([sys.executable,'-B',str(MANAGER),'stop',target])
+
 def move_plan(old,new):
  return [(STATE/'servers'/old,STATE/'servers'/new,'synchronized snapshot'),(RUN/old,RUN/new,'runtime'),(STATE/'generations'/old,STATE/'generations'/new,'generations'),(BACK/host()/old,BACK/host()/new,'peer backup directory')]
 def local_file_moves(old,new):
@@ -201,7 +209,7 @@ def repair_name(new,interactive=True,announce=True,extra_olds=None):
  if interactive and pending and input("Complete this peer's unfinished rename now? [Y/n]: ").strip().lower() not in ('','y','yes'):return False
  # Always pass through the manager. If running, this performs its verified stop
  # generation/backup and handover publication before any path mutation.
- cmd([sys.executable,'-B',str(MANAGER),'stop',new])
+ manager_stop_for_rename(old,new)
  paused=pause_affected();changed=False
  try:
   for src,dst,label,old in pending:
@@ -224,7 +232,7 @@ def apply(old,new,tid,edit_nix=False):
  def phase(k):tx['phases'][k]=now();writej(txp,tx)
  # The manager owns clean stop, final verified runtime generation, ownership
  # release, and peer handover state. Never mutate names before this succeeds.
- cmd([sys.executable,'-B',str(MANAGER),'stop',old]);phase('stopped-and-backed-up')
+ manager_stop_for_rename(old,new);phase('stopped-and-backed-up')
  paused=pause_affected()
  try:
   if edit_nix and not tx['phases'].get('nix'):
@@ -274,6 +282,10 @@ def reconcile(interactive=True):
    tx.update({'complete':True,'rejected':True,'rejected_at':now(),'host':host()});writej(transaction(old,new,tid),tx);writej(LOCAL/'accepted-server-names.json',{'schema':1,'names':declared(),'updated_at':now()});print('Rename rejected locally; minecraft.nix was reverted. The shared intent is retained so other peers can make their own decision. Commit/push the revert if this is the cluster decision.')
  repair_all(interactive)
 def main():
+ # Every standalone rename entry first finishes manager-owned transactions and
+ # then adopts any durable rename intent left by an interrupted prior run.
+ cmd([sys.executable,'-B',str(MANAGER),'recover'])
+ reconcile(interactive=False)
  ap=argparse.ArgumentParser();ap.add_argument('old',nargs='?');ap.add_argument('new',nargs='?');ap.add_argument('--apply',action='store_true');ap.add_argument('--reconcile',action='store_true');a=ap.parse_args()
  if a.reconcile:return reconcile()
  if not a.old:
