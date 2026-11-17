@@ -26,7 +26,6 @@ exec_always --no-startup-id ~/.config/sway/scripts/sway-session-environment.sh s
 exec --no-startup-id sh -c 'exec ~/.config/sway/scripts/sway-session-environment.sh watch >/dev/null 2>&1'
 exec --no-startup-id sh -c 'mkdir -p "$HOME/.local/state/sway"; exec "$HOME/.config/sway/scripts/display-layout.py" >>"$HOME/.local/state/sway/display-layout.log" 2>&1'
 
-exec solaar
 
 include /etc/sway/config.d/*
 
