@@ -25,12 +25,19 @@ def host():
  data=json.loads(r.stdout or '{}');dns=((data.get('Self') or {}).get('DNSName') or '').rstrip('.')
  if not dns:raise RuntimeError('This device has no Tailscale MagicDNS identity')
  return dns.split('.',1)[0]
+def installed_unit(name):
+ unit=f'minecraft-server-{name}.service'
+ return subprocess.run(['systemctl','cat',unit],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0
+def active_unit(name):
+ unit=f'minecraft-server-{name}.service'
+ return subprocess.run(['systemctl','is-active','--quiet',unit],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0
 def manager_stop_for_rename(old,new):
- # Before a local declaration change the old systemd unit exists; after a peer
- # adopts the synchronized declaration only the new unit may exist. Route the
- # verified stop through whichever declarative identity is currently installed.
- names=set(declared())
- target=old if old in names else new if new in names else old
+ # minecraft.nix can synchronize before either peer rebuilds, so declarations
+ # do not prove which systemd unit is installed. Prefer the active unit, then an
+ # installed unit. Never ask the manager to stop a merely declared future name.
+ target=next((n for n in (old,new) if active_unit(n)),None)
+ if target is None:target=next((n for n in (old,new) if installed_unit(n)),None)
+ if target is None:raise RuntimeError(f'Neither old nor new Minecraft unit is installed: {old}, {new}; rebuild NixOS before completing rename recovery')
  cmd([sys.executable,'-B',str(MANAGER),'stop',target])
 
 def move_plan(old,new):
@@ -231,8 +238,10 @@ def apply(old,new,tid,edit_nix=False):
  txp=transaction(old,new,tid);tx=readj(txp,{'schema':1,'id':tid,'old':old,'new':new,'host':host(),'phases':{},'moves':[],'complete':False})
  def phase(k):tx['phases'][k]=now();writej(txp,tx)
  # The manager owns clean stop, final verified runtime generation, ownership
- # release, and peer handover state. Never mutate names before this succeeds.
- manager_stop_for_rename(old,new);phase('stopped-and-backed-up')
+ # release, and peer handover state. Resume after this durable phase rather than
+ # repeating a completed stop/backup when a rename process was interrupted.
+ if not tx['phases'].get('stopped-and-backed-up'):
+  manager_stop_for_rename(old,new);phase('stopped-and-backed-up')
  paused=pause_affected()
  try:
   if edit_nix and not tx['phases'].get('nix'):
@@ -289,8 +298,18 @@ def main():
  ap=argparse.ArgumentParser();ap.add_argument('old',nargs='?');ap.add_argument('new',nargs='?');ap.add_argument('--apply',action='store_true');ap.add_argument('--reconcile',action='store_true');a=ap.parse_args()
  if a.reconcile:return reconcile()
  if not a.old:
-  names=declared();print('Select server to rename:');[print(f' [{i}] {n}') for i,n in enumerate(names,1)];i=int(input('Server: '));a.old=names[i-1];a.new=input('New name: ').strip()
+  names=declared()
+  if not names:raise SystemExit('No declared Minecraft servers found')
+  print('Select server to rename:');[print(f' [{i}] {n}') for i,n in enumerate(names,1)]
+  raw=input('Server: ').strip()
+  if not raw.isdigit() or not 1<=int(raw)<=len(names):raise SystemExit('Invalid server selection')
+  a.old=names[int(raw)-1];a.new=input('New name: ').strip()
+ if not re.fullmatch(r'[a-z0-9][a-z0-9-]*',a.old or ''):raise SystemExit('Invalid old name')
  if not re.fullmatch(r'[a-z0-9][a-z0-9-]*',a.new or ''):raise SystemExit('Invalid new name')
+ names=declared()
+ if a.old!=a.new:
+  if a.old not in names:raise SystemExit(f'Old server is not declared: {a.old}')
+  if a.new in names:raise SystemExit(f'New server name already exists: {a.new}')
  if a.old==a.new:
   stale=stale_owned_names();known=known_old_names(a.new)
   unknown=[x for x in stale if x not in known]

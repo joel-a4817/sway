@@ -11,6 +11,13 @@ PEERS="$HOME/.config/minecraft-server/peers"
 SSH=(ssh -i "$HOME/.ssh/minecraft_peers" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=4)
 
 mapfile -t SERVERS < <("$MINECRAFT" list)
+((${#SERVERS[@]} > 0)) || { printf '%s\n' 'No declared Minecraft servers were returned.' >&2; exit 1; }
+for server in "${SERVERS[@]}"; do
+    [[ "$server" =~ ^[a-z0-9][a-z0-9-]*$ ]] || {
+        printf 'Refusing malformed Minecraft server entry: %q\n' "$server" >&2
+        exit 1
+    }
+done
 # Peer identity is the first label of this device's Tailscale MagicDNS name.
 # Both laptops intentionally share the same NixOS/kernel hostname.
 THIS_DEVICE="$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName // empty' | sed 's/\.$//; s/\..*$//' || true)"

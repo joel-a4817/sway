@@ -1351,6 +1351,16 @@ def stop(name=None,remote=False):
         except Exception as resume_error:print(f"Additionally failed to resume Syncthing: {resume_error}",file=sys.stderr,flush=True)
         raise
 
+@contextlib.contextmanager
+def recovery_output_to_stderr():
+    """Reserve stdout for machine-readable command results, including child output."""
+    sys.stdout.flush();saved_stdout=os.dup(1)
+    try:
+        os.dup2(2,1)
+        with contextlib.redirect_stdout(sys.stderr):yield
+    finally:
+        sys.stdout.flush();os.dup2(saved_stdout,1);os.close(saved_stdout)
+
 def incomplete_operations_pending():
     """Cheap local predicate used to decide whether a read command needs the cluster lock."""
     for name in available_servers():
@@ -1362,16 +1372,15 @@ def incomplete_operations_pending():
 def recover_incomplete_operations():
     """Finish durable Minecraft transactions before accepting a new command.
 
-    This runs while the local and cluster transition locks are held. Recovery is
-    deliberately idempotent: save guards re-enable saves, restore journals either
-    roll back or finish replication, and stale ownership records complete the
-    normal verified stop/handover pathway. A second command therefore continues
-    the interrupted operation instead of starting beside it.
+    Recovery diagnostics and lower-level command output are always sent to stderr.
+    Commands such as ``list`` and ``status --machine`` reserve stdout for their
+    parseable result and must never acquire a fake server name from recovery text.
     """
     global RECOVERING
     if RECOVERING:return
     RECOVERING=True
     try:
+      with recovery_output_to_stderr():
         names=available_servers()
         for name in names:
             LOCAL_STATE.mkdir(parents=True,exist_ok=True)
@@ -1385,9 +1394,6 @@ def recover_incomplete_operations():
             if owner.exists() and not active(name):
                 print(f"Completing interrupted stop/handover for {name}...",flush=True)
                 stop(name)
-        # A hard interruption can occur after pausing the dedicated Minecraft
-        # folder but before its first journal/owner write. With no local server
-        # running, receiving and converging that folder is always the safe state.
         if names and not running_servers():
             ensure_dependencies()
             ensure_syncthing_resumed_and_current(cluster=False)
