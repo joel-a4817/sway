@@ -298,16 +298,16 @@ def media_transaction(function):
         with media_change():return function(*args,**kwargs)
     return wrapped
 
-VNC_SERVICE='camilladsp-wayvnc.service'
+VNC_TOGGLE=HOME/'.config/sway/scripts/network/toggle-wayvnc-headless.sh'
 
 def vnc_state():
-    running=run(['systemctl','--user','is-active','--quiet',VNC_SERVICE],False,5).returncode==0
+    running=run([str(VNC_TOGGLE),'status'],False,5).returncode==0
     return {'running':running}
 
 def restart_vnc():
-    # Toggle the dedicated VNC unit. The backend itself is launched by the Python script.
     before=vnc_state()['running']
-    user_service('stop' if before else 'start',VNC_SERVICE)
+    result=run([str(VNC_TOGGLE),'toggle'],False,30,media_env())
+    if result.returncode:raise RuntimeError(result.stderr.strip() or result.stdout.strip() or 'VNC toggle failed')
     after=vnc_state()['running']
     if after==before:
         raise RuntimeError('VNC did not '+('stop' if before else 'start'))

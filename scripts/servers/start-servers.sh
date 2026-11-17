@@ -6,7 +6,7 @@ RESTORE_MINECRAFT="$HOME/.config/sway/scripts/servers/restore-minecraft-server.p
 RENAME_MINECRAFT="$HOME/.config/sway/scripts/servers/rename-minecraft-server.py"
 IPAD="$HOME/.config/sway/scripts/servers/start-ipad-webremote.sh"
 
-VNC_UNIT="camilladsp-wayvnc.service"
+VNC_TOGGLE="$HOME/.config/sway/scripts/network/toggle-wayvnc-headless.sh"
 PEERS="$HOME/.config/minecraft-server/peers"
 SSH=(ssh -i "$HOME/.ssh/minecraft_peers" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=4)
 
@@ -96,7 +96,7 @@ if "$IPAD" --status >/dev/null 2>&1; then
 else
     printf '  [1] iPad Web Remote\n'
 fi
-if systemctl --user is-active --quiet "$VNC_UNIT"; then
+if "$VNC_TOGGLE" status; then
     printf '  [2] VNC [running]\n'
 else
     printf '  [2] VNC\n'
@@ -135,11 +135,7 @@ for token in "${tokens[@]}"; do
     case "$token" in
         1) "$IPAD" toggle ;;
         2)
-            if systemctl --user is-active --quiet "$VNC_UNIT"; then
-                systemctl --user stop "$VNC_UNIT"
-            else
-                systemctl --user start "$VNC_UNIT"
-            fi
+            "$VNC_TOGGLE" toggle
             ;;
         *)
             printf 'Waiting for Minecraft transition, backup, verification, and Syncthing handover...\n'
