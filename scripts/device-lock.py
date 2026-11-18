@@ -46,7 +46,22 @@ def sway_outputs():
     return outputs
 
 
-def display_state():
+def reported_power(output):
+    """Return True/False when Sway reports power state, otherwise None."""
+    power = output.get('power')
+    if isinstance(power, bool):
+        return power
+    dpms = output.get('dpms')
+    if isinstance(dpms, bool):
+        return dpms
+    if isinstance(dpms, str):
+        value = dpms.lower()
+        if value in ('on', 'off'):
+            return value == 'on'
+    return None
+
+
+def saved_display_outputs():
     saved = read_json(DISPLAY_FILE, {})
     if not isinstance(saved, dict):
         saved = {}
@@ -54,8 +69,29 @@ def display_state():
     if not isinstance(outputs, list):
         legacy = saved.get('output')
         outputs = [legacy] if isinstance(legacy, str) and legacy else []
-    outputs = [name for name in outputs if isinstance(name, str) and name]
-    return {'off': bool(outputs), 'outputs': outputs}
+    return [name for name in outputs if isinstance(name, str) and name]
+
+
+def display_state():
+    current = sway_outputs()
+    connected = {
+        row.get('name'): row for row in current
+        if isinstance(row.get('name'), str) and row.get('name')
+    }
+    saved = [name for name in saved_display_outputs() if name in connected]
+    detected_off = [
+        name for name, row in connected.items()
+        if row.get('active') and reported_power(row) is False
+    ]
+    # Live compositor state is authoritative where available. Saved state is
+    # used only for outputs whose Sway payload has no power/DPMS field, so a
+    # stale file cannot force an unnecessary first toggle.
+    fallback_saved = [
+        name for name in saved if reported_power(connected[name]) is None
+    ]
+    outputs = list(dict.fromkeys(detected_off + fallback_saved))
+    return {'off': bool(outputs), 'outputs': outputs,
+            'detectedOutputs': detected_off, 'savedOutputs': saved}
 
 
 def set_output_power(name, on):
@@ -72,10 +108,6 @@ def display_power(on):
     if on:
         names = saved['outputs']
         if not names:
-            return saved
-        connected = {row.get('name') for row in sway_outputs() if row.get('name')}
-        names = [name for name in names if name in connected]
-        if not names:
             DISPLAY_FILE.unlink(missing_ok=True)
             return display_state()
         failures = []
@@ -88,14 +120,16 @@ def display_power(on):
             raise RuntimeError('Could not restore display power: ' + '; '.join(failures))
         DISPLAY_FILE.unlink(missing_ok=True)
     else:
-        if saved['off']:
-            return saved
+        # Re-read live output state immediately before changing it. Only outputs
+        # that are active and not already reported off are part of this toggle.
+        rows = sway_outputs()
         names = [
-            row['name'] for row in sway_outputs()
+            row['name'] for row in rows
             if row.get('active') and row.get('name')
+            and reported_power(row) is not False
         ]
         if not names:
-            raise RuntimeError('No active Sway outputs')
+            raise RuntimeError('No powered-on active Sway outputs')
         powered_off = []
         try:
             for name in names:
