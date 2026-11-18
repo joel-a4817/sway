@@ -213,11 +213,17 @@ def toggle():
     with COMBINED_FILE.open('a+') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         before = state()
-        if before['displayOff']:
-            display_power(True)
-        elif before['away']:
-            stop_lock()
+        if before['active']:
+            # Toggle ON as one operation: restore every display that this script
+            # powered off, then dismiss the lock. This works for either the
+            # laptop panel alone or the laptop panel plus external outputs.
+            if before['displayOff']:
+                display_power(True)
+            if before['away']:
+                stop_lock()
         else:
+            # Toggle OFF as one operation: lock first, then power off every
+            # currently active output (internal and external).
             start_lock()
             try:
                 display_power(False)
