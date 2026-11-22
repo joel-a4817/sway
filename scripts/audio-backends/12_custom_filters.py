@@ -77,7 +77,7 @@ def custom_filter_schema():
     if PROFILES.is_dir():
         for folder in sorted((p for p in PROFILES.iterdir() if p.is_dir() and not p.name.startswith('.')),key=lambda p:p.name.casefold()):
             if (folder/'stereo.yml').is_file():devices.append({'id':folder.name,'label':folder.name})
-    return {'devices':devices,'azimuth':{'min':min(az),'max':max(az)},'elevation':{'min':min(el),'max':max(el)},'coordinates':[{'azimuth':float(a),'elevation':float(e)} for a,e in sorted(cat,key=lambda pair:(float(pair[0]),float(pair[1])))],'pointModes':[{'id':'left','label':'Left channel to both ears'},{'id':'right','label':'Right channel to both ears'},{'id':'stereo','label':'Left to left, right to right'},{'id':'swap','label':'Left to right, right to left'},{'id':'average','label':'Averaged mono to both ears'}],'source':'SOFA','freeField':True}
+    return {'devices':devices,'azimuth':{'min':min(az),'max':max(az)},'elevation':{'min':min(el),'max':max(el)},'coordinates':[{'azimuth':float(a),'elevation':float(e)} for a,e in sorted(cat,key=lambda pair:(float(pair[0]),float(pair[1])))],'pointModes':[{'id':'left','label':'Left channel from this spot'},{'id':'right','label':'Right channel from this spot'}],'source':'SOFA','freeField':True}
 
 def _safe_component(value,label):
     value=str(value or '').strip()
@@ -120,7 +120,7 @@ def create_custom_filter(request):
     for item in raw:
         if not isinstance(item,dict):raise ValueError('Invalid SOFA point row')
         az=_coord_value(item.get('azimuth'));el=_coord_value(item.get('elevation'));source=str(item.get('source') or '').lower()
-        if source not in ('average','left','right','stereo','swap'):raise ValueError('Source must be average, left, right, stereo, or swapped stereo')
+        if source not in ('left','right'):raise ValueError('Source must be left or right')
         row=cat.get((az,el))
         if row is None:raise ValueError('No SOFA measurement exists for azimuth '+az+', elevation '+el)
         points.append((row['index'],source,az,el))
@@ -128,10 +128,8 @@ def create_custom_filter(request):
     custom=target.parent;assets=custom/'.assets'/name
     for i,(index,source,az,el) in enumerate(points):
         asset=assets/f'point-{i:03d}-az-{az}-el-{el}.wav'
-        mono={'average':[{'channel':0,'gain':-6.02059991328},{'channel':1,'gain':-6.02059991328}],'left':[{'channel':0,'gain':0.0}],'right':[{'channel':1,'gain':0.0}]}
-        if source in mono:left_sources=right_sources=mono[source]
-        elif source=='stereo':left_sources=[{'channel':0,'gain':0.0}];right_sources=[{'channel':1,'gain':0.0}]
-        else:left_sources=[{'channel':1,'gain':0.0}];right_sources=[{'channel':0,'gain':0.0}]
+        selected_channel=0 if source=='left' else 1
+        left_sources=right_sources=[{'channel':selected_channel,'gain':0.0}]
         spread.extend(({'dest':2*i,'sources':left_sources},{'dest':2*i+1,'sources':right_sources}))
         filters[f'custom_sofa_{i}_left']={'type':'Conv','parameters':{'type':'Wav','filename':str(asset),'channel':0}}
         filters[f'custom_sofa_{i}_right']={'type':'Conv','parameters':{'type':'Wav','filename':str(asset),'channel':1}}
@@ -222,7 +220,7 @@ def custom_filter_cli():
             if (az,el) not in cat:
                 nearby=sorted(cat,key=lambda pair:(float(pair[0])-float(az))**2+(float(pair[1])-float(el))**2)[:5]
                 print('Exact coordinate unavailable. Nearby: '+', '.join('az '+a+' / el '+e for a,e in nearby));continue
-            try:source=('average','left','right','stereo','swap')[pick('Audio for this point',['Averaged mono to both ears','Left channel to both ears','Right channel to both ears','Left to left, right to right','Left to right, right to left'])]
+            try:source=('left','right')[pick('Channel for this point',['Left channel from this spot','Right channel from this spot'])]
             except Back:continue
             except Exit:return
             points.append({'azimuth':az,'elevation':el,'source':source})

@@ -703,15 +703,13 @@ def rebuild_custom_profile(path,text,standard_profiles):
         right_sources=(spread[2*index+1] or {}).get('sources')
         if not isinstance(right_sources,list):raise RuntimeError(f'{path}: HRIR point {index+1} right source mapping is invalid')
         right_channels=[row.get('channel') for row in right_sources if isinstance(row,dict)]
-        source=('average' if left_channels==[0,1] and right_channels==[0,1] else 'left' if left_channels==[0] and right_channels==[0] else 'right' if left_channels==[1] and right_channels==[1] else 'stereo' if left_channels==[0] and right_channels==[1] else 'swap' if left_channels==[1] and right_channels==[0] else None)
+        source=('left' if left_channels==[0] and right_channels==[0] else 'right' if left_channels==[1] and right_channels==[1] else None)
         if source is None:raise RuntimeError(f'{path}: HRIR point {index+1} source mapping is unsupported')
         points.append((Path(filename),source))
     new_filters=config.setdefault('filters',{});mixers=config.setdefault('mixers',{});pipeline=config.setdefault('pipeline',[]);mapping=[]
     for index,(filename,source) in enumerate(points):
-        mono_sources={'average':[{'channel':0,'gain':-6.02059991328},{'channel':1,'gain':-6.02059991328}],'left':[{'channel':0,'gain':0.0}],'right':[{'channel':1,'gain':0.0}]}
-        if source in mono_sources:left_sources=right_sources=mono_sources[source]
-        elif source=='stereo':left_sources=[{'channel':0,'gain':0.0}];right_sources=[{'channel':1,'gain':0.0}]
-        else:left_sources=[{'channel':1,'gain':0.0}];right_sources=[{'channel':0,'gain':0.0}]
+        selected_channel=0 if source=='left' else 1
+        left_sources=right_sources=[{'channel':selected_channel,'gain':0.0}]
         mapping.extend(({'dest':2*index,'sources':left_sources},{'dest':2*index+1,'sources':right_sources}))
         new_filters[f'{prefix}_{index}_left']={'type':'Conv','parameters':{'type':'Wav','filename':str(filename),'channel':0}}
         new_filters[f'{prefix}_{index}_right']={'type':'Conv','parameters':{'type':'Wav','filename':str(filename),'channel':1}}
