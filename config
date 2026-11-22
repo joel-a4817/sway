@@ -35,6 +35,7 @@ exec ~/.config/sway/scripts/battery-warn.sh
 exec autotiling
 default_orientation auto
 exec_always ~/.config/sway/scripts/windows/borders-follow-state.sh --replace
+exec_always --no-startup-id ~/.config/sway/scripts/windows/float-state-daemon.py
 
 set $popup popup
 
