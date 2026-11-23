@@ -1,137 +1,77 @@
 #!/usr/bin/env python3
-"""Remember and restore floating geometry for each live Sway container."""
-import fcntl
-import json
-import os
-import subprocess
-import time
+"""Per-container floating geometry store used by smart-floating-toggle.sh."""
+import argparse, fcntl, json, os, signal, subprocess, time
 from pathlib import Path
-
-STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "sway/windows"
-STATE_FILE = STATE_DIR / "floating-geometry.json"
-LOCK_FILE = STATE_DIR / "floating-geometry.lock"
-POLL_SECONDS = 0.04
-MIN_WIDTH = 100
-MIN_HEIGHT = 80
-MAX_DIMENSION = 16384
-
-
-def sway_tree():
-    return json.loads(subprocess.check_output(
-        ["swaymsg", "-r", "-t", "get_tree"], text=True, stderr=subprocess.DEVNULL
-    ))
-
-
-def windows(node):
-    if not isinstance(node, dict):
-        return
-    if node.get("type") in ("con", "floating_con") and (node.get("app_id") or node.get("window")):
-        yield node
-    for key in ("nodes", "floating_nodes"):
-        for child in node.get(key, []):
-            yield from windows(child)
-
-
-def geometry(node):
-    rect = node.get("rect") or {}
-    try:
-        value = {key: int(rect[key]) for key in ("x", "y", "width", "height")}
-    except (KeyError, TypeError, ValueError):
-        return None
-    if not (MIN_WIDTH <= value["width"] <= MAX_DIMENSION and MIN_HEIGHT <= value["height"] <= MAX_DIMENSION):
-        return None
-    return value
-
-
-def is_floating(node):
-    return node.get("floating") in ("user_on", "auto_on")
-
-
-def load_state():
-    try:
-        value = json.loads(STATE_FILE.read_text())
-        return value if isinstance(value, dict) else {}
-    except (OSError, ValueError):
-        return {}
-
-
-def save_state(value):
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    temporary = STATE_FILE.with_suffix(".tmp")
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
-    os.chmod(temporary, 0o600)
-    os.replace(temporary, STATE_FILE)
-
-
-def restore(container_id, value):
-    command = (
-        f'[con_id={container_id}] resize set width {value["width"]} px '
-        f'height {value["height"]} px, move position {value["x"]} px {value["y"]} px'
-    )
-    subprocess.run(["swaymsg", "--", command], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-
-def run():
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    with LOCK_FILE.open("a+") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return
-        state = load_state()
-        previous = {}
-        pending_restore = {}
-        while os.environ.get("SWAYSOCK") and Path(os.environ["SWAYSOCK"]).exists():
-            try:
-                current_nodes = list(windows(sway_tree()))
-            except (OSError, subprocess.SubprocessError, ValueError):
-                time.sleep(POLL_SECONDS)
-                continue
-            present = set()
-            dirty = False
-            for node in current_nodes:
-                container_id = str(node["id"])
-                present.add(container_id)
-                floating = is_floating(node)
-                prior = previous.get(container_id)
-                saved = state.get(container_id)
-                current_geometry = geometry(node)
-
-                if floating and prior is False and saved:
-                    # Re-floating a live window restores its last floating rectangle.
-                    # Keep the target pending until Sway reports it, so the temporary
-                    # default float rectangle cannot overwrite the saved rectangle.
-                    pending_restore[container_id] = {"geometry": saved, "until": time.monotonic() + 1.0}
-                    restore(container_id, saved)
-                elif floating and container_id in pending_restore:
-                    pending = pending_restore[container_id]
-                    if current_geometry == pending["geometry"]:
-                        pending_restore.pop(container_id, None)
-                    elif time.monotonic() < pending["until"]:
-                        restore(container_id, pending["geometry"])
-                    else:
-                        pending_restore.pop(container_id, None)
-                elif floating and current_geometry and current_geometry != saved:
-                    # This covers windows opened floating, first-time floats, and every
-                    # later user move/resize while floating.
-                    state[container_id] = current_geometry
-                    dirty = True
-                elif not floating:
-                    pending_restore.pop(container_id, None)
-                previous[container_id] = floating
-
-            # Container IDs identify a particular live window. Forget records only
-            # after that window closes; tiled windows retain their floating rectangle.
-            for container_id in list(previous):
-                if container_id not in present:
-                    previous.pop(container_id, None)
-                    pending_restore.pop(container_id, None)
-                    if state.pop(container_id, None) is not None:
-                        dirty = True
-            if dirty:
-                save_state(state)
-            time.sleep(POLL_SECONDS)
-
-
-if __name__ == "__main__":
-    run()
+D=Path(os.environ.get("XDG_STATE_HOME",Path.home()/".local/state"))/"sway/windows"
+D.mkdir(parents=True,exist_ok=True,mode=0o700)
+STATE=D/"floating-geometry.json";LOCK=D/"floating-geometry.lock";PID=D/"floating-geometry.pid"
+def run_json(args):return json.loads(subprocess.check_output(["swaymsg","-r",*args],text=True,stderr=subprocess.DEVNULL))
+def walk(n):
+ if isinstance(n,dict):
+  if n.get("type") in ("con","floating_con") and (n.get("app_id") or n.get("window")):yield n
+  for field in ("nodes","floating_nodes"):
+   for child in n.get(field,[]):yield from walk(child)
+def valid_geom(n):
+ try:r=n["rect"];g={k:int(r[k]) for k in ("x","y","width","height")}
+ except (KeyError,TypeError,ValueError):return None
+ return g if 100<=g["width"]<=16384 and 80<=g["height"]<=16384 else None
+def floating(n):return n.get("floating") in ("user_on","auto_on")
+def load():
+ try:v=json.loads(STATE.read_text());return v if isinstance(v,dict) else {}
+ except (OSError,json.JSONDecodeError):return {}
+def save(v):
+ t=STATE.with_name("."+STATE.name+".tmp");t.write_text(json.dumps(v,indent=2,sort_keys=True)+"\n");os.chmod(t,0o600);os.replace(t,STATE)
+def ours(pid):
+ try:return "float-state-daemon.py" in Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0",b" ").decode(errors="ignore")
+ except (OSError,ValueError):return False
+def replace_old():
+ try:pid=int(PID.read_text().strip())
+ except (OSError,ValueError):return
+ if not ours(pid):return
+ try:os.kill(pid,signal.SIGTERM)
+ except ProcessLookupError:return
+ for _ in range(100):
+  if not ours(pid):return
+  time.sleep(.02)
+ try:os.kill(pid,signal.SIGKILL)
+ except ProcessLookupError:pass
+def main():
+ ap=argparse.ArgumentParser();ap.add_argument("--replace",action="store_true");a=ap.parse_args()
+ if a.replace:replace_old()
+ with LOCK.open("a+") as lock:
+  deadline=time.monotonic()+5
+  while True:
+   try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB);break
+   except BlockingIOError:
+    if time.monotonic()>=deadline:raise SystemExit("floating-state daemon lock remained busy")
+    time.sleep(.05)
+  PID.write_text(f"{os.getpid()}\n");os.chmod(PID,0o600);state=load();previous={};running=True
+  def stop(_s,_f):
+   nonlocal running;running=False
+  for sig in (signal.SIGTERM,signal.SIGINT,signal.SIGHUP):signal.signal(sig,stop)
+  try:
+   while running and os.environ.get("SWAYSOCK") and Path(os.environ["SWAYSOCK"]).exists():
+    try:nodes=list(walk(run_json(["-t","get_tree"])))
+    except (OSError,subprocess.SubprocessError,json.JSONDecodeError):time.sleep(.15);continue
+    dirty=False;live=set()
+    for n in nodes:
+     cid=str(n["id"]);live.add(cid);now=floating(n);was=previous.get(cid)
+     # Container IDs distinguish simultaneous windows of the same application.
+     if now:
+      if was is False and cid in state:
+       g=state[cid]
+       command=(f'[con_id={cid}] resize set width {g["width"]} px height {g["height"]} px, '
+                f'move absolute position {g["x"]} px {g["y"]} px')
+       subprocess.run(["swaymsg","--",command],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=False)
+      else:
+       g=valid_geom(n)
+       if g and state.get(cid)!=g:state[cid]=g;dirty=True
+     previous[cid]=now
+    previous={cid:value for cid,value in previous.items() if cid in live}
+    if dirty:save(state)
+    time.sleep(.10)
+  finally:
+   try:
+    if PID.read_text().strip()==str(os.getpid()):PID.unlink()
+   except OSError:pass
+if __name__=="__main__":main()
