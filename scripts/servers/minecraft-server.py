@@ -837,9 +837,10 @@ def runtime_backup_once(name):
         data={"schema":1,"complete":True,"server":name,"peer":local_node_name(),"kind":"running","generation":generation,
               "created":dt.datetime.now(dt.timezone.utc).isoformat(),"archive":"backup.tar.gz","archive_sha256":digest,"source":str(runtime)}
         write_json_atomic(root/"manifest.json",data)
-        rcon(runtime,"save-on");guard.unlink(missing_ok=True);verify_runtime_backup_on_peers(name,data)
-        data["replicated"]=True;data["replicated_at"]=dt.datetime.now(dt.timezone.utc).isoformat();write_json_atomic(root/"manifest.json",data);write_json_atomic(backup_health_path(name),data)
-        prune_backup_storage(name);print(f"Runtime backup protected locally and on peers: {archive}",flush=True);return archive
+        rcon(runtime,"save-on");guard.unlink(missing_ok=True);fsync_directory(guard.parent)
+        data["local_verified"]=True;data["verified_at"]=dt.datetime.now(dt.timezone.utc).isoformat()
+        write_json_atomic(root/"manifest.json",data);write_json_atomic(backup_health_path(name),data)
+        prune_backup_storage(name);print(f"Runtime backup protected locally: {archive}",flush=True);return archive
       except Exception:
         incoming.unlink(missing_ok=True)
         try:
@@ -855,7 +856,7 @@ def protected_backup_age(name):
     if not path.is_file():return float("inf")
     try:
       data=json.loads(path.read_text())
-      created=data.get("replicated_at") or data.get("created")
+      created=data.get("verified_at") or data.get("created")
       return max(0,(dt.datetime.now(dt.timezone.utc)-dt.datetime.fromisoformat(created)).total_seconds())
     except Exception:return float("inf")
 
@@ -895,11 +896,17 @@ def runtime_backup_watchdog(name):
       # The stop command must acquire this same backup lock. Never invoke it
       # while the watchdog still owns the lock.
       if should_stop:
-        print(f"No peer-verified backup within {stale_limit}s; stopping {name} safely.",file=sys.stderr,flush=True)
-        result=run([sys.executable,"-B",str(Path(__file__).resolve()),"stop",name],check=False,capture=True)
-        if result.stdout:print(result.stdout,file=sys.stderr,flush=True)
-        if result.returncode and active(name):
-          print("Managed stop failed; forcing the systemd service down to prevent unprotected play.",file=sys.stderr,flush=True)
+        print(f"No valid local runtime backup within {stale_limit}s; stopping {name} safely.",file=sys.stderr,flush=True)
+        try:
+          runtime=unit_workdir(name);run(["sudo","systemctl","stop",unit(name)],check=False)
+          deadline=time.monotonic()+300
+          while active(name) and time.monotonic()<deadline:time.sleep(1)
+          if active(name):raise RuntimeError("systemd service did not stop within 300 seconds")
+          archive=archive_transaction(name,runtime,"backup-failure-stop")
+          if not archive:raise RuntimeError("stopped runtime was empty")
+          print(f"Emergency local stop backup created: {archive}",file=sys.stderr,flush=True)
+        except Exception as error:
+          print(f"Emergency local stop could not complete a final archive: {error}",file=sys.stderr,flush=True)
           run(["sudo","systemctl","stop",unit(name)],check=False)
         return
       time.sleep(1)
@@ -1319,7 +1326,7 @@ def start(name=None):
                 runtime_backup_once(name)
                 start_runtime_backup_loop(name)
                 CRITICAL=False
-                print(f"Live runtime backup: protected immediately, then every {RUNTIME_BACKUP_INTERVAL//60} minutes.")
+                print(f"Live local runtime backup: protected immediately, then every {RUNTIME_BACKUP_INTERVAL//60} minutes.")
                 print("Syncthing is paused until the server is stopped and snapshotted.");return
             if time.monotonic()-last_progress>=idle_timeout:
                 raise RuntimeError(f"{name} made no startup progress for {idle_timeout}s (active={is_active}, port_busy={is_busy})")
