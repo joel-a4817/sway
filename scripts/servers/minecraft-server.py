@@ -1565,14 +1565,28 @@ def machine_status():
 def on_signal(sig,frame):
     if CRITICAL:print("\nCritical save/transfer continues; interrupt ignored.",file=sys.stderr);return
     raise KeyboardInterrupt
+def server_location_labels():
+    names=available_servers();running=set(running_servers());found,unreachable=remote_state()
+    locations={name:["RUNNING LOCALLY"] for name in running}
+    transitioning=[]
+    for label,address,servers in found:
+        if "transitioning" in servers:transitioning.append(label)
+        for name in servers:
+            if name!="transitioning":locations.setdefault(name,[]).append(f"RUNNING ON {label}")
+    return names,locations,transitioning,unreachable
+
 def choose_server_menu(purpose):
-    names=available_servers()
-    if not names:raise RuntimeError("No Minecraft servers are declared in NixOS")
     while True:
-        print(f"\nChoose a server to {purpose}:\n\n[B] Back")
+        names,locations,transitioning,unreachable=server_location_labels()
+        if not names:raise RuntimeError("No Minecraft servers are declared in NixOS")
+        print(f"\nChoose a server to {purpose}:\n\n[E] Exit\n[B] Back")
         for i,name in enumerate(names,1):
-            print(f"[{i}] {name} [{'RUNNING' if active(name) else 'STOPPED'}]")
+            labels=locations.get(name,[])
+            print(f"[{i}] {name} [{' / '.join(labels) if labels else 'STOPPED'}]")
+        if transitioning:print("Peers transitioning: "+", ".join(transitioning))
+        if unreachable:print("Unreachable peers: "+", ".join(unreachable))
         raw=input("\nSelection: ").strip().casefold()
+        if raw=="e":raise SystemExit(0)
         if raw=="b":return None
         if raw.isdigit() and 1<=int(raw)<=len(names):return names[int(raw)-1]
         if raw in names:return raw
@@ -1580,20 +1594,19 @@ def choose_server_menu(purpose):
 
 def interactive_menu():
     while True:
-        names=available_servers()
+        names,locations,transitioning,unreachable=server_location_labels()
         if not names:raise RuntimeError("No Minecraft servers are declared in NixOS")
-        print("Minecraft server manager\n\n[B] Back")
+        print("Minecraft server manager\n\n[E] Exit")
         for i,name in enumerate(names,1):
-            print(f"[{i}] {name} [{'RUNNING' if active(name) else 'STOPPED'}]")
-        status_number=len(names)+1;logs_number=len(names)+2
-        print(f"[{status_number}] Status")
+            labels=locations.get(name,[])
+            print(f"[{i}] {name} [{' / '.join(labels) if labels else 'STOPPED'}]")
+        logs_number=len(names)+1
         print(f"[{logs_number}] Logs")
+        if transitioning:print("Peers transitioning: "+", ".join(transitioning))
+        if unreachable:print("Unreachable peers: "+", ".join(unreachable))
         raw=input("\nSelection: ").strip().casefold()
-        if raw=="b":raise SystemExit(0)
-        if raw.isdigit() and 1<=int(raw)<=len(names):
-            name=names[int(raw)-1]
-            return "toggle",name
-        if raw==str(status_number):return "status",None
+        if raw=="e":raise SystemExit(0)
+        if raw.isdigit() and 1<=int(raw)<=len(names):return "toggle",names[int(raw)-1]
         if raw==str(logs_number):
             name=choose_server_menu("view logs for")
             if name is None:continue
