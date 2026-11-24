@@ -1535,11 +1535,23 @@ def status(machine=False):
     if machine:
         suffix=f" floating={FLOATING_IP}" if floating_present() else ""
         print(("running "+" ".join(running) if running else "stopped")+suffix);return 0
-    names=available_servers();print("Available servers: "+(", ".join(names) or "none"));print("Running locally: "+(", ".join(running) or "none"))
-    found,unreachable=remote_state()
-    for label,address,servers in found:print(f"Remote {label} via {address}: {', '.join(servers)}")
+    names=available_servers();local=local_node_name();found,unreachable=remote_state()
+    locations={name:["locally"] for name in running}
+    transitioning=[]
+    for label,address,servers in found:
+        if "transitioning" in servers:transitioning.append(label)
+        for name in servers:
+            if name!="transitioning":locations.setdefault(name,[]).append(label)
+    print("Minecraft server status:")
+    for name in names:
+        hosts=locations.get(name,[])
+        if hosts:print(f"  {name}: RUNNING on {', '.join(hosts)}")
+        else:print(f"  {name}: STOPPED")
+    for name,hosts in sorted(locations.items()):
+        if name not in names:print(f"  {name}: RUNNING on {', '.join(hosts)} (remote-only declaration)")
+    if transitioning:print("Peers transitioning: "+", ".join(transitioning))
     if unreachable:print("Unreachable peers: "+", ".join(unreachable))
-    return 0 if running else 3
+    return 0 if locations else 3
 def machine_status():
     # A separate status process must report that start/stop currently owns the
     # lock. Reporting plain "stopped" here allowed both laptops to start at once.
@@ -1553,15 +1565,39 @@ def machine_status():
 def on_signal(sig,frame):
     if CRITICAL:print("\nCritical save/transfer continues; interrupt ignored.",file=sys.stderr);return
     raise KeyboardInterrupt
-def interactive_menu():
-    print("Minecraft server manager\n\n[E] Exit\n[1] Start a server\n[2] Stop a running/local-owned server\n[3] Status\n[4] Logs")
+def choose_server_menu(purpose):
+    names=available_servers()
+    if not names:raise RuntimeError("No Minecraft servers are declared in NixOS")
     while True:
-        choice=input("\nSelection: ").strip().casefold()
-        if choice=="e":raise SystemExit(0)
-        if choice=="1":return "start",select_server(None,"start")
-        if choice=="2":return "stop",select_server(None,"stop")
-        if choice=="3":return "status",None
-        if choice=="4":return "logs",select_server(None,"view logs for")
+        print(f"\nChoose a server to {purpose}:\n\n[B] Back")
+        for i,name in enumerate(names,1):
+            print(f"[{i}] {name} [{'RUNNING' if active(name) else 'STOPPED'}]")
+        raw=input("\nSelection: ").strip().casefold()
+        if raw=="b":return None
+        if raw.isdigit() and 1<=int(raw)<=len(names):return names[int(raw)-1]
+        if raw in names:return raw
+        print("Invalid selection.")
+
+def interactive_menu():
+    while True:
+        names=available_servers()
+        if not names:raise RuntimeError("No Minecraft servers are declared in NixOS")
+        print("Minecraft server manager\n\n[B] Back")
+        for i,name in enumerate(names,1):
+            print(f"[{i}] {name} [{'RUNNING' if active(name) else 'STOPPED'}]")
+        status_number=len(names)+1;logs_number=len(names)+2
+        print(f"[{status_number}] Status")
+        print(f"[{logs_number}] Logs")
+        raw=input("\nSelection: ").strip().casefold()
+        if raw=="b":raise SystemExit(0)
+        if raw.isdigit() and 1<=int(raw)<=len(names):
+            name=names[int(raw)-1]
+            return "toggle",name
+        if raw==str(status_number):return "status",None
+        if raw==str(logs_number):
+            name=choose_server_menu("view logs for")
+            if name is None:continue
+            return "logs",name
         print("Invalid selection.")
 
 def main():
