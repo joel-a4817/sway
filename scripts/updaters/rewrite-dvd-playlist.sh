@@ -18,7 +18,7 @@ swaynag \
 '
 dvd+rw-format -blank /dev/sr0
 
-mkisofs -J -R -o /tmp/music.iso ~/Downloads/Music
+mkisofs -J -R -o /tmp/music.iso ~/Music
 
 growisofs -dvd-compat -Z /dev/sr0=/tmp/music.iso
 
