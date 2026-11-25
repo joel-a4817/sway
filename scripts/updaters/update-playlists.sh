@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-music_dir="$HOME/Downloads-S5/Music"
+music_dir="$HOME/Downloads/Music"
 
 pause_before_close() {
     echo
