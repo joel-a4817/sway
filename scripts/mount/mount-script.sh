@@ -1,52 +1,55 @@
 #!/usr/bin/env bash
+set -Eeuo pipefail
 
-set -u
+for command in readlink lsblk findmnt awk basename tr sed id sudo mount umount grep; do
+  command -v "$command" >/dev/null 2>&1 || { echo "Missing command: $command" >&2; exit 127; }
+done
 
-DEVICE_NAME="${1:-}"
+SOURCE_INPUT="${1:-}"
+[[ -n $SOURCE_INPUT ]] || { echo "Usage: $0 /dev/<filesystem-device>" >&2; exit 2; }
+SOURCE="$(readlink -f -- "$SOURCE_INPUT")"
+[[ -b $SOURCE ]] || { echo "Not a block device: $SOURCE" >&2; exit 1; }
 
-case "$DEVICE_NAME" in
-    sda|sdb|sr0)
-        ;;
-    *)
-        echo "Usage: $0 {sda|sdb|sr0}"
-        exit 2
-        ;;
-esac
+FSTYPE="$(lsblk -dnro FSTYPE "$SOURCE" | head -n1)"
+[[ -n $FSTYPE ]] || { echo "No filesystem found on $SOURCE" >&2; exit 1; }
 
-DEVICE="/dev/$DEVICE_NAME"
-MOUNT_POINT="$HOME/mount/$DEVICE_NAME"
+ROOT_SOURCE="$(findmnt -rn -o SOURCE / 2>/dev/null || true)"
+ROOT_SOURCE="$(readlink -f -- "$ROOT_SOURCE" 2>/dev/null || printf '%s' "$ROOT_SOURCE")"
+[[ $SOURCE != "$ROOT_SOURCE" ]] || { echo "Refusing to toggle the root filesystem: $SOURCE" >&2; exit 1; }
 
-if [[ ! -b "$DEVICE" ]]; then
-    echo "Error: block device does not exist: $DEVICE"
-    exit 1
+mapfile -t TARGETS < <(findmnt -rn -S "$SOURCE" -o TARGET 2>/dev/null | awk 'NF && !seen[$0]++')
+if ((${#TARGETS[@]})); then
+  for ((index=${#TARGETS[@]}-1; index>=0; index--)); do
+    echo "Unmounting ${TARGETS[$index]}..."
+    sudo umount -- "${TARGETS[$index]}"
+  done
+  echo "Unmounted $SOURCE."
+  exit 0
 fi
 
-EXISTING_MOUNT="$(
-    findmnt -rn -S "$DEVICE" -o TARGET |
-        head -n 1
-)"
+DEVICE_NAME="$(basename -- "$SOURCE")"
+LABEL="$(lsblk -dnro LABEL "$SOURCE" | head -n1)"
+SAFE_LABEL="$(printf '%s' "$LABEL" | tr -cs '[:alnum:]._-' '_' | sed 's/^_*//;s/_*$//')"
+MOUNT_POINT="$HOME/mount/${SAFE_LABEL:+$SAFE_LABEL-}$DEVICE_NAME"
+mkdir -p -- "$MOUNT_POINT"
 
-if [[ -n "$EXISTING_MOUNT" ]]; then
-    echo "Unmounting $DEVICE from $EXISTING_MOUNT..."
+MOUNT_OPTIONS=()
+case "$FSTYPE" in
+  exfat|vfat|fat|msdos|ntfs|ntfs3)
+    MOUNT_OPTIONS=(-o "uid=$(id -u),gid=$(id -g),umask=022")
+    ;;
+esac
 
-    if sudo umount -- "$EXISTING_MOUNT"; then
-        echo "Successfully unmounted $DEVICE from $EXISTING_MOUNT."
-    else
-        echo "Error: failed to unmount $DEVICE from $EXISTING_MOUNT."
-        exit 1
-    fi
+echo "Mounting $SOURCE ($FSTYPE) at $MOUNT_POINT..."
+if sudo mount "${MOUNT_OPTIONS[@]}" -- "$SOURCE" "$MOUNT_POINT"; then
+  if findmnt -rn -S "$SOURCE" -o TARGET | grep -Fx -- "$MOUNT_POINT" >/dev/null; then
+    echo "Mounted $SOURCE at $MOUNT_POINT."
+  else
+    echo "Mount returned success but verification failed for $SOURCE." >&2
+    exit 1
+  fi
 else
-    if ! mkdir -p -- "$MOUNT_POINT"; then
-        echo "Error: failed to create mount point: $MOUNT_POINT"
-        exit 1
-    fi
-
-    echo "Mounting $DEVICE at $MOUNT_POINT..."
-
-    if sudo mount -- "$DEVICE" "$MOUNT_POINT"; then
-        echo "Successfully mounted $DEVICE at $MOUNT_POINT."
-    else
-        echo "Error: failed to mount $DEVICE at $MOUNT_POINT."
-        exit 1
-    fi
+  rmdir -- "$MOUNT_POINT" 2>/dev/null || true
+  echo "Failed to mount $SOURCE." >&2
+  exit 1
 fi

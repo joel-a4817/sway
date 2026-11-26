@@ -17,10 +17,9 @@ update_playlist() {
     folder="$(basename "$src")"
     playlist="$music_dir/$folder.m3u"
     temporary="$(mktemp --tmpdir="$music_dir" ".${folder}.m3u.XXXXXX")"
-
     {
         echo '#EXTM3U'
-        find "$src" -maxdepth 1 -type f \
+        find "$src" -maxdepth 1 -type f ! -name '.*' \
             \( -iname '*.m4a' \
             -o -iname '*.aac' \
             -o -iname '*.mp3' \
@@ -34,7 +33,6 @@ update_playlist() {
             printf '%s/%s\n' "$folder" "$file"
         done
     } >"$temporary"
-
     mv -f -- "$temporary" "$playlist"
     printf 'Updated: %s\n' "$playlist"
 }
@@ -46,12 +44,12 @@ update_playlist() {
 }
 
 mapfile -d '' -t folders < <(
-    find "$music_dir" -mindepth 1 -maxdepth 1 -type d -print0 |
+    find "$music_dir" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -print0 |
         sort -z -V
 )
 
 if ((${#folders[@]} == 0)); then
-    echo "No playlist folders found in: $music_dir"
+    echo "No visible playlist folders found in: $music_dir"
     pause_before_close
     exit 0
 fi
