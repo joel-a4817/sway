@@ -19,6 +19,12 @@ RUNTIME_BACKUP_RETRY=int(os.environ.get("MINECRAFT_RUNTIME_BACKUP_RETRY","60"))
 RUNTIME_BACKUP_KEEP=int(os.environ.get("MINECRAFT_RUNTIME_BACKUP_KEEP","12"))
 TRANSITION_BACKUP_KEEP=int(os.environ.get("MINECRAFT_TRANSITION_BACKUP_KEEP","2"))
 GENERATION_KEEP=int(os.environ.get("MINECRAFT_GENERATION_KEEP","3"))
+PRESSURE_CHECK_INTERVAL=float(os.environ.get("MINECRAFT_PRESSURE_CHECK_INTERVAL","5"))
+PRESSURE_HOLD_SECONDS=float(os.environ.get("MINECRAFT_PRESSURE_HOLD_SECONDS","45"))
+MEMORY_AVAILABLE_FLOOR_BYTES=int(os.environ.get("MINECRAFT_MEMORY_AVAILABLE_FLOOR_BYTES",str(1024**3)))
+MEMORY_AVAILABLE_FLOOR_PERCENT=float(os.environ.get("MINECRAFT_MEMORY_AVAILABLE_FLOOR_PERCENT","8"))
+MEMORY_PSI_AVG10_LIMIT=float(os.environ.get("MINECRAFT_MEMORY_PSI_AVG10_LIMIT","20"))
+IO_PSI_AVG10_LIMIT=float(os.environ.get("MINECRAFT_IO_PSI_AVG10_LIMIT","35"))
 
 def run(cmd,check=True,capture=False,timeout=None):
     return subprocess.run(cmd,check=check,text=True,stdout=subprocess.PIPE if capture else None,stderr=subprocess.STDOUT if capture else None,timeout=timeout)
@@ -916,6 +922,52 @@ def stop_runtime_backup_loop(name):
     run([str(HOME/".config/sway/scripts/systemd-userctl.sh"),"stop",runtime_backup_watchdog_unit(name)],check=False,capture=True)
     run([str(HOME/".config/sway/scripts/systemd-userctl.sh"),"stop",runtime_backup_unit(name)],check=False,capture=True)
 
+def pressure_watchdog_unit(name):return f"minecraft-pressure-watchdog-{name}.service"
+def proc_meminfo():
+    values={}
+    for line in Path("/proc/meminfo").read_text().splitlines():
+        if ":" not in line:continue
+        key,value=line.split(":",1);parts=value.split()
+        if parts and parts[0].isdigit():values[key]=int(parts[0])*1024
+    return values
+def psi_avg10(resource):
+    try:
+        line=next(row for row in Path(f"/proc/pressure/{resource}").read_text().splitlines() if row.startswith("some "))
+        fields=dict(item.split("=",1) for item in line.split()[1:] if "=" in item)
+        return float(fields.get("avg10",0.0))
+    except (OSError,StopIteration,ValueError):return 0.0
+def system_pressure_reason():
+    memory=proc_meminfo();total=memory.get("MemTotal",0);available=memory.get("MemAvailable",0)
+    floor=max(MEMORY_AVAILABLE_FLOOR_BYTES,int(total*MEMORY_AVAILABLE_FLOOR_PERCENT/100.0))
+    memory_psi=psi_avg10("memory");io_psi=psi_avg10("io");reasons=[]
+    if total and available<floor:reasons.append(f"MemAvailable={available/1024**3:.2f} GiB below {floor/1024**3:.2f} GiB")
+    if memory_psi>=MEMORY_PSI_AVG10_LIMIT:reasons.append(f"memory PSI some avg10={memory_psi:.2f} >= {MEMORY_PSI_AVG10_LIMIT:.2f}")
+    if io_psi>=IO_PSI_AVG10_LIMIT and total and available<floor*2:reasons.append(f"I/O PSI some avg10={io_psi:.2f} with low memory")
+    return "; ".join(reasons)
+def pressure_watchdog(name):
+    since=None;last_reason=""
+    while active(name):
+        reason=system_pressure_reason();now=time.monotonic()
+        if reason:
+            if reason!=last_reason:
+                print(f"System pressure detected for {name}: {reason}",file=sys.stderr,flush=True);last_reason=reason
+            if since is None:since=now
+            if now-since>=PRESSURE_HOLD_SECONDS:
+                print(f"System pressure remained critical for {now-since:.0f}s; cleanly stopping and saving {name}.",file=sys.stderr,flush=True)
+                environment=os.environ.copy();environment["MINECRAFT_PRESSURE_STOP"]="1"
+                result=subprocess.run([sys.executable,"-B",str(Path(__file__).resolve()),"stop",name],check=False,text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,env=environment)
+                if result.stdout:print(result.stdout.rstrip(),file=sys.stderr,flush=True)
+                if result.returncode:raise RuntimeError(f"Pressure-triggered clean stop failed with exit {result.returncode}")
+                return
+        else:since=None;last_reason=""
+        time.sleep(max(1.0,PRESSURE_CHECK_INTERVAL))
+def start_pressure_watchdog(name):
+    stop_pressure_watchdog(name)
+    command=[str(HOME/".config/sway/scripts/systemd-userctl.sh"),"--systemd-run","--unit",pressure_watchdog_unit(name),"--property=Restart=on-failure","--property=RestartSec=5s","--collect",sys.executable,"-B",str(Path(__file__).resolve()),"pressure-watchdog",name]
+    result=run(command,check=False,capture=True)
+    if result.returncode:raise RuntimeError(result.stdout.strip() or "Could not start system-pressure watchdog")
+def stop_pressure_watchdog(name):
+    run([str(HOME/".config/sway/scripts/systemd-userctl.sh"),"stop",pressure_watchdog_unit(name)],check=False,capture=True)
 def generation_root(name):return ROOT/"generations"/name
 
 def generation_path(name,generation):return generation_root(name)/generation
@@ -1221,7 +1273,12 @@ def start(name=None):
         if name in local:print(f"{name} is already running locally.");return
         raise RuntimeError("Another local Minecraft server is already running: "+", ".join(local))
     if local_owner.exists():
-        raise RuntimeError(f"{name} stopped unexpectedly while this laptop still owns its runtime. The runtime and latest local backup were preserved. Choose Stop for {name} to publish a clean handover before starting it again.")
+        # Complete interrupted ownership automatically. A toggle must converge to
+        # the requested state without requiring a second manual Stop command.
+        print(f"{name} is stopped while this laptop still owns its runtime; completing the interrupted handover automatically.",flush=True)
+        stop(name)
+        if local_owner.exists():
+            raise RuntimeError(f"Automatic interrupted-handover recovery did not release ownership for {name}")
     if not peer_groups():raise RuntimeError(f"No peers configured in {PEERS}; refusing an uncoordinated start")
     # Resume the receiving folder before requesting a remote stop. Otherwise the
     # publisher and receiver can wait on one another forever.
@@ -1316,6 +1373,7 @@ def start(name=None):
                 wait_for_rcon_ready(name,runtime)
                 runtime_backup_once(name)
                 start_runtime_backup_loop(name)
+                start_pressure_watchdog(name)
                 CRITICAL=False
                 print(f"Live local runtime backup: protected immediately, then every {RUNTIME_BACKUP_INTERVAL//60} minutes.")
                 print("Syncthing is paused until the server is stopped and snapshotted.");return
@@ -1341,7 +1399,8 @@ def stop(name=None,remote=False):
         print(f"{name} is stopped but still has a local ownership record; finalizing its interrupted handover.")
     ensure_dependencies(name);CRITICAL=False
     LOCAL_STATE.mkdir(parents=True,exist_ok=True)
-    print("Stopping live-backup workers and waiting for any active backup to finish...")
+    print("Stopping pressure and live-backup workers, then waiting for any active backup to finish...")
+    if os.environ.get("MINECRAFT_PRESSURE_STOP")!="1":stop_pressure_watchdog(name)
     stop_runtime_backup_loop(name)
     with server_backup_lock(name).open("a+") as backup_lock:
       acquire_file_lock(backup_lock,f"the active {name} backup to finish")
@@ -1614,7 +1673,7 @@ def interactive_menu():
         print("Invalid selection.")
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument("action",nargs="?",default="menu",choices=["menu","toggle","start","stop","restore","status","logs","list","release-network","menu-status","prepare-sync","prune-storage","runtime-backup-once","runtime-backup-loop","runtime-backup-watchdog","verify-generation","verify-backup","syncthing-id","recover"]);p.add_argument("server",nargs="?");p.add_argument("--machine",action="store_true");p.add_argument("--remote",action="store_true");p.add_argument("--backup");p.add_argument("--generation");p.add_argument("--digest");p.add_argument("--owner");a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument("action",nargs="?",default="menu",choices=["menu","toggle","start","stop","restore","status","logs","list","release-network","menu-status","prepare-sync","prune-storage","runtime-backup-once","runtime-backup-loop","runtime-backup-watchdog","pressure-watchdog","verify-generation","verify-backup","syncthing-id","recover"]);p.add_argument("server",nargs="?");p.add_argument("--machine",action="store_true");p.add_argument("--remote",action="store_true");p.add_argument("--backup");p.add_argument("--generation");p.add_argument("--digest");p.add_argument("--owner");a=p.parse_args()
     for sig in (signal.SIGINT,signal.SIGTERM,signal.SIGHUP):signal.signal(sig,on_signal)
     if a.action=="menu":
         if not sys.stdin.isatty():raise RuntimeError("Interactive menu requires a terminal")
@@ -1629,6 +1688,8 @@ def main():
         name=select_server(a.server,"back up");runtime_backup_loop(name);return 0
     if a.action=="runtime-backup-watchdog":
         name=select_server(a.server,"watch backups for");runtime_backup_watchdog(name);return 0
+    if a.action=="pressure-watchdog":
+        name=select_server(a.server,"watch system pressure for");pressure_watchdog(name);return 0
     if a.action=="verify-generation":
         if not a.server or not a.generation or not a.digest:raise RuntimeError("verify-generation requires server, --generation and --digest")
         generation_verified(a.server,a.generation,a.digest);return 0
