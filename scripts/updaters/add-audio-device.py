@@ -62,8 +62,8 @@ HPCFS = (
 SAMPLE_RATE=96000
 ANALYSIS_LOW_HZ=20.0
 ANALYSIS_HIGH_HZ=20000.0
-CAMILLA_LIMITED_PLAYBACK_DEVICE='hw:Loopback,0,1'
-CAMILLA_PLAYBACK_FORMAT='S32_LE'
+CAMILLA_LIMITED_PLAYBACK_DEVICE='camilladsp_peak_limited'
+CAMILLA_DIRECT_PLAYBACK_DEVICE='hw:Loopback,0,1'
 CAMILLA_ROOT=AUDIO_FILTERS
 
 def profile_directory_name(value):
@@ -457,9 +457,13 @@ def commit_combined_wavs(exports):
     return root
 
 def devices_text(playback_device,chunksize=1024):
+    # The LADSPA limiter must receive floating-point samples. Sending S32_LE
+    # converts/clips the filtered signal before the limiter can act, which can
+    # turn over-level convolution output into full-scale screeching.
+    playback_format='FLOAT_LE' if playback_device==CAMILLA_LIMITED_PLAYBACK_DEVICE else 'S32_LE'
     return f'''devices:
   samplerate: {SAMPLE_RATE}
-  chunksize: 1024
+  chunksize: {int(chunksize)}
   capture:
     type: Alsa
     channels: 2
@@ -469,7 +473,7 @@ def devices_text(playback_device,chunksize=1024):
     type: Alsa
     channels: 2
     device: "{playback_device}"
-    format: {CAMILLA_PLAYBACK_FORMAT}
+    format: {playback_format}
 '''
 def filterless_text():
     return '# safe-volume-percent: 100.000000\n# peak-db: 0.000000000000\n# valid-frequency-low-hz: 20.000000000000\n# valid-frequency-high-hz: 20000.000000000000\n---\ntitle: "Filterless / Speakers"\ndescription: "Pass-through CamillaDSP profile with no filters"\n'+devices_text(CAMILLA_LIMITED_PLAYBACK_DEVICE)+'pipeline: []\n'

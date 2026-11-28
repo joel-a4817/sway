@@ -129,6 +129,9 @@ def configure_active_profile_runtime(chunksize,peak_limiter):
     devices=data.setdefault('devices',{});devices['chunksize']=chunksize
     playback=devices.setdefault('playback',{})
     playback['device']='camilladsp_peak_limited' if enabled else 'hw:Loopback,0,1'
+    # Keep the sample format coupled to the selected endpoint. The LADSPA
+    # limiter must see FLOAT_LE before conversion to the S32 loopback PCM.
+    playback['format']='FLOAT_LE' if enabled else 'S32_LE'
     atomic(path,yaml.safe_dump(data,sort_keys=False,allow_unicode=True,encoding=None))
     return {'profile':selected,'chunksize':chunksize,'peakLimiter':enabled}
 

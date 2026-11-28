@@ -84,10 +84,16 @@ def restore_selected_local_output():
     return route
 
 def start_bypass():
-    if alive(rpid(BYPASSPID)):
-        args=Path(f'/proc/{rpid(BYPASSPID)}/cmdline').read_bytes()
-        if b'camilladsp_input' in args:return
-        raise RuntimeError('No-filter bridge PID belongs to another process')
+    tracked=rpid(BYPASSPID)
+    endpoints=bridge_endpoint_pids()
+    if alive(tracked):
+        args=Path(f'/proc/{tracked}/cmdline').read_bytes()
+        groups={os.getpgid(pid) for pid in endpoints if alive(pid)}
+        if b'camilladsp_input' in args and groups=={tracked} and len(endpoints)==2:return
+        # A partial or duplicated bridge is unsafe even when its PID file looks valid.
+        stop_bypass()
+    elif endpoints:
+        stop_bypass()
     BYPASSPID.unlink(missing_ok=True)
     # ALSA can release the Loopback PCM shortly after the previous process
     # disappears. Retry only that transient startup failure; all other bridge
@@ -106,6 +112,11 @@ def start_bypass():
             time.sleep(.05)
         if proc.poll() is None:
             BYPASSPID.write_text(str(proc.pid)+'\n')
+            endpoints=bridge_endpoint_pids()
+            groups={os.getpgid(pid) for pid in endpoints if alive(pid)}
+            if len(endpoints)!=2 or groups!={proc.pid}:
+                stop_bypass()
+                raise RuntimeError('No-filter bridge ownership check failed; refused partial or duplicate pipeline')
             return
         detail=log_tail(log_path)[-1500:]
         stop_bypass()

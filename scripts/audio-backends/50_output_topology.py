@@ -1,14 +1,67 @@
+def _local_monitor_processes():
+    """Return every process belonging to a local CamillaDSP playback bridge.
+
+    PID files are only a fast path.  /proc reconciliation is authoritative so
+    a crashed/restarted controller cannot leave an untracked arecord pipeline.
+    """
+    found=[]
+    own=os.getpid()
+    for entry in Path('/proc').iterdir():
+        if not entry.name.isdigit():continue
+        pid=int(entry.name)
+        if pid==own:continue
+        try:
+            raw=(entry/'cmdline').read_bytes().replace(b'\0',b' ')
+        except (FileNotFoundError,PermissionError,ProcessLookupError,OSError):
+            continue
+        if (b'camilladsp_output_shared' in raw or b'camilladsp_pc_mono' in raw) and (b'arecord' in raw or b'pacat' in raw or b'bash' in raw):
+            found.append(pid)
+    return found
+
+def _signal_local_monitor_processes(sig):
+    pids=_local_monitor_processes();groups=set()
+    for pid in pids:
+        try:groups.add(os.getpgid(pid))
+        except (ProcessLookupError,PermissionError,OSError):pass
+    for pgid in groups:
+        if pgid==os.getpgrp():continue
+        try:os.killpg(pgid,sig)
+        except (ProcessLookupError,PermissionError,OSError):pass
+    for pid in pids:
+        try:os.kill(pid,sig)
+        except (ProcessLookupError,PermissionError,OSError):pass
+
 def stop_local_monitor():
+    # Kill the tracked group first, then reconcile /proc to catch stale groups
+    # left behind after PID-file replacement, controller crashes or old builds.
     pid=rpid(LOCALMONPID)
     if alive(pid):
         try:os.killpg(pid,signal.SIGTERM)
-        except OSError:pass
-        deadline=time.monotonic()+2
-        while alive(pid) and time.monotonic()<deadline:time.sleep(.05)
-        if alive(pid):
-            try:os.killpg(pid,signal.SIGKILL)
+        except OSError:
+            try:os.kill(pid,signal.SIGTERM)
             except OSError:pass
+    _signal_local_monitor_processes(signal.SIGTERM)
+    deadline=time.monotonic()+2.0
+    while _local_monitor_processes() and time.monotonic()<deadline:time.sleep(.05)
+    if _local_monitor_processes():
+        _signal_local_monitor_processes(signal.SIGKILL)
+        deadline=time.monotonic()+1.0
+        while _local_monitor_processes() and time.monotonic()<deadline:time.sleep(.02)
+    remaining=_local_monitor_processes()
     LOCALMONPID.unlink(missing_ok=True)
+    if remaining:
+        raise RuntimeError('Could not stop stale local playback bridge process(es): '+','.join(map(str,remaining)))
+
+def _serialized_local_monitor(function):
+    @wraps(function)
+    def wrapped(*args,**kwargs):
+        lockpath=STATE/'local-monitor.lock'
+        lockpath.parent.mkdir(parents=True,exist_ok=True)
+        with lockpath.open('a+b') as handle:
+            fcntl.flock(handle.fileno(),fcntl.LOCK_EX)
+            return function(*args,**kwargs)
+    return wrapped
+
 def _pipewire_json(kind):
     graph=pw_graph();nodes=pw_objects('Node',graph);devices={str(x['id']):x for x in pw_objects('Device',graph)}
     if kind=='cards':

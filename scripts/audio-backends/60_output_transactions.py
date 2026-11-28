@@ -439,19 +439,38 @@ def stop_external_delay():
     EXTERNALDELAYPID.unlink(missing_ok=True)
 
 
+def _both_distributor_processes():
+    found=[]
+    for entry in Path('/proc').iterdir():
+        if not entry.name.isdigit():continue
+        try:
+            if entry.stat().st_uid!=os.getuid():continue
+            raw=(entry/'cmdline').read_bytes().replace(b'\0',b' ')
+        except (OSError,ProcessLookupError,PermissionError):continue
+        if b'audio-split-distributor.py' in raw:found.append(int(entry.name))
+    return found
+
 def stop_both_distributor():
-    pid=rpid(SPLITPID)
-    if alive(pid):
-        try:os.killpg(pid,signal.SIGTERM)
-        except OSError:
-            try:os.kill(pid,signal.SIGTERM)
-            except OSError:pass
-        deadline=time.monotonic()+2.0
-        while alive(pid) and time.monotonic()<deadline:time.sleep(.03)
-        if alive(pid):
-            try:os.killpg(pid,signal.SIGKILL)
-            except OSError:pass
-    SPLITPID.unlink(missing_ok=True)
+    pids=set(_both_distributor_processes())
+    tracked=rpid(SPLITPID)
+    if alive(tracked):pids.add(tracked)
+    groups=set()
+    for pid in pids:
+        try:groups.add(os.getpgid(pid))
+        except OSError:pass
+    for pgid in groups:
+        if pgid==os.getpgrp():continue
+        try:os.killpg(pgid,signal.SIGTERM)
+        except OSError:pass
+    deadline=time.monotonic()+2.0
+    while _both_distributor_processes() and time.monotonic()<deadline:time.sleep(.03)
+    for pid in _both_distributor_processes():
+        try:os.killpg(os.getpgid(pid),signal.SIGKILL)
+        except OSError:pass
+    deadline=time.monotonic()+1.0
+    while _both_distributor_processes() and time.monotonic()<deadline:time.sleep(.02)
+    remaining=_both_distributor_processes();SPLITPID.unlink(missing_ok=True)
+    if remaining:raise RuntimeError('Could not stop stale both-output distributor: '+','.join(map(str,remaining)))
 
 def start_both_distributor():
     stop_both_distributor()
@@ -463,10 +482,16 @@ def start_both_distributor():
         offset=both_output_local_delay_ms();external_delay=abs(offset) if offset<0 else 0.0;pc_delay=offset if offset>0 else 0.0
         process=subprocess.Popen([exe('python3'),str(script),'--external-channel',external,'--external-delay-ms',str(external_delay),'--pc-delay-ms',str(pc_delay)],stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True,env=media_env())
     SPLITPID.write_text(str(process.pid)+'\n');time.sleep(.3)
+    distributors=_both_distributor_processes()
+    groups={os.getpgid(pid) for pid in distributors if alive(pid)}
+    if distributors!=[process.pid] or groups!={process.pid}:
+        stop_both_distributor()
+        raise RuntimeError('Both-output distributor ownership check failed; refused duplicate pipeline')
     if process.poll() is not None:
         SPLITPID.unlink(missing_ok=True);raise RuntimeError('Both-output distributor exited: '+log_tail(logpath)[-1500:])
     return process.pid
 
+@_serialized_local_monitor
 def start_local_monitor(route=None,resolved=False,persist=True):
     selected=route if resolved else choose_output_route(route)
     sink=selected['sink']
@@ -489,9 +514,15 @@ def start_local_monitor(route=None,resolved=False,persist=True):
     else:
         command='set -o pipefail; "$1" -q -D camilladsp_output_shared -r 96000 -f S32_LE -c 2 -t raw | "$2" --playback --device="$3" --rate=96000 --format=s32le --channels=2'
         args=[exe('bash'),'-c',command,'monitor',exe('arecord'),exe('pacat'),sink]
-    with (STATE/'local-monitor.log').open('ab',buffering=0) as log:
+    with (STATE/'local-monitor.log').open('wb',buffering=0) as log:
         process=subprocess.Popen(args,stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True,env=media_env())
     LOCALMONPID.write_text(str(process.pid)+'\n')
+    time.sleep(.05)
+    bridges=_local_monitor_processes()
+    bridge_groups={os.getpgid(pid) for pid in bridges if alive(pid)}
+    if bridge_groups!={process.pid}:
+        stop_local_monitor()
+        raise RuntimeError('Local playback bridge ownership check failed; refused duplicate pipeline')
     deadline=time.monotonic()+5
     while time.monotonic()<deadline:
         if process.poll() is not None:break
